@@ -46,7 +46,7 @@ const CF_IMAGE_MODELS = [
 const IMAGE_PROVIDERS = [
   { id: 'bing', label: 'Bing Image Creator', note: 'Free · best quality · Chrome required' },
   { id: 'cloudflare', label: 'Cloudflare Flux', note: 'Free 10k neurons/day · needs free token' },
-  { id: 'huggingface', label: 'Hugging Face Flux', note: 'Free ZeroGPU Space · needs free HF token' },
+  { id: 'huggingface', label: 'Hugging Face Flux', note: 'Free ZeroGPU Space · token optional (5 min/day)' },
 ];
 const VIDEO_PROVIDERS = [
   { id: 'ltx', label: 'LTX-Video · GitHub/HF', note: 'Free open-source model · no card' },
