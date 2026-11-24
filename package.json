@@ -1,0 +1,14 @@
+{
+  "name": "nova-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Nova — a Grok-style AI chat app with a zero-dependency Node backend (NVIDIA NIM / OpenAI-compatible).",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --env-file-if-exists=.env --watch server.js"
+  },
+  "engines": {
+    "node": ">=20.6"
+  }
+}

@@ -1,0 +1,12 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Runtime data: browser profile, schedules/bot keys, generated media, screenshots
+workspace/
+
+# Logs and OS junk
+*.log
+.DS_Store
+Thumbs.db
