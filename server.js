@@ -1651,18 +1651,11 @@ async function handleMediaCredentials(req, res) {
   }
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed.' });
 
-  if (Object.prototype.hasOwnProperty.call(body, 'cloudflareAccount')) {
-    cloudflareAccount = String(body.cloudflareAccount || '').trim().slice(0, 120);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'cloudflareToken')) {
-    cloudflareToken = String(body.cloudflareToken || '').trim().slice(0, 300);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'hfToken')) {
-    hfToken = String(body.hfToken || '').trim().slice(0, 300);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'key')) {
-    mediaKey = String(body.key || '').trim().slice(0, 300);
-  }
+  // Empty values mean "no credential in this tab" — never erase a token synced by another tab.
+  if (body.cloudflareAccount) cloudflareAccount = String(body.cloudflareAccount).trim().slice(0, 120);
+  if (body.cloudflareToken) cloudflareToken = String(body.cloudflareToken).trim().slice(0, 300);
+  if (body.hfToken) hfToken = String(body.hfToken).trim().slice(0, 300);
+  if (body.key) mediaKey = String(body.key).trim().slice(0, 300);
   return sendJson(res, 200, { ok: true, ...mediaProviderState() });
 }
 
