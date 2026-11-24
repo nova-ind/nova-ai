@@ -360,6 +360,23 @@
             </select>
           </div>
         </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="imageRatioSelect">Image ratio</label>
+            <select id="imageRatioSelect">
+              <option value="16:9">16:9 · wide</option>
+              <option value="1:1">1:1 · square</option>
+              <option value="9:16">9:16 · portrait</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="videoRatioSelect">Video ratio</label>
+            <select id="videoRatioSelect">
+              <option value="16:9">16:9 · normal video</option>
+              <option value="9:16">9:16 · reels / shorts</option>
+            </select>
+          </div>
+        </div>
         <p class="help">Auto image order: Bing → Cloudflare Flux → Hugging Face Flux. Pollinations use nahi hota. Video hamesha free LTX-Video. Keys browser localStorage me rehti hain, server sirf memory me rakhta hai.</p>
 
         <div class="field-row">
@@ -406,13 +423,6 @@
         </div>
 
         <div class="field-row">
-          <div class="field">
-            <label for="videoRatioSelect">Video ratio</label>
-            <select id="videoRatioSelect">
-              <option value="16:9" selected>16:9 · normal video</option>
-              <option value="9:16">9:16 · reels / shorts</option>
-            </select>
-          </div>
           <div class="field">
             <label for="videoDurationSelect">Scene length</label>
             <select id="videoDurationSelect">

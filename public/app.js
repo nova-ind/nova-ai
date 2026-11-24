@@ -72,6 +72,7 @@ const els = {
   apiKeyInput: $('apiKeyInput'),
   apiKeyProvider: $('apiKeyProvider'),
   imageProviderSelect: $('imageProviderSelect'),
+  imageRatioSelect: $('imageRatioSelect'),
   videoProviderSelect: $('videoProviderSelect'),
   cfAccountInput: $('cfAccountInput'),
   cfTokenInput: $('cfTokenInput'),
@@ -146,6 +147,7 @@ const DEFAULT_SETTINGS = {
   mediaModels: { image: 'flux', video: 'kwaivgi/kling-v4.0-flash' },
   mediaCredentials: { cloudflareAccount: '', cloudflareToken: '', hfToken: '' },
   imageProvider: 'auto',
+  imageRatio: '16:9',
   videoProvider: 'auto',
   provider: 'nvidia',
   baseUrl: PROVIDERS.nvidia.base,
@@ -1525,7 +1527,8 @@ async function generateImage(chat, prompt) {
   const provider = settings.imageProvider || DEFAULT_SETTINGS.imageProvider;
   const url =
     `/api/imagine?prompt=${encodeURIComponent(prompt)}&seed=${seed}` +
-    `&width=1024&height=1024&model=${encodeURIComponent(settings.mediaModels.image || 'flux')}` +
+    `&ratio=${encodeURIComponent(settings.imageRatio || '16:9')}` +
+    `&model=${encodeURIComponent(settings.mediaModels.image || 'flux')}` +
     `&provider=${encodeURIComponent(provider)}`;
   const assistant = {
     role: 'assistant',
@@ -2475,6 +2478,7 @@ function openSettings() {
   els.apiKeyProvider.textContent = String(settings.provider || 'nvidia').toUpperCase();
   els.apiKeyInput.value = settings.apiKeys?.[settings.provider] || '';
   els.imageProviderSelect.value = settings.imageProvider || DEFAULT_SETTINGS.imageProvider;
+  els.imageRatioSelect.value = settings.imageRatio || DEFAULT_SETTINGS.imageRatio;
   els.videoProviderSelect.value = settings.videoProvider || DEFAULT_SETTINGS.videoProvider;
   els.cfAccountInput.value = settings.mediaCredentials?.cloudflareAccount || '';
   els.cfTokenInput.value = settings.mediaCredentials?.cloudflareToken || '';
@@ -3181,6 +3185,7 @@ els.saveSettings.addEventListener('click', async () => {
   settings.provider = els.providerSelect.value;
   settings.apiKeys[settings.provider] = els.apiKeyInput.value.trim();
   settings.imageProvider = els.imageProviderSelect.value || DEFAULT_SETTINGS.imageProvider;
+  settings.imageRatio = els.imageRatioSelect.value || DEFAULT_SETTINGS.imageRatio;
   settings.videoProvider = els.videoProviderSelect.value || DEFAULT_SETTINGS.videoProvider;
   settings.mediaCredentials = {
     cloudflareAccount: els.cfAccountInput.value.trim(),

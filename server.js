@@ -500,10 +500,13 @@ async function handleImagine(req, res, url) {
   const style = IMAGE_STYLES[url.searchParams.get('style')] ?? '';
   const model = (url.searchParams.get('model') || DEFAULT_IMAGE_MODEL).trim().slice(0, 120);
   const provider = (url.searchParams.get('provider') || DEFAULT_IMAGE_PROVIDER).trim().slice(0, 40);
+  const ratio = url.searchParams.get('ratio') === '9:16' || url.searchParams.get('ratio') === '1:1'
+    ? url.searchParams.get('ratio')
+    : '16:9';
   const finalPrompt = `${prompt}${style}`;
 
   try {
-    const { bytes } = await generateImageSmart(finalPrompt, { provider, model });
+    const { bytes } = await generateImageSmart(finalPrompt, { provider, model, ratio });
     res.writeHead(200, {
       'content-type': imageContentType(bytes),
       'content-length': bytes.length,
@@ -647,7 +650,7 @@ async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'au
   if (kind === 'image') {
     if (provider === 'bing') return generateBingImage(prompt);
     if (provider === 'cloudflare') return generateCloudflareImage(prompt, model);
-    if (provider === 'huggingface') return generateHuggingFaceImage(prompt, model);
+    if (provider === 'huggingface') return generateHuggingFaceImage(prompt, model, ratio);
     if (provider === 'pollinations') {
       throw new Error('Pollinations band hai — app Bing/Cloudflare/Hugging Face free providers use karti hai.');
     }
@@ -681,7 +684,14 @@ async function generateImageSmart(prompt, options = {}) {
   let lastError = null;
   for (const provider of order) {
     try {
-      const bytes = await fetchMediaBytes('image', prompt, options.model || DEFAULT_IMAGE_MODEL, 5, provider);
+      const bytes = await fetchMediaBytes(
+        'image',
+        prompt,
+        options.model || DEFAULT_IMAGE_MODEL,
+        5,
+        provider,
+        options.ratio || '16:9',
+      );
       return { bytes, provider };
     } catch (err) {
       lastError = err;
@@ -1443,16 +1453,18 @@ async function fetchHfImageFile(url, space) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function callHfFluxSpace(space, prompt) {
+async function callHfFluxSpace(space, prompt, width = 1024, height = 1024) {
   const headers = { 'content-type': 'application/json' };
   if (hfToken) headers.authorization = `Bearer ${hfToken}`;
+  const w = Math.max(256, Math.min(2048, Number(width) || 1024));
+  const h = Math.max(256, Math.min(2048, Number(height) || 1024));
 
   const data = [
     String(prompt || '').slice(0, 2048),
     0,
     true,
-    1024,
-    1024,
+    w,
+    h,
     4,
   ];
 
@@ -1512,15 +1524,17 @@ async function callHfFluxSpace(space, prompt) {
   throw new Error(`HF Flux queue busy${errorDetail ? ` (${errorDetail.slice(0, 160)})` : ' (null)'}.`);
 }
 
-async function generateHuggingFaceImage(prompt) {
+async function generateHuggingFaceImage(prompt, model, ratio = '16:9') {
   if (!hfToken) {
     throw new Error('Hugging Face image ke liye Settings → HF token chahiye (free token, no card).');
   }
+  const size = ratio === '9:16' ? [768, 1344] : ratio === '1:1' ? [1024, 1024] : [1344, 768];
+  const [width, height] = size;
   let lastError = null;
   for (const space of HF_FLUX_SPACES) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        return await callHfFluxSpace(space, prompt);
+        return await callHfFluxSpace(space, prompt, width, height);
       } catch (err) {
         lastError = err;
         if (attempt === 0) await sleep(2500);
