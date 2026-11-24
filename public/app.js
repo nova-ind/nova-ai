@@ -1609,7 +1609,10 @@ async function checkHfBrowserQuota(token) {
     return;
   }
   const error = hfQuotaError(data);
-  if (error) throw error;
+  if (error) {
+    error.isHfQuota = true;
+    throw error;
+  }
 }
 
 async function generateHuggingFaceImageBrowser(prompt, ratio = '16:9') {
@@ -1656,7 +1659,7 @@ async function generateImage(chat, prompt) {
       renderMessages();
       return;
     } catch (err) {
-      if (provider === 'huggingface') {
+      if (provider === 'huggingface' || err?.isHfQuota) {
         assistant.status = 'error';
         assistant.error = err.message;
         touch(chat);
