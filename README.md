@@ -39,7 +39,7 @@ App ko online chalane ka free tarika:
 https://nova-ai-9gbh.onrender.com/api/health
 ```
 
-> Render par Chrome/CDP browser profile nahi hota. Isliye `browser_open`, Bing Image Creator UI, Gmail/YouTube login jaise tools wahan kaam nahi karenge. Chat, web search, Cloudflare Flux / Hugging Face Flux images aur LTX video chalenge. Pollinations intentionally disabled hai. In sab tools ke saath poori app chahiye to PC par `npm start` + Cloudflare Tunnel/ngrok use karein.
+> Render par Chrome/CDP browser profile nahi hota. Isliye `browser_open`, Bing Image Creator UI, Gmail/YouTube login jaise tools wahan kaam nahi karenge. Chat, web search, browser-side Hugging Face Flux images aur LTX video chalenge; Cloudflare Flux tab token ho to chalega. Pollinations intentionally disabled hai. In sab tools ke saath poori app chahiye to PC par `npm start` + Cloudflare Tunnel/ngrok use karein.
 
 ### GitHub Pages (sirf static landing page, optional)
 
@@ -115,10 +115,10 @@ G:\Nova Bot
 - Purane `meta/llama-3.3-70b-instruct` jaise IDs NVIDIA par EOL ho chuke hain (410). App ab current IDs use karta hai: `minimaxai/minimax-m3.1-flash`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `google/gemma-4-31b-it`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`.
 - Live model list `/api/models` se aati hai — key + base URL Settings me ho to list auto-refresh hoti hai.
 - Web search free Bing HTML + Wikipedia fallback use karta hai — kabhi kabhi provider block kar sakta hai.
-- **Imagine / image provider:** Default `auto` hai — pehle **Bing Image Creator** (free, best quality; Chrome/Edge + Microsoft sign-in recommended for full credits), phir **Cloudflare Flux** (free 10k neurons/day; free token zaroori), phir **Hugging Face Flux** (free tier; free HF token zaroori). **Pollinations kabhi use nahi hota** — user ne poor quality ki wajah se band kiya hai. Bing official API nahi hai; app existing CDP browser profile me Bing UI automate karta hai. Settings me provider manually bhi chun sakte hain.
+- **Imagine / image provider:** Default `auto` hai — local PC par pehle **Bing Image Creator** (free, best quality; Chrome/Edge + Microsoft sign-in recommended), phir **Cloudflare Flux**, phir **Hugging Face Flux**. Live site par auto seedhe browser se **HF Flux ZeroGPU Space** use karta hai (token browser localStorage se), fallback server providers par hai. Image ratio 16:9 / 1:1 / 9:16 Settings me chun sakte hain. **Pollinations kabhi use nahi hota**. Bing official API nahi hai; app existing CDP browser profile me Bing UI automate karta hai.
 - **Video provider:** Default **LTX-Video** hai — open-source model GitHub/Hugging Face Space par free chalta hai, koi key/card nahi. Optional free HF token queue badhata hai. Direct video mode aur Video Studio dono LTX use karte hain.
 - **Cloudflare free tier:** Account ID + Workers AI API token Settings ya `.env` me daalo. Flux models: `flux-1-schnell` (sasta/tezz), `flux-2-klein-4b`, `flux-2-klein-9b`, `flux-2-dev` (better quality, zyada neurons). 10,000 neurons/day free hain.
-- **Hugging Face free tier:** Settings me free HF token daalo — isse `FLUX.1-schnell` images aur LTX-Video dono free tier par chalte hain. Token Sirf browser localStorage/server memory me rehta hai.
+- **Hugging Face free tier:** Free HF token optional hai — `FLUX.1-schnell` ZeroGPU Space se image banti hai. Free account ko ~5 min/day **ya 8 runs/day** quota milta hai; app pehle `/api/spaces/zero-gpu/quota` check karke exact reset time batati hai aur quota khatam hone par bar-bar retry nahi karti. Token browser localStorage (aur server memory) me rehta hai. Bina token public 2 min/day pool milega.
 - Browser profile (`workspace/.browser-profile`) me Microsoft account se sign-in kar lo to Bing ke free creations zyada milte hain aur captcha/guest limit se bachav hota hai.
 - Search bar chhote screen par topbar se open hota hai (`Ctrl+K`); sidebar collapse hone par bhi toggle/search button topbar me rehta hai. `Esc` search clear karta hai ya mobile sidebar band karta hai.
 - Agent mode default ON hai. Simple chat chahiye to ⚡ Agent button band kar do.
