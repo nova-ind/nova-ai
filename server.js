@@ -29,7 +29,10 @@ let cloudflareToken = (process.env.CLOUDFLARE_API_TOKEN || '').trim();
 let hfToken = (process.env.HF_TOKEN || '').trim();
 const HF_IMAGE_MODELS = [
   'black-forest-labs/FLUX.1-schnell',
-  'stabilityai/stable-diffusion-xl-base-1.0',
+];
+const HF_FLUX_SPACES = [
+  'https://black-forest-labs-flux-1-schnell.hf.space',
+  'https://evalstate-flux1-schnell.hf.space',
 ];
 const BING_SUPPORTED = process.platform === 'win32'; // Chrome/CDP profile sirf local Windows par hota hai
 const DEFAULT_IMAGE_PROVIDER = process.env.DEFAULT_IMAGE_PROVIDER || (BING_SUPPORTED ? 'bing' : 'auto');
@@ -1405,38 +1408,128 @@ async function generateCloudflareImage(prompt, model) {
   return Buffer.from(raw.replace(/^data:image\/[^;]+;base64,/i, ''), 'base64');
 }
 
-async function generateHuggingFaceImage(prompt, model) {
+async function resolveHfImageRef(ref, space) {
+  if (typeof ref === 'string') {
+    const trimmed = ref.trim();
+    if (/^data:image\/[^;]+;base64,/i.test(trimmed)) {
+      return Buffer.from(trimmed.split(',')[1] || '', 'base64');
+    }
+    if (/^[A-Za-z0-9+/=]{500,}$/.test(trimmed)) {
+      return Buffer.from(trimmed, 'base64');
+    }
+    return fetchHfImageFile(trimmed, space);
+  }
+  if (!ref || typeof ref !== 'object') throw new Error('HF Flux ne image return nahi ki.');
+  if (ref.url) return resolveHfImageRef(String(ref.url), space);
+  if (ref.path) return fetchHfImageFile(String(ref.path), space);
+  throw new Error('HF Flux ne image return nahi ki.');
+}
+
+async function fetchHfImageFile(url, space) {
+  const target = /^https?:\/\//i.test(url)
+    ? url
+    : url.startsWith('/')
+      ? `${space}${url}`
+      : `${space}/gradio_api/file=${url}`;
+  const headers = {};
+  if (hfToken && /(^|\.)huggingface\.co$|(^|\.)hf\.space$/i.test(new URL(target).hostname)) {
+    headers.authorization = `Bearer ${hfToken}`;
+  }
+  const response = await fetch(target, {
+    headers,
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok) throw new Error(`HF image download failed (${response.status}).`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
+async function callHfFluxSpace(space, prompt) {
+  const headers = { 'content-type': 'application/json' };
+  if (hfToken) headers.authorization = `Bearer ${hfToken}`;
+
+  const data = [
+    String(prompt || '').slice(0, 2048),
+    0,
+    true,
+    1024,
+    1024,
+    4,
+  ];
+
+  const submitted = await fetch(`${space}/gradio_api/call/infer`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ data }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const submittedText = await submitted.text().catch(() => '');
+  if (!submitted.ok) {
+    throw new Error(`HF Flux Space unavailable (${submitted.status}). ${submittedText.slice(0, 160)}`);
+  }
+  let eventId = '';
+  try {
+    eventId = JSON.parse(submittedText).event_id || '';
+  } catch {
+    /* ignore malformed submit response */
+  }
+  if (!eventId) throw new Error('HF Flux ne job id nahi diya.');
+
+  const stream = await fetch(`${space}/gradio_api/call/infer/${eventId}`, {
+    headers,
+    signal: AbortSignal.timeout(6 * 60_000),
+  });
+  if (!stream.ok || !stream.body) throw new Error(`HF Flux stream failed (${stream.status}).`);
+  const raw = await stream.text();
+
+  let imageRef = null;
+  let errorDetail = '';
+  for (const block of raw.split('\n\n')) {
+    const event = /^event:\s*(\S+)/m.exec(block);
+    const payload = /^data:\s*(.+)$/m.exec(block);
+    if (!event || !payload) continue;
+    if (event[1] === 'error') {
+      try {
+        const parsed = JSON.parse(payload[1]);
+        errorDetail = typeof parsed === 'string' ? parsed : parsed?.detail || parsed?.message || '';
+      } catch {
+        errorDetail = payload[1] === 'null' ? '' : payload[1].slice(0, 200);
+      }
+    }
+    if (event[1] === 'complete') {
+      try {
+        const parsed = JSON.parse(payload[1]);
+        if (parsed && parsed[0]) imageRef = parsed[0];
+      } catch {
+        /* ignore malformed complete block */
+      }
+    }
+  }
+
+  if (imageRef) return resolveHfImageRef(imageRef, space);
+  if (/quota|rate limit|limit reached|unauthorized|invalid token/i.test(errorDetail)) {
+    throw new Error(`HF Flux: ${errorDetail.slice(0, 220)}`);
+  }
+  throw new Error(`HF Flux queue busy${errorDetail ? ` (${errorDetail.slice(0, 160)})` : ' (null)'}.`);
+}
+
+async function generateHuggingFaceImage(prompt) {
   if (!hfToken) {
     throw new Error('Hugging Face image ke liye Settings → HF token chahiye (free token, no card).');
   }
-  const useModel = HF_IMAGE_MODELS.includes(model) ? model : HF_IMAGE_MODELS[0];
-  const response = await fetch(`https://api-inference.huggingface.co/models/${useModel}`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${hfToken}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      inputs: String(prompt || '').slice(0, 2048),
-      options: { wait_for_model: true },
-    }),
-    signal: AbortSignal.timeout(180_000),
-  });
-  if (!response.ok) {
-    const detail = (await response.text().catch(() => '')).slice(0, 300);
-    const hint = response.status === 401
-      ? 'HF token invalid hai ya read permission nahi hai.'
-      : response.status === 503
-        ? 'HF free model abhi load ho raha hai — thodi der baad dobara try karein.'
-        : `Hugging Face image failed (${response.status}).`;
-    throw new Error(`${hint} ${detail}`);
+  let lastError = null;
+  for (const space of HF_FLUX_SPACES) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await callHfFluxSpace(space, prompt);
+      } catch (err) {
+        lastError = err;
+        if (attempt === 0) await sleep(2500);
+      }
+    }
   }
-  const contentType = response.headers.get('content-type') || '';
-  if (!contentType.includes('image/')) {
-    const detail = (await response.text().catch(() => '')).slice(0, 300);
-    throw new Error(`Hugging Face ne image return nahi ki. ${detail}`);
-  }
-  return Buffer.from(await response.arrayBuffer());
+  throw new Error(
+    `Hugging Face Flux abhi image nahi bana pa raha (dono free spaces busy). ${lastError?.message || ''}`.trim(),
+  );
 }
 
 async function generateLtxVideo(prompt, options = {}) {
