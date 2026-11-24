@@ -1522,19 +1522,95 @@ async function runAgent(chat) {
   }
 }
 
+const HF_BROWSER_SPACES = [
+  'https://black-forest-labs-flux-1-schnell.hf.space',
+  'https://evalstate-flux1-schnell.hf.space',
+];
+
+async function fetchHfBrowserFile(ref, space, token) {
+  let target = '';
+  if (typeof ref === 'string') {
+    target = /^https?:\/\//i.test(ref) ? ref : ref.startsWith('/') ? `${space}${ref}` : `${space}/gradio_api/file=${ref}`;
+  } else if (ref?.url) {
+    target = String(ref.url);
+  } else if (ref?.path) {
+    target = String(ref.path).startsWith('/') ? `${space}${ref.path}` : `${space}/gradio_api/file=${ref.path}`;
+  } else {
+    throw new Error('HF Flux ne image return nahi ki.');
+  }
+  const useToken = token && /(^|\.)huggingface\.co$|(^|\.)hf\.space$/i.test(new URL(target).hostname);
+  const headers = useToken ? { authorization: `Bearer ${token}` } : {};
+  let response = await fetch(target, { headers });
+  if (!response.ok && useToken) response = await fetch(target);
+  if (!response.ok) throw new Error(`HF image download failed (${response.status}).`);
+  return URL.createObjectURL(await response.blob());
+}
+
+async function callHfBrowserSpace(space, prompt, width, height, token) {
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const submitted = await fetch(`${space}/gradio_api/call/infer`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ data: [String(prompt || '').slice(0, 2048), 0, true, width, height, 4] }),
+  });
+  const submittedText = await submitted.text().catch(() => '');
+  if (!submitted.ok) throw new Error(`HF Flux Space unavailable (${submitted.status}).`);
+  let eventId = '';
+  try {
+    eventId = JSON.parse(submittedText).event_id || '';
+  } catch {
+    /* ignore */
+  }
+  if (!eventId) throw new Error('HF Flux ne job id nahi diya.');
+  const stream = await fetch(`${space}/gradio_api/call/infer/${eventId}`, { headers });
+  const raw = await stream.text();
+  let imageRef = null;
+  let errorDetail = '';
+  for (const block of raw.split('\n\n')) {
+    const event = /^event:\s*(\S+)/m.exec(block);
+    const payload = /^data:\s*(.+)$/m.exec(block);
+    if (!event || !payload) continue;
+    if (event[1] === 'complete') {
+      try {
+        const parsed = JSON.parse(payload[1]);
+        if (parsed && parsed[0]) imageRef = parsed[0];
+      } catch {
+        /* ignore */
+      }
+    }
+    if (event[1] === 'error') errorDetail = payload[1] === 'null' ? '' : payload[1].slice(0, 120);
+  }
+  if (imageRef) return fetchHfBrowserFile(imageRef, space, token);
+  throw new Error(`HF Flux queue busy${errorDetail ? ` (${errorDetail})` : ' (null)'}.`);
+}
+
+async function generateHuggingFaceImageBrowser(prompt, ratio = '16:9') {
+  const size = ratio === '9:16' ? [768, 1344] : ratio === '1:1' ? [1024, 1024] : [1344, 768];
+  const [width, height] = size;
+  const token = String(settings.mediaCredentials?.hfToken || '').trim();
+  const tokens = token ? [token, ''] : [''];
+  let lastError = null;
+  for (const space of HF_BROWSER_SPACES) {
+    for (const useToken of tokens) {
+      try {
+        return await callHfBrowserSpace(space, prompt, width, height, useToken);
+      } catch (err) {
+        lastError = err;
+      }
+    }
+  }
+  throw new Error(`Hugging Face Flux abhi image nahi bana pa raha. ${lastError?.message || ''}`.trim());
+}
+
 async function generateImage(chat, prompt) {
   const seed = Math.floor(Math.random() * 1_000_000);
   const provider = settings.imageProvider || DEFAULT_SETTINGS.imageProvider;
-  const url =
-    `/api/imagine?prompt=${encodeURIComponent(prompt)}&seed=${seed}` +
-    `&ratio=${encodeURIComponent(settings.imageRatio || '16:9')}` +
-    `&model=${encodeURIComponent(settings.mediaModels.image || 'flux')}` +
-    `&provider=${encodeURIComponent(provider)}`;
   const assistant = {
     role: 'assistant',
     kind: 'image',
     prompt,
-    url,
+    url: '',
     seed,
     status: 'loading',
     ts: Date.now(),
@@ -1544,6 +1620,34 @@ async function generateImage(chat, prompt) {
   renderMessages();
   scrollToBottom();
   syncComposer();
+
+  const isLocal = /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
+  const tryBrowserHf = provider === 'huggingface' || (provider === 'auto' && !isLocal);
+  if (tryBrowserHf) {
+    try {
+      assistant.url = await generateHuggingFaceImageBrowser(prompt, settings.imageRatio || '16:9');
+      assistant.provider = 'huggingface';
+      touch(chat);
+      renderMessages();
+      return;
+    } catch (err) {
+      if (provider === 'huggingface') {
+        assistant.status = 'error';
+        assistant.error = err.message;
+        touch(chat);
+        renderMessages();
+        return;
+      }
+    }
+  }
+
+  assistant.url =
+    `/api/imagine?prompt=${encodeURIComponent(prompt)}&seed=${seed}` +
+    `&ratio=${encodeURIComponent(settings.imageRatio || '16:9')}` +
+    `&model=${encodeURIComponent(settings.mediaModels.image || 'flux')}` +
+    `&provider=${encodeURIComponent(provider)}`;
+  touch(chat);
+  renderMessages();
 }
 
 /* ------------------------------ video studio ------------------------------- */
