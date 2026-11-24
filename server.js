@@ -1418,7 +1418,7 @@ async function generateCloudflareImage(prompt, model) {
   return Buffer.from(raw.replace(/^data:image\/[^;]+;base64,/i, ''), 'base64');
 }
 
-async function resolveHfImageRef(ref, space) {
+async function resolveHfImageRef(ref, space, useAuth = true) {
   if (typeof ref === 'string') {
     const trimmed = ref.trim();
     if (/^data:image\/[^;]+;base64,/i.test(trimmed)) {
@@ -1427,35 +1427,38 @@ async function resolveHfImageRef(ref, space) {
     if (/^[A-Za-z0-9+/=]{500,}$/.test(trimmed)) {
       return Buffer.from(trimmed, 'base64');
     }
-    return fetchHfImageFile(trimmed, space);
+    return fetchHfImageFile(trimmed, space, useAuth);
   }
   if (!ref || typeof ref !== 'object') throw new Error('HF Flux ne image return nahi ki.');
-  if (ref.url) return resolveHfImageRef(String(ref.url), space);
-  if (ref.path) return fetchHfImageFile(String(ref.path), space);
+  if (ref.url) return resolveHfImageRef(String(ref.url), space, useAuth);
+  if (ref.path) return fetchHfImageFile(String(ref.path), space, useAuth);
   throw new Error('HF Flux ne image return nahi ki.');
 }
 
-async function fetchHfImageFile(url, space) {
+async function fetchHfImageFile(url, space, useAuth = true) {
   const target = /^https?:\/\//i.test(url)
     ? url
     : url.startsWith('/')
       ? `${space}${url}`
       : `${space}/gradio_api/file=${url}`;
-  const headers = {};
-  if (hfToken && /(^|\.)huggingface\.co$|(^|\.)hf\.space$/i.test(new URL(target).hostname)) {
-    headers.authorization = `Bearer ${hfToken}`;
-  }
+  const withAuth = useAuth && hfToken && /(^|\.)huggingface\.co$|(^|\.)hf\.space$/i.test(new URL(target).hostname);
+  const headers = withAuth ? { authorization: `Bearer ${hfToken}` } : {};
   const response = await fetch(target, {
     headers,
     signal: AbortSignal.timeout(120_000),
   });
+  if (!response.ok && withAuth) {
+    const retry = await fetch(target, { signal: AbortSignal.timeout(120_000) });
+    if (retry.ok) return Buffer.from(await retry.arrayBuffer());
+    throw new Error(`HF image download failed (${response.status}/${retry.status}).`);
+  }
   if (!response.ok) throw new Error(`HF image download failed (${response.status}).`);
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function callHfFluxSpace(space, prompt, width = 1024, height = 1024) {
+async function callHfFluxSpace(space, prompt, width = 1024, height = 1024, useAuth = true) {
   const headers = { 'content-type': 'application/json' };
-  if (hfToken) headers.authorization = `Bearer ${hfToken}`;
+  if (useAuth && hfToken) headers.authorization = `Bearer ${hfToken}`;
   const w = Math.max(256, Math.min(2048, Number(width) || 1024));
   const h = Math.max(256, Math.min(2048, Number(height) || 1024));
 
@@ -1517,27 +1520,29 @@ async function callHfFluxSpace(space, prompt, width = 1024, height = 1024) {
     }
   }
 
-  if (imageRef) return resolveHfImageRef(imageRef, space);
+  if (imageRef) return resolveHfImageRef(imageRef, space, useAuth);
   if (/quota|rate limit|limit reached|unauthorized|invalid token/i.test(errorDetail)) {
     throw new Error(`HF Flux: ${errorDetail.slice(0, 220)}`);
   }
-  throw new Error(`HF Flux queue busy${errorDetail ? ` (${errorDetail.slice(0, 160)})` : ' (null)'}.`);
+  const hint = errorDetail || raw.replace(/\s+/g, ' ').trim().slice(-120);
+  throw new Error(`HF Flux queue busy${hint ? ` (${hint.slice(0, 160)})` : ' (null)'}.`);
 }
 
 async function generateHuggingFaceImage(prompt, model, ratio = '16:9') {
-  if (!hfToken) {
-    throw new Error('Hugging Face image ke liye Settings → HF token chahiye (free token, no card).');
-  }
   const size = ratio === '9:16' ? [768, 1344] : ratio === '1:1' ? [1024, 1024] : [1344, 768];
   const [width, height] = size;
+  // HF token Optional hai: valid token = 5 min/day quota, warna public 2 min/day pool.
+  const authModes = hfToken ? [true, false] : [false];
   let lastError = null;
   for (const space of HF_FLUX_SPACES) {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        return await callHfFluxSpace(space, prompt, width, height);
-      } catch (err) {
-        lastError = err;
-        if (attempt === 0) await sleep(2500);
+    for (const useAuth of authModes) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          return await callHfFluxSpace(space, prompt, width, height, useAuth);
+        } catch (err) {
+          lastError = err;
+          if (attempt === 0) await sleep(2000);
+        }
       }
     }
   }
