@@ -692,18 +692,23 @@ async function generateVideoSmart(prompt, options = {}) {
   const order = requested === 'auto' ? ['ltx'] : [requested];
   let lastError = null;
   for (const provider of order) {
-    try {
-      const bytes = await fetchMediaBytes(
-        'video',
-        prompt,
-        options.model || DEFAULT_VIDEO_MODEL,
-        options.duration || 5,
-        provider,
-        options.ratio || '16:9',
-      );
-      return { bytes, provider };
-    } catch (err) {
-      lastError = err;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const bytes = await fetchMediaBytes(
+          'video',
+          prompt,
+          options.model || DEFAULT_VIDEO_MODEL,
+          options.duration || 5,
+          provider,
+          options.ratio || '16:9',
+        );
+        return { bytes, provider };
+      } catch (err) {
+        lastError = err;
+        const ltxBusy = /LTX-Video (error: null|queue busy|queue|stream|download)|queue unavailable|Space down|timed out/i.test(err.message);
+        if (!ltxBusy || attempt === 2) break;
+        await sleep(6000);
+      }
     }
   }
   throw lastError || new Error('Koi video provider available nahi hai.');
