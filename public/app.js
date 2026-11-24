@@ -3277,6 +3277,12 @@ function boot() {
   setInterval(() => {
     if (document.visibilityState !== 'hidden') loadMediaJobs();
   }, 3000);
+  setInterval(() => {
+    if (document.visibilityState !== 'hidden') syncMediaCredentials();
+  }, 60_000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') syncMediaCredentials();
+  });
 }
 
 boot();
