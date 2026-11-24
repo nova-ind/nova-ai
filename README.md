@@ -33,15 +33,13 @@ App ko online chalane ka free tarika:
    - **Health Check Path:** `/api/health`
    - **Plan:** Free
 4. Render dashboard me **Environment** me apni keys daalein (optional — har visitor apni key Settings me bhi daal sakta hai).
-5. Free service 15 minute idle ke baad sleep karta hai. Is repo me `.github/workflows/keep-awake.yml` hai jo har 5 minute par health endpoint ping karta hai — yani Render service hamesha jagi rehti hai. Apne URL ke liye workflow me `https://nova-ai-9gbh.onrender.com/api/health` update kar lo. GitHub repo public ho to Actions free me chalte hain.
-
-Manual alternative: **UptimeRobot** ya **cron-job.org** se har 5 minute par GET karo:
+5. App apne andar se har 4 minute par `/api/health` ping karti hai (Render detected hone par) — free service sleep nahi karti. Koi GitHub token/workflow chahiye nahi. Extra safety ke liye **UptimeRobot** ya **cron-job.org** se bhi har 5 minute par GET kar sakte ho:
 
 ```text
 https://nova-ai-9gbh.onrender.com/api/health
 ```
 
-> Render par Chrome/CDP browser profile nahi hota. Isliye `browser_open`, Bing Image Creator UI, Gmail/YouTube login jaise tools wahan kaam nahi karenge. Chat, web search, Cloudflare/Pollinations images aur LTX video chalenge. In sab tools ke saath poori app chahiye to PC par `npm start` + Cloudflare Tunnel/ngrok use karein.
+> Render par Chrome/CDP browser profile nahi hota. Isliye `browser_open`, Bing Image Creator UI, Gmail/YouTube login jaise tools wahan kaam nahi karenge. Chat, web search, Cloudflare Flux / Hugging Face Flux images aur LTX video chalenge. Pollinations intentionally disabled hai. In sab tools ke saath poori app chahiye to PC par `npm start` + Cloudflare Tunnel/ngrok use karein.
 
 ### GitHub Pages (sirf static landing page, optional)
 
@@ -84,9 +82,9 @@ OpenRouter / Groq / Ollama bhi chalega — bas `UPSTREAM_BASE_URL` badal do
 | **Workspace files** | Agent ne banayi files `G:\Nova Bot\workspace` me save hoti hain aur chat se `/workspace/...` link se khulti hain |
 | **Think** | Extended reasoning toggle; reasoning models par live "Thinking" panel |
 | **Search (DeepSearch)** | Real web search + neeche numbered sources |
-| **Imagine** | In-chat image generation — Bing Image Creator (best free), Cloudflare Flux, Pollinations fallback |
+| **Imagine** | In-chat image generation — Bing Image Creator (best free), Cloudflare Flux, Hugging Face Flux. Pollinations disabled |
 | **Video Studio** | Story/cartoon/meme/song videos: 16:9 ya 9:16, style/FX/transitions auto-infer, MP3 upload, scene images + AI motion clips, browser me final render |
-| **Free video model** | LTX-Video (open-source, GitHub/Hugging Face Space) — bina card/key ke short clips; Pollinations optional fallback |
+| **Free video model** | LTX-Video (open-source, GitHub/Hugging Face Space) — bina card/key ke short clips |
 | **Fun** | Grok jaisa witty/sarcastic personality |
 | Chat history | Sidebar me Today / Yesterday / Previous 7 days, search box ke saath (sidebar collapse hone par bhi search/toggle topbar me reachable) |
 | Attachments | `+` button — images (vision models) aur text/code files |
@@ -117,9 +115,10 @@ G:\Nova Bot
 - Purane `meta/llama-3.3-70b-instruct` jaise IDs NVIDIA par EOL ho chuke hain (410). App ab current IDs use karta hai: `minimaxai/minimax-m3.1-flash`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `google/gemma-4-31b-it`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`.
 - Live model list `/api/models` se aati hai — key + base URL Settings me ho to list auto-refresh hoti hai.
 - Web search free Bing HTML + Wikipedia fallback use karta hai — kabhi kabhi provider block kar sakta hai.
-- **Imagine / image provider:** Default `auto` hai — pehle **Bing Image Creator** (free, best quality; Chrome/Edge + Microsoft sign-in recommended for full credits), phir **Cloudflare Flux** (free 10k neurons/day; free token zaroori), phir **Pollinations** fallback. Bing official API nahi hai; app existing CDP browser profile me Bing UI automate karta hai. Settings me provider manually bhi chun sakte hain.
-- **Video provider:** Default **LTX-Video** hai — open-source model GitHub/Hugging Face Space par free chalta hai, koi key/card nahi. Optional free HF token queue badhata hai. Pollinations video tabhi chalega jab free media key Settings me ho. Direct video mode aur Video Studio dono provider choose karte hain.
+- **Imagine / image provider:** Default `auto` hai — pehle **Bing Image Creator** (free, best quality; Chrome/Edge + Microsoft sign-in recommended for full credits), phir **Cloudflare Flux** (free 10k neurons/day; free token zaroori), phir **Hugging Face Flux** (free tier; free HF token zaroori). **Pollinations kabhi use nahi hota** — user ne poor quality ki wajah se band kiya hai. Bing official API nahi hai; app existing CDP browser profile me Bing UI automate karta hai. Settings me provider manually bhi chun sakte hain.
+- **Video provider:** Default **LTX-Video** hai — open-source model GitHub/Hugging Face Space par free chalta hai, koi key/card nahi. Optional free HF token queue badhata hai. Direct video mode aur Video Studio dono LTX use karte hain.
 - **Cloudflare free tier:** Account ID + Workers AI API token Settings ya `.env` me daalo. Flux models: `flux-1-schnell` (sasta/tezz), `flux-2-klein-4b`, `flux-2-klein-9b`, `flux-2-dev` (better quality, zyada neurons). 10,000 neurons/day free hain.
+- **Hugging Face free tier:** Settings me free HF token daalo — isse `FLUX.1-schnell` images aur LTX-Video dono free tier par chalte hain. Token Sirf browser localStorage/server memory me rehta hai.
 - Browser profile (`workspace/.browser-profile`) me Microsoft account se sign-in kar lo to Bing ke free creations zyada milte hain aur captcha/guest limit se bachav hota hai.
 - Search bar chhote screen par topbar se open hota hai (`Ctrl+K`); sidebar collapse hone par bhi toggle/search button topbar me rehta hai. `Esc` search clear karta hai ya mobile sidebar band karta hai.
 - Agent mode default ON hai. Simple chat chahiye to ⚡ Agent button band kar do.
@@ -130,7 +129,7 @@ G:\Nova Bot
 - Agar server restart ke dauran koi bot run adhoora reh jaye aur “Run now” kuch na kare, to server ko ek baar restart karo — andaroka `runningJobs` lock clear ho jayega.
 - Agent tool-calling support na hone par app automatically XML tool-call fallback use karta hai.
 - Code execution workspace folder ke andar limited hai; timeout 20 seconds hai.
-- Core app poori tarah local hai. Free providers me se Bing ke liye browser profile me Microsoft login recommended hai; Cloudflare/HF/Pollinations ke optional free tokens browser localStorage me rehte hain (server sirf memory me rakhta hai).
+- Core app poori tarah local hai. Free providers me se Bing ke liye browser profile me Microsoft login recommended hai; Cloudflare/HF ke optional free tokens browser localStorage me rehte hain (server sirf memory me rakhta hai).
 
 ---
 

@@ -21,15 +21,16 @@ const mediaRunning = new Set();
 const PORT = Number(process.env.PORT || 4173);
 const UPSTREAM_BASE = (process.env.UPSTREAM_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'minimaxai/minimax-m3.1-flash';
-const IMAGE_BASE = (process.env.IMAGE_BASE_URL || 'https://image.pollinations.ai/prompt').replace(/\/+$/, '');
-const GEN_IMAGE_BASE = (process.env.POLLINATIONS_IMAGE_BASE || 'https://gen.pollinations.ai/image').replace(/\/+$/, '');
-const VIDEO_BASE = (process.env.POLLINATIONS_VIDEO_BASE || 'https://gen.pollinations.ai/video').replace(/\/+$/, '');
 const DEFAULT_IMAGE_MODEL = process.env.DEFAULT_IMAGE_MODEL || 'flux';
 const DEFAULT_VIDEO_MODEL = process.env.DEFAULT_VIDEO_MODEL || 'kwaivgi/kling-v4.0-flash';
 let mediaKey = (process.env.POLLINATIONS_API_KEY || '').trim();
 let cloudflareAccount = (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
 let cloudflareToken = (process.env.CLOUDFLARE_API_TOKEN || '').trim();
 let hfToken = (process.env.HF_TOKEN || '').trim();
+const HF_IMAGE_MODELS = [
+  'black-forest-labs/FLUX.1-schnell',
+  'stabilityai/stable-diffusion-xl-base-1.0',
+];
 const BING_SUPPORTED = process.platform === 'win32'; // Chrome/CDP profile sirf local Windows par hota hai
 const DEFAULT_IMAGE_PROVIDER = process.env.DEFAULT_IMAGE_PROVIDER || (BING_SUPPORTED ? 'bing' : 'auto');
 const DEFAULT_VIDEO_PROVIDER = process.env.DEFAULT_VIDEO_PROVIDER || 'ltx';
@@ -42,11 +43,10 @@ const CF_IMAGE_MODELS = [
 const IMAGE_PROVIDERS = [
   { id: 'bing', label: 'Bing Image Creator', note: 'Free · best quality · Chrome required' },
   { id: 'cloudflare', label: 'Cloudflare Flux', note: 'Free 10k neurons/day · needs free token' },
-  { id: 'pollinations', label: 'Pollinations', note: 'Free key / limited keyless' },
+  { id: 'huggingface', label: 'Hugging Face Flux', note: 'Free tier · needs free HF token' },
 ];
 const VIDEO_PROVIDERS = [
   { id: 'ltx', label: 'LTX-Video · GitHub/HF', note: 'Free open-source model · no card' },
-  { id: 'pollinations', label: 'Pollinations Video', note: 'Free key required' },
 ];
 const CDP_PORT = Number(process.env.CDP_PORT || 9222);
 const BROWSER_PROFILE = path.join(WORKSPACE, '.browser-profile');
@@ -479,62 +479,16 @@ const IMAGE_STYLES = {
   '3d': ', 3d render, soft studio lighting, octane, high detail',
 };
 
-const FALLBACK_IMAGE_MODELS = [
-  { id: 'flux', title: 'FLUX (classic)', note: 'Bina key · 1 image / 45 sec' },
-  { id: 'black-forest-labs/flux.1-schnell', title: 'FLUX 1.1 Schnell', note: 'Free tier' },
-  { id: 'tongyi-mai/z-image-turbo', title: 'Z-Image Turbo', note: 'Free tier' },
-  { id: 'microsoft/mai-image-2.7-flash', title: 'MAI Image 2.7 Flash', note: 'Free tier' },
-  { id: 'black-forest-labs/flux.2-klein-4b', title: 'FLUX.2 Klein 4B', note: 'Free tier' },
-];
-
-const FALLBACK_VIDEO_MODELS = [
-  { id: 'kwaivgi/kling-v4.0-flash', title: 'Kling 4.0 Flash', note: 'Free Pollinations key' },
-  { id: 'heygen/heygen-avatar-6-turbo', title: 'HeyGen Avatar 6 Turbo', note: 'Free Pollinations key' },
-  { id: 'bytedance/seedance-2.5-flash', title: 'Seedance 2.5 Flash', note: 'Free Pollinations key' },
-  { id: 'lightricks/ltx-2.5-pro', title: 'LTX 2.5 Pro', note: 'Free Pollinations key' },
-  { id: 'alibaba/wan-2.2-fast', title: 'Wan 2.2 Fast', note: 'Free Pollinations key' },
-  { id: 'google/veo-3.1-fast', title: 'Veo 3.1 Fast', note: 'Free Pollinations key' },
-];
-
-function mediaAuthHeaders() {
-  return { 'user-agent': UA, ...(mediaKey ? { authorization: `Bearer ${mediaKey}` } : {}) };
-}
-
-function mediaFailure(text, status) {
-  let detail = '';
-  try {
-    const payload = JSON.parse(text);
-    detail = payload?.error?.message || payload?.message || '';
-  } catch {
-    detail = String(text || '').slice(0, 200);
-  }
-  if (/FREE_LIMIT|free limit/i.test(detail)) {
-    return 'Pollinations free limit hit (1 image / 45 sec). Settings me free key add karein ya thoda wait karein.';
-  }
-  if (status === 401) {
-    return 'Pollinations key chahiye. Settings → Media key me free key paste karein (enter.pollinations.ai).';
-  }
-  if (status === 402) return detail || 'Pollinations free balance khatam ho gaya.';
-  return detail || `Media provider responded with ${status}`;
-}
-
-function mediaPrice(model, category) {
-  const pricing = model?.pricing || {};
-  const positive = (value) => {
-    const number = Number(value);
-    return Number.isFinite(number) && number > 0 ? number : null;
-  };
-  if (category === 'video') {
-    const perSecond = positive(pricing.completionVideoSeconds);
-    if (perSecond) return perSecond * (Number(model.default_duration) || 5);
-    const perToken = positive(pricing.completionVideoTokens);
-    if (perToken) return perToken * 1000;
-  } else {
-    const perImage = positive(pricing.completionImageTokens);
-    if (perImage) return perImage;
-  }
-  return positive(model.flat_rate) || 1;
-}
+const MEDIA_MODEL_CATALOG = {
+  image: [
+    { id: 'auto', title: 'Provider default', note: 'Bing / Cloudflare / HF best model' },
+    ...CF_IMAGE_MODELS.map((id) => ({ id, title: id.split('/').pop(), note: 'Cloudflare Flux · free' })),
+    ...HF_IMAGE_MODELS.map((id) => ({ id, title: id.split('/').pop(), note: 'Hugging Face · free tier' })),
+  ],
+  video: [
+    { id: 'ltx', title: 'LTX-Video', note: 'GitHub/HF · free · no key' },
+  ],
+};
 
 async function handleImagine(req, res, url) {
   const prompt = (url.searchParams.get('prompt') || '').trim().slice(0, 700);
@@ -607,45 +561,9 @@ async function handleMediaKey(req, res) {
 }
 
 async function handleMediaModels(req, res) {
-  const readCatalog = async (category) => {
-    const response = await fetch(`https://gen.pollinations.ai/${category}/models`, {
-      signal: AbortSignal.timeout(15_000),
-      headers: { 'user-agent': UA },
-    });
-    if (!response.ok) throw new Error(`Catalog ${response.status}`);
-    return response.json();
-  };
-
-  const [imageResult, videoResult] = await Promise.allSettled([readCatalog('image'), readCatalog('video')]);
-  const imageRaw = imageResult.status === 'fulfilled' && Array.isArray(imageResult.value) ? imageResult.value : [];
-  const videoRaw = videoResult.status === 'fulfilled' && Array.isArray(videoResult.value) ? videoResult.value : [];
-
-  const image = imageRaw
-    .filter((model) => model.paid_only !== true && (model.supported_endpoints || []).some((item) => item.includes('/image/{prompt}')))
-    .sort((a, b) => mediaPrice(a, 'image') - mediaPrice(b, 'image'))
-    .slice(0, 12)
-    .map((model) => ({
-      id: model.name,
-      title: model.title || model.name.split('/').pop(),
-      note: model.paid_only === false ? 'Free tier' : 'Available',
-      price: mediaPrice(model, 'image'),
-    }));
-
-  const video = videoRaw
-    .filter((model) => (model.supported_endpoints || []).some((item) => item.includes('/video/{prompt}')))
-    .sort((a, b) => mediaPrice(a, 'video') - mediaPrice(b, 'video'))
-    .slice(0, 8)
-    .map((model) => ({
-      id: model.name,
-      title: model.title || model.name.split('/').pop(),
-      note: 'Free Pollinations key',
-      price: mediaPrice(model, 'video'),
-    }));
-
   return sendJson(res, 200, {
-    image: image.length ? image : FALLBACK_IMAGE_MODELS,
-    video: video.length ? video : FALLBACK_VIDEO_MODELS,
-    source: image.length && video.length ? 'live' : 'fallback',
+    ...MEDIA_MODEL_CATALOG,
+    source: 'local',
   });
 }
 
@@ -722,41 +640,41 @@ async function updateMediaJob(job, patch) {
   await saveMediaJobs().catch(() => {});
 }
 
-async function fetchPollinationsBytes(kind, prompt, model, duration = 5) {
-  const isVideo = kind === 'video';
-  const base = isVideo ? VIDEO_BASE : mediaKey ? GEN_IMAGE_BASE : IMAGE_BASE;
-  const target = isVideo
-    ? `${base}/${encodeURIComponent(prompt)}?model=${encodeURIComponent(model)}&duration=${duration}`
-    : `${base}/${encodeURIComponent(prompt)}?width=1280&height=720&seed=${Math.floor(Math.random() * 1_000_000)}&nologo=true&model=${encodeURIComponent(model)}`;
-  const response = await fetch(target, {
-    headers: mediaAuthHeaders(),
-    signal: AbortSignal.timeout(isVideo ? 6 * 60_000 : 2 * 60_000),
-  });
-  if (!response.ok) throw new Error(mediaFailure(await response.text().catch(() => ''), response.status));
-  return Buffer.from(await response.arrayBuffer());
-}
-
-async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'pollinations', ratio = '16:9') {
+async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'auto', ratio = '16:9') {
   if (kind === 'image') {
     if (provider === 'bing') return generateBingImage(prompt);
     if (provider === 'cloudflare') return generateCloudflareImage(prompt, model);
-    return fetchPollinationsBytes(kind, prompt, model, duration);
+    if (provider === 'huggingface') return generateHuggingFaceImage(prompt, model);
+    if (provider === 'pollinations') {
+      throw new Error('Pollinations band hai — app Bing/Cloudflare/Hugging Face free providers use karti hai.');
+    }
+    throw new Error(`Unknown image provider: ${provider}. Available: bing, cloudflare, huggingface.`);
   }
   if (provider === 'ltx') return generateLtxVideo(prompt, { duration, ratio });
-  if (provider === 'bing') throw new Error('Bing video abhi background queue me unavailable hai — LTX ya Pollinations use karein.');
-  return fetchPollinationsBytes(kind, prompt, model, duration);
+  if (provider === 'pollinations') {
+    throw new Error('Pollinations video band hai — LTX-Video free provider use karein.');
+  }
+  if (provider === 'bing') throw new Error('Bing video available nahi hai — LTX-Video use karein.');
+  throw new Error(`Unknown video provider: ${provider}. Available: ltx.`);
+}
+
+function configuredImageProviders() {
+  return [
+    ...(BING_SUPPORTED ? ['bing'] : []),
+    ...(cloudflareAccount && cloudflareToken ? ['cloudflare'] : []),
+    ...(hfToken ? ['huggingface'] : []),
+  ];
 }
 
 async function generateImageSmart(prompt, options = {}) {
   const requested = options.provider || DEFAULT_IMAGE_PROVIDER;
   const useAuto = requested === 'auto' || (requested === 'bing' && !BING_SUPPORTED);
-  const order = useAuto
-    ? [
-        ...(BING_SUPPORTED ? ['bing'] : []),
-        ...(cloudflareToken && cloudflareAccount ? ['cloudflare'] : []),
-        'pollinations',
-      ]
-    : [requested];
+  const order = useAuto ? configuredImageProviders() : [requested];
+  if (!order.length) {
+    throw new Error(
+      'Koi free image provider configured nahi hai. Local PC par Bing automatically chalega; online site par Settings me Cloudflare token ya Hugging Face token daalo (dono free).',
+    );
+  }
   let lastError = null;
   for (const provider of order) {
     try {
@@ -771,11 +689,10 @@ async function generateImageSmart(prompt, options = {}) {
 
 async function generateVideoSmart(prompt, options = {}) {
   const requested = options.provider || DEFAULT_VIDEO_PROVIDER;
-  const order = requested === 'auto' ? ['ltx', 'pollinations'] : [requested];
+  const order = requested === 'auto' ? ['ltx'] : [requested];
   let lastError = null;
   for (const provider of order) {
     try {
-      if (provider === 'pollinations' && !mediaKey) throw new Error('Pollinations video ke liye free media key chahiye.');
       const bytes = await fetchMediaBytes(
         'video',
         prompt,
@@ -797,15 +714,10 @@ async function fetchMediaBytesWithRetry(job, kind, prompt, model, duration, prov
     try {
       return await fetchMediaBytes(kind, prompt, model, duration, provider, ratio);
     } catch (err) {
-      const pollinationsLimit = /Pollinations free limit/i.test(err.message);
       const ltxBusy = /LTX-Video (error: null|queue|stream|download)|queue unavailable|Space down|timed out/i.test(err.message);
-      if ((!pollinationsLimit && !ltxBusy) || attempt === 2) throw err;
-      await updateMediaJob(job, {
-        step: pollinationsLimit
-          ? 'Pollinations free limit — 46 second wait…'
-          : 'LTX free queue busy — dobara try kar rahe hain…',
-      });
-      await sleep(pollinationsLimit ? 46_000 : 6000);
+      if (!ltxBusy || attempt === 2) throw err;
+      await updateMediaJob(job, { step: 'LTX free queue busy — dobara try kar rahe hain…' });
+      await sleep(6000);
     }
   }
   throw new Error('Media provider unavailable.');
@@ -1017,13 +929,13 @@ const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'generate_image',
-      description: 'Generate a high-quality image with a free provider (Bing by default, Cloudflare Flux or Pollinations fallback). Returns an image URL.',
+      description: 'Generate a high-quality image with a free provider (Bing locally, Cloudflare Flux or Hugging Face Flux online). Returns an image URL. Pollinations is disabled.',
       parameters: {
         type: 'object',
         properties: {
           prompt: { type: 'string' },
           model: { type: 'string' },
-          provider: { type: 'string', enum: ['auto', 'bing', 'cloudflare', 'pollinations'] },
+          provider: { type: 'string', enum: ['auto', 'bing', 'cloudflare', 'huggingface'] },
         },
         required: ['prompt'],
       },
@@ -1033,7 +945,7 @@ const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'generate_video',
-      description: 'Generate a short MP4 with a free provider. Default is LTX-Video (open-source, GitHub/Hugging Face, no key). Also supports Pollinations with a free key. Returns a video URL.',
+      description: 'Generate a short MP4 with LTX-Video (open-source, GitHub/Hugging Face, no key). Returns a video URL. Pollinations is disabled.',
       parameters: {
         type: 'object',
         properties: {
@@ -1041,7 +953,7 @@ const AGENT_TOOLS = [
           duration: { type: 'number' },
           model: { type: 'string' },
           ratio: { type: 'string', enum: ['16:9', '9:16'] },
-          provider: { type: 'string', enum: ['auto', 'ltx', 'pollinations'] },
+          provider: { type: 'string', enum: ['auto', 'ltx'] },
         },
         required: ['prompt'],
       },
@@ -1488,6 +1400,40 @@ async function generateCloudflareImage(prompt, model) {
   return Buffer.from(raw.replace(/^data:image\/[^;]+;base64,/i, ''), 'base64');
 }
 
+async function generateHuggingFaceImage(prompt, model) {
+  if (!hfToken) {
+    throw new Error('Hugging Face image ke liye Settings → HF token chahiye (free token, no card).');
+  }
+  const useModel = HF_IMAGE_MODELS.includes(model) ? model : HF_IMAGE_MODELS[0];
+  const response = await fetch(`https://api-inference.huggingface.co/models/${useModel}`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${hfToken}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      inputs: String(prompt || '').slice(0, 2048),
+      options: { wait_for_model: true },
+    }),
+    signal: AbortSignal.timeout(180_000),
+  });
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => '')).slice(0, 300);
+    const hint = response.status === 401
+      ? 'HF token invalid hai ya read permission nahi hai.'
+      : response.status === 503
+        ? 'HF free model abhi load ho raha hai — thodi der baad dobara try karein.'
+        : `Hugging Face image failed (${response.status}).`;
+    throw new Error(`${hint} ${detail}`);
+  }
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('image/')) {
+    const detail = (await response.text().catch(() => '')).slice(0, 300);
+    throw new Error(`Hugging Face ne image return nahi ki. ${detail}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
 async function generateLtxVideo(prompt, options = {}) {
   const SPACE = 'https://lightricks-ltx-video-distilled.hf.space';
   const duration = Math.min(8.5, Math.max(0.3, Number(options.duration) || 3));
@@ -1570,15 +1516,13 @@ function mediaProviderState() {
       configured:
         item.id === 'bing'
           ? BING_SUPPORTED
-          : item.id !== 'cloudflare' || Boolean(cloudflareAccount && cloudflareToken),
+          : item.id === 'cloudflare'
+            ? Boolean(cloudflareAccount && cloudflareToken)
+            : Boolean(hfToken),
     })),
-    video: VIDEO_PROVIDERS.map((item) => ({
-      ...item,
-      configured: item.id !== 'pollinations' || Boolean(mediaKey),
-    })),
+    video: VIDEO_PROVIDERS.map((item) => ({ ...item, configured: true })),
     credentials: {
       cloudflare: Boolean(cloudflareAccount && cloudflareToken),
-      pollinations: Boolean(mediaKey),
       huggingface: Boolean(hfToken),
     },
   };
@@ -1680,8 +1624,8 @@ async function runTool(name, args, root = WORKSPACE) {
     if (name === 'generate_video') {
       const prompt = String(args.prompt || '').slice(0, 500);
       const provider = String(args.provider || DEFAULT_VIDEO_PROVIDER).slice(0, 40);
-      if (provider === 'pollinations' && !mediaKey) {
-        return 'Error: Pollinations video needs a free Media key. Use provider ltx (free, no key) instead.';
+      if (provider === 'pollinations') {
+        return 'Error: Pollinations video is disabled. Use provider ltx (free, no key) instead.';
       }
       const model = String(args.model || DEFAULT_VIDEO_MODEL).slice(0, 120);
       const duration = Math.min(15, Math.max(2, Number(args.duration) || 5));
@@ -1797,8 +1741,8 @@ function agentSystem(modes, customSystem = '', root = WORKSPACE) {
     `Allowed folder for all filesystem tools: ${root}. Never access paths outside it.`,
     `Current date: ${new Date().toISOString().slice(0, 10)}.`,
     'You are an AGENT. Complete the user\'s request end-to-end instead of only explaining how. Use tools whenever the task needs fresh information, files, code execution, or generated images, and keep using them until the task is actually done.',
-    'IMAGE RULE: For any image request call generate_image. Prefer provider auto (Bing first, Cloudflare Flux second, Pollinations fallback) unless the user names a provider.',
-    'VIDEO RULE: If the user asks for any video — story, cartoon, cinematic, meme/funny, or a video from an MP3 song — call create_media_job, never just describe it. Infer style (cinematic/cartoon/meme/anime/realistic), fx and transitions from the request. Use ratio 9:16 for reels/stories/short-form and 16:9 for normal video. If the user attached an MP3, pass its workspace audioPath. Default video provider is ltx (free open-source); use pollinations only with a free key.',
+    'IMAGE RULE: For any image request call generate_image. Prefer provider auto (Bing first, then Cloudflare Flux, then Hugging Face Flux). Never use Pollinations — the user disabled it because of poor quality.',
+    'VIDEO RULE: If the user asks for any video — story, cartoon, cinematic, meme/funny, or a video from an MP3 song — call create_media_job, never just describe it. Infer style (cinematic/cartoon/meme/anime/realistic), fx and transitions from the request. Use ratio 9:16 for reels/stories/short-form and 16:9 for normal video. If the user attached an MP3, pass its workspace audioPath. Default video provider is ltx (free open-source); Pollinations is disabled.',
     `Available tools: ${toolNames}.`,
     'You may emit several tool calls across several turns. After tools run, continue automatically. Only give the final Markdown answer when the task is complete; include links to any files or images you created.',
     'IMPORTANT fallback: if native tool calling is not available, put each action on its own line as <tool_call>{"name":"tool_name","arguments":{...}}</tool_call> and nothing else in that turn. After seeing results, continue. Never claim you did something you did not actually do.',
@@ -2669,3 +2613,19 @@ server.listen(PORT, () => {
   console.log(`  Model:    ${DEFAULT_MODEL}`);
   console.log(`  Key:      ${(process.env.NVIDIA_API_KEY || '').trim() ? 'loaded from environment' : 'NOT set (paste it in Settings or .env)'}\n`);
 });
+
+// Render free tier sleeps after ~15 min idle. Ping our own health endpoint so the
+// process keeps seeing traffic and stays awake — no GitHub Actions token needed.
+const RENDER_URL = String(process.env.RENDER_EXTERNAL_URL || process.env.RENDER_URL || '').replace(/\/+$/, '');
+if (RENDER_URL) {
+  const keepAwake = async () => {
+    try {
+      await fetch(`${RENDER_URL}/api/health`, { signal: AbortSignal.timeout(20_000) });
+    } catch {
+      /* transient network issue — next ping will retry */
+    }
+  };
+  setTimeout(keepAwake, 10_000);
+  setInterval(keepAwake, 4 * 60_000);
+  console.log(`  Keep-awake: enabled -> ${RENDER_URL}/api/health\n`);
+}

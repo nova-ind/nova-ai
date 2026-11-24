@@ -71,7 +71,6 @@ const els = {
   closeSettings: $('closeSettings'),
   apiKeyInput: $('apiKeyInput'),
   apiKeyProvider: $('apiKeyProvider'),
-  mediaKeyInput: $('mediaKeyInput'),
   imageProviderSelect: $('imageProviderSelect'),
   videoProviderSelect: $('videoProviderSelect'),
   cfAccountInput: $('cfAccountInput'),
@@ -215,7 +214,6 @@ let stream = null;
 let attachments = [];
 let paintQueued = false;
 let modelLoadTimer = null;
-let mediaKeyTimer = null;
 let mediaCredentialsTimer = null;
 let recognition = null;
 
@@ -1721,10 +1719,7 @@ async function startVideoJob(chat, prompt, audioAttachment) {
     audioPath,
     sceneCount,
     clipSeconds: Number(settings.videoDuration) || 5,
-    useAiVideo:
-      videoProvider === 'auto' ||
-      videoProvider === 'ltx' ||
-      Boolean(settings.apiKeys.pollinations || serverConfig.mediaKeyConfigured),
+    useAiVideo: videoProvider === 'auto' || videoProvider === 'ltx',
     imageProvider: settings.imageProvider || DEFAULT_SETTINGS.imageProvider,
     videoProvider,
     imageModel: settings.mediaModels.image,
@@ -1750,17 +1745,6 @@ async function startVideoJob(chat, prompt, audioAttachment) {
 
 async function generateVideo(chat, prompt) {
   const provider = settings.videoProvider || DEFAULT_SETTINGS.videoProvider;
-  if (provider === 'pollinations' && !settings.apiKeys.pollinations && !serverConfig.mediaKeyConfigured) {
-    const message = {
-      role: 'assistant',
-      content: 'Pollinations video ke liye free media key chahiye (Settings → Media key). Ya Settings → Video provider ko LTX / Auto karein — LTX bilkul free hai.',
-      ts: Date.now(),
-    };
-    chat.messages.push(message);
-    touch(chat);
-    renderMessages();
-    return;
-  }
   const url =
     `/api/video?prompt=${encodeURIComponent(prompt)}` +
     `&model=${encodeURIComponent(settings.mediaModels.video)}` +
@@ -1773,22 +1757,6 @@ async function generateVideo(chat, prompt) {
   renderMessages();
   scrollToBottom();
   syncComposer();
-}
-
-async function syncMediaKey() {
-  const key = String(settings.apiKeys.pollinations || '');
-  try {
-    const response = await fetch('/api/media-key', {
-      method: key ? 'POST' : 'DELETE',
-      headers: { 'content-type': 'application/json' },
-      body: key ? JSON.stringify({ key }) : undefined,
-    });
-    const data = await response.json().catch(() => ({}));
-    serverConfig.mediaKeyConfigured = Boolean(data.configured);
-    return Boolean(data.configured);
-  } catch {
-    return false;
-  }
 }
 
 async function syncMediaCredentials() {
@@ -1806,7 +1774,6 @@ async function syncMediaCredentials() {
     const data = await response.json().catch(() => ({}));
     if (data.mediaProviders) {
       serverConfig.mediaProviders = data.mediaProviders;
-      serverConfig.mediaKeyConfigured = Boolean(data.mediaProviders.credentials?.pollinations);
     }
     return data;
   } catch {
@@ -2507,7 +2474,6 @@ function openSettings() {
   els.baseUrlInput.value = settings.baseUrl || PROVIDERS.nvidia.base;
   els.apiKeyProvider.textContent = String(settings.provider || 'nvidia').toUpperCase();
   els.apiKeyInput.value = settings.apiKeys?.[settings.provider] || '';
-  els.mediaKeyInput.value = settings.apiKeys?.pollinations || '';
   els.imageProviderSelect.value = settings.imageProvider || DEFAULT_SETTINGS.imageProvider;
   els.videoProviderSelect.value = settings.videoProvider || DEFAULT_SETTINGS.videoProvider;
   els.cfAccountInput.value = settings.mediaCredentials?.cloudflareAccount || '';
@@ -3160,15 +3126,6 @@ els.apiKeyInput.addEventListener('input', () => {
   modelLoadTimer = setTimeout(() => loadModels(), 500);
 });
 
-els.mediaKeyInput.addEventListener('input', () => {
-  settings.apiKeys.pollinations = els.mediaKeyInput.value.trim();
-  if (settings.provider === 'pollinations') syncActiveKey();
-  saveSettings();
-  refreshKeyStatus();
-  clearTimeout(mediaKeyTimer);
-  mediaKeyTimer = setTimeout(() => syncMediaKey(), 400);
-});
-
 els.imageProviderSelect.addEventListener('change', () => {
   settings.imageProvider = els.imageProviderSelect.value;
   saveSettings();
@@ -3223,7 +3180,6 @@ els.tempInput.addEventListener('input', () => {
 els.saveSettings.addEventListener('click', async () => {
   settings.provider = els.providerSelect.value;
   settings.apiKeys[settings.provider] = els.apiKeyInput.value.trim();
-  settings.apiKeys.pollinations = els.mediaKeyInput.value.trim();
   settings.imageProvider = els.imageProviderSelect.value || DEFAULT_SETTINGS.imageProvider;
   settings.videoProvider = els.videoProviderSelect.value || DEFAULT_SETTINGS.videoProvider;
   settings.mediaCredentials = {
@@ -3246,7 +3202,7 @@ els.saveSettings.addEventListener('click', async () => {
   saveSettings();
   renderTiers();
   syncComposer();
-  await Promise.all([syncMediaKey(), syncMediaCredentials()]);
+  await syncMediaCredentials();
   await refreshKeyStatus();
   await loadModels();
   closeSettings();
@@ -3314,7 +3270,6 @@ function boot() {
   autoGrow();
   els.input.focus();
   loadConfig().then(() => {
-    syncMediaKey();
     syncMediaCredentials();
     loadMediaModels();
     loadMediaJobs();
