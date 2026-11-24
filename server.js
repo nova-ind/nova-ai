@@ -1528,26 +1528,50 @@ async function callHfFluxSpace(space, prompt, width = 1024, height = 1024, useAu
   throw new Error(`HF Flux queue busy${hint ? ` (${hint.slice(0, 160)})` : ' (null)'}.`);
 }
 
+function hfQuotaError(data) {
+  const runs = data?.runs || {};
+  const remaining = Number(runs.remaining);
+  const seconds = Number(data?.current);
+  if (remaining !== 0 && !(seconds < 60)) return null;
+  const reset = remaining === 0 ? runs.resetsAt : data?.resetsAt;
+  const when = reset ? new Date(reset).toLocaleString('en-IN') : 'thodi der baad';
+  return new Error(
+    `HF free GPU quota khatam hai (${runs.used || 0}/${runs.limit || 0} runs, ${Math.max(0, Math.floor(seconds))}s left). Reset: ${when}.`,
+  );
+}
+
+async function checkHfServerQuota() {
+  if (!hfToken) return;
+  let data = null;
+  try {
+    const response = await fetch('https://huggingface.co/api/spaces/zero-gpu/quota', {
+      headers: { authorization: `Bearer ${hfToken}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (response.ok) data = await response.json().catch(() => null);
+  } catch {
+    return;
+  }
+  const error = hfQuotaError(data);
+  if (error) throw error;
+}
+
 async function generateHuggingFaceImage(prompt, model, ratio = '16:9') {
   const size = ratio === '9:16' ? [768, 1344] : ratio === '1:1' ? [1024, 1024] : [1344, 768];
   const [width, height] = size;
-  // HF token Optional hai: valid token = 5 min/day quota, warna public 2 min/day pool.
-  const authModes = hfToken ? [true, false] : [false];
+  await checkHfServerQuota();
+  // Token hai to usi account ka quota use karo; nahi to public pool.
+  const useAuth = Boolean(hfToken);
   let lastError = null;
   for (const space of HF_FLUX_SPACES) {
-    for (const useAuth of authModes) {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          return await callHfFluxSpace(space, prompt, width, height, useAuth);
-        } catch (err) {
-          lastError = err;
-          if (attempt === 0) await sleep(2000);
-        }
-      }
+    try {
+      return await callHfFluxSpace(space, prompt, width, height, useAuth);
+    } catch (err) {
+      lastError = err;
     }
   }
   throw new Error(
-    `Hugging Face Flux abhi image nahi bana pa raha (dono free spaces busy). ${lastError?.message || ''}`.trim(),
+    `Hugging Face Flux abhi image nahi bana pa raha. ${lastError?.message || ''}`.trim(),
   );
 }
 
