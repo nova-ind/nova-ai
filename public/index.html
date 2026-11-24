@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Nova — AI Assistant</title>
+    <meta name="description" content="Nova — a fast, minimal AI assistant with search, reasoning and image generation." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23fff'/%3E%3Cpath d='M9 23V9l14 14V9' stroke='%23000' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <div class="scrim" id="scrim" hidden></div>
+
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <a class="brand" href="#" id="brand" aria-label="Nova home">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32"><rect width="32" height="32" rx="9" fill="currentColor" /><path d="M10 23V9l12 14V9" stroke="#0b0b0c" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </span>
+            <span>Nova</span>
+          </a>
+          <button class="icon-btn" id="collapseBtn" title="Hide sidebar" aria-label="Hide sidebar">
+            <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M9 4v16" /></svg>
+          </button>
+        </div>
+
+        <button class="new-chat" id="newChatBtn">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L20 8a2.5 2.5 0 0 0-3.5-3.5L4 16v4z" /><path d="M14 6l4 4" /></svg>
+          <span>New chat</span>
+        </button>
+
+        <label class="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+          <input id="chatSearch" type="search" placeholder="Search chats" autocomplete="off" />
+        </label>
+
+        <nav class="chat-list" id="chatList" aria-label="Chat history"></nav>
+
+        <div class="sidebar-foot">
+          <button class="foot-btn" id="settingsBtn">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" /><path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7" /></svg>
+            <span>Settings</span>
+          </button>
+          <button class="foot-btn" id="exportBtn">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 21h16" /></svg>
+            <span>Export chats</span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="main" id="main">
+        <header class="topbar">
+          <button class="icon-btn only-mobile" id="menuBtn" aria-label="Toggle sidebar" title="Toggle sidebar">
+            <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </button>
+          <button class="icon-btn only-collapsed" id="topSearchBtn" aria-label="Search chats" title="Search chats (Ctrl+K)">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+          </button>
+
+          <div class="topbar-title" id="topbarTitle">Nova</div>
+
+          <div class="topbar-right">
+            <span class="key-state" id="keyState">
+              <span class="dot" id="statusDot"></span>
+              <span id="keyLabel">Checking key…</span>
+            </span>
+            <button class="icon-btn" id="topSettingsBtn" title="Settings" aria-label="Settings">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" /><path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7" /></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="key-banner" id="keyBanner" hidden>
+          <span>Add your free NVIDIA API key to start chatting.</span>
+          <button class="mini-btn" id="bannerBtn">Add key</button>
+        </div>
+
+        <section class="chat" id="chat">
+          <div class="stream" id="stream">
+            <div class="welcome" id="welcome">
+              <h1>What do you want to know?</h1>
+              <p>Ask anything. Nova can search the web, reason, write files, run code and finish the whole task.</p>
+              <div class="suggestions" id="suggestions">
+                <button class="suggestion" data-prompt="What happened in AI this week? Summarise the most important releases." data-mode="search">
+                  <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+                  <span>What happened in AI this week?</span>
+                </button>
+                <button class="suggestion" data-prompt="A company has $500K to split across three channels with these conversion rates and costs. Find the optimal allocation." data-mode="think">
+                  <svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-3.5 10.9V17h7v-3.1A6 6 0 0 0 12 3z" /><path d="M9.5 20h5" /></svg>
+                  <span>Solve a hard allocation problem</span>
+                </button>
+                <button class="suggestion" data-prompt="A neon-lit street food stall in Tokyo at night, heavy rain, cinematic, 35mm photo" data-mode="imagine">
+                  <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.6" /><path d="M3 17l5-5 4 4 3-3 6 6" /></svg>
+                  <span>Create a rainy Tokyo street image</span>
+                </button>
+                <button class="suggestion" data-prompt="Explain how transformers work to a smart 15-year-old, with a small analogy and one code-free diagram." data-mode="chat">
+                  <svg viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 4V5z" /></svg>
+                  <span>Explain transformers simply</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="messages" id="messages"></div>
+          </div>
+        </section>
+
+        <footer class="composer-wrap">
+          <form class="composer" id="composer" autocomplete="off">
+            <div class="attachments" id="attachments" hidden></div>
+            <textarea id="input" rows="1" placeholder="Ask Nova anything" aria-label="Message"></textarea>
+            <div class="composer-row">
+              <div class="left-group">
+                <button type="button" class="circle-btn" id="attachBtn" title="Attach files" aria-label="Attach files">
+                  <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+                </button>
+              </div>
+
+              <div class="modes" id="modes">
+                <button type="button" class="mode" data-mode="agent" title="Agent mode: plan, use tools and finish the task">
+                  <svg viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z" /></svg>
+                  <span>Agent</span>
+                </button>
+                <button type="button" class="mode" data-mode="think" title="Extended reasoning">
+                  <svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-3.5 10.9V17h7v-3.1A6 6 0 0 0 12 3z" /><path d="M9.5 20h5" /></svg>
+                  <span>Think</span>
+                </button>
+                <button type="button" class="mode" data-mode="search" title="Search the web">
+                  <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+                  <span>Search</span>
+                </button>
+                <button type="button" class="mode" data-mode="imagine" title="Generate an image">
+                  <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.6" /><path d="M3 17l5-5 4 4 3-3 6 6" /></svg>
+                  <span>Imagine</span>
+                </button>
+                <button type="button" class="mode" data-mode="video" title="Generate a short video (needs free Pollinations key)">
+                  <svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="3" /><path d="M17 10l4-2v8l-4-2z" /></svg>
+                  <span>Video</span>
+                </button>
+                <button type="button" class="mode" data-mode="fun" title="Witty personality">
+                  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0" /><path d="M9 9.5h.01M15 9.5h.01" /></svg>
+                  <span>Fun</span>
+                </button>
+              </div>
+
+              <div class="right-group">
+                <div class="tier">
+                  <select id="tierSelect" aria-label="Model tier"></select>
+                  <svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+                </div>
+                <button type="button" class="circle-btn" id="scheduleBtn" title="Schedule work" aria-label="Schedule work">
+                  <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3" /><path d="M8 3v4M16 3v4M3 10h18M12 14v4M10 16h4" /></svg>
+                </button>
+                <button type="button" class="circle-btn" id="botsBtn" title="My bots" aria-label="My bots">
+                  <svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="3" /><path d="M12 4v4M9 14h.01M15 14h.01M9 17h6" /></svg>
+                </button>
+                <button type="button" class="circle-btn" id="micBtn" title="Voice input" aria-label="Voice input">
+                  <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></svg>
+                </button>
+                <button type="submit" class="send-btn" id="sendBtn" aria-label="Send" disabled>
+                  <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
+                </button>
+                <button type="button" class="stop-btn" id="stopBtn" aria-label="Stop" hidden>
+                  <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" /></svg>
+                </button>
+              </div>
+            </div>
+          </form>
+          <p class="disclaimer">Nova can make mistakes — verify important information.</p>
+        </footer>
+      </main>
+    </div>
+
+    <div class="modal" id="scheduleModal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="scheduleTitle">
+        <div class="modal-head">
+          <h2 id="scheduleTitle">Schedule work</h2>
+          <button class="icon-btn" id="closeSchedule" aria-label="Close">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
+
+        <div class="field">
+          <label for="scheduleWorkflow">Workflow</label>
+          <select id="scheduleWorkflow">
+            <option value="youtube">YouTube video scheduler</option>
+            <option value="custom">Custom master prompt</option>
+          </select>
+          <p class="help">Pehle date aur time bharo — phir baaki details.</p>
+        </div>
+
+        <div class="field">
+          <label for="scheduleName">Task name</label>
+          <input id="scheduleName" type="text" placeholder="YouTube upload — AI video" />
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="scheduleDate" id="scheduleDateLabel">Publish date *</label>
+            <input id="scheduleDate" type="date" />
+          </div>
+          <div class="field">
+            <label for="scheduleTime">Publish time (24h) *</label>
+            <input id="scheduleTime" type="time" />
+          </div>
+        </div>
+
+        <div id="youtubeFields">
+          <div class="field">
+            <label for="videoFile">Video file / path in workspace</label>
+            <input id="videoFile" type="text" spellcheck="false" placeholder="videos/my-video.mp4" />
+            <p class="help">Video allowed folder me honi chahiye. Agent usse dhoondhkar metadata banayega.</p>
+          </div>
+          <div class="field">
+            <label for="videoTopic">Topic / niche (optional)</label>
+            <input id="videoTopic" type="text" placeholder="AI productivity" />
+          </div>
+          <div class="field">
+            <label for="leadMinutes">Agent lead time (minutes before publish)</label>
+            <input id="leadMinutes" type="number" min="0" max="10080" value="30" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="schedulePrompt">Master prompt</label>
+          <textarea id="schedulePrompt" rows="7" spellcheck="false"></textarea>
+          <p class="help" id="scheduleHint">Ye prompt scheduled time par agent ko diya jayega.</p>
+        </div>
+
+        <div class="field">
+          <label for="scheduleRepeat">Repeat</label>
+          <select id="scheduleRepeat">
+            <option value="once">Once</option>
+            <option value="hourly">Every hour</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+        </div>
+
+        <div class="modal-actions">
+          <button class="ghost-btn" id="cancelSchedule">Cancel</button>
+          <button class="primary-btn" id="saveSchedule">Schedule</button>
+        </div>
+
+        <div class="subhead">Scheduled tasks</div>
+        <div class="scheduled-list" id="scheduledList"><p class="help">Abhi koi task scheduled nahi hai.</p></div>
+      </div>
+    </div>
+
+    <div class="modal" id="botsModal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="botsTitle">
+        <div class="modal-head">
+          <h2 id="botsTitle">My bots</h2>
+          <button class="icon-btn" id="closeBots" aria-label="Close">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
+
+        <div class="field">
+          <label for="botFolderPath">Allow a folder on this PC</label>
+          <div class="inline-row">
+            <input id="botFolderPath" type="text" spellcheck="false" placeholder="G:\Projects\MyApp" />
+            <button class="ghost-btn" id="allowFolderBtn">Allow</button>
+          </div>
+          <p class="help">Bot ko sirf in folders tak pahunch milegi. Har naye folder pehle yahan allow karein.</p>
+          <div class="folder-list" id="folderList"></div>
+        </div>
+
+        <div class="subhead">New bot</div>
+        <div class="field">
+          <label for="botName">Bot name</label>
+          <input id="botName" type="text" placeholder="Email bot" />
+        </div>
+        <div class="field">
+          <label for="botRoot">Working folder</label>
+          <select id="botRoot"></select>
+        </div>
+        <div class="field">
+          <label for="botPrompt">Master prompt / standing orders</label>
+          <textarea id="botPrompt" rows="6" spellcheck="false" placeholder="Every morning read my inbox, summarise unread mail and save a report..."></textarea>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="botDate">Run date (optional)</label>
+            <input id="botDate" type="date" />
+          </div>
+          <div class="field">
+            <label for="botTime">Run time</label>
+            <input id="botTime" type="time" value="09:00" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="botRepeat">Repeat</label>
+          <select id="botRepeat">
+            <option value="once">Only when I click Run</option>
+            <option value="hourly">Every hour</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+        </div>
+
+        <div class="modal-actions">
+          <button class="ghost-btn" id="runAllBots">⚡ Run all bots</button>
+          <button class="primary-btn" id="addBot">Add bot</button>
+        </div>
+
+        <div class="subhead">Your bots</div>
+        <div class="scheduled-list" id="botList"><p class="help">Abhi koi bot nahi hai.</p></div>
+      </div>
+    </div>
+
+    <div class="modal" id="settingsModal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="modal-head">
+          <h2 id="settingsTitle">Settings</h2>
+          <button class="icon-btn" id="closeSettings" aria-label="Close">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
+
+        <div class="field">
+          <label for="providerSelect">Provider</label>
+          <select id="providerSelect">
+            <option value="nvidia">NVIDIA NIM (free)</option>
+            <option value="minimax">MiniMax</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="groq">Groq</option>
+            <option value="pollinations">Pollinations (image + video)</option>
+            <option value="custom">Custom / Ollama</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="baseUrlInput">API base URL</label>
+          <input id="baseUrlInput" type="text" spellcheck="false" placeholder="https://integrate.api.nvidia.com/v1" />
+        </div>
+
+        <div class="field">
+          <label for="apiKeyInput">API key <span class="value" id="apiKeyProvider">NVIDIA</span></label>
+          <input id="apiKeyInput" type="password" placeholder="Pehle provider chuno, phir key paste karein" spellcheck="false" />
+          <p class="help">Har provider ki apni key alag save hoti hai — Groq par switch karoge to Groq key dikhegi. <code>.env</code> key fallback hai. Free keys: <a href="https://build.nvidia.com" target="_blank" rel="noreferrer">NVIDIA</a> · <a href="https://console.groq.com" target="_blank" rel="noreferrer">Groq</a>.</p>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="imageProviderSelect">Image provider</label>
+            <select id="imageProviderSelect">
+              <option value="auto">Auto · best free first</option>
+              <option value="bing">Bing Image Creator · free</option>
+              <option value="cloudflare">Cloudflare Flux · free</option>
+              <option value="pollinations">Pollinations · free key</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="videoProviderSelect">Video provider</label>
+            <select id="videoProviderSelect">
+              <option value="auto">Auto · LTX first</option>
+              <option value="ltx">LTX-Video · GitHub/HF · free</option>
+              <option value="pollinations">Pollinations · free key</option>
+            </select>
+          </div>
+        </div>
+        <p class="help">Auto mode me Bing(image) aur LTX(video) pehle try hote hain; fail hone par free fallback chalta hai. Keys browser localStorage me rehti hain, server sirf memory me rakhta hai.</p>
+
+        <div class="field">
+          <label for="mediaKeyInput">Pollinations media key <span class="value">fallback</span></label>
+          <input id="mediaKeyInput" type="password" placeholder="Optional free key" spellcheck="false" />
+          <p class="help">Bing/Cloudflare/LTX ke liye zaroori nahi. Fallback ke liye free key: <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noreferrer">enter.pollinations.ai</a>.</p>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="cfAccountInput">Cloudflare Account ID</label>
+            <input id="cfAccountInput" type="text" placeholder="Free Cloudflare dashboard se" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="cfTokenInput">Cloudflare API token</label>
+            <input id="cfTokenInput" type="password" placeholder="Workers AI edit permission" spellcheck="false" />
+          </div>
+        </div>
+        <p class="help">Cloudflare Workers AI ka free plan roz 10,000 neurons deta hai — Flux image ke liye kaafi. <a href="https://dash.cloudflare.com/?to=/:account/ai/workers-ai" target="_blank" rel="noreferrer">Dashboard</a></p>
+
+        <div class="field">
+          <label for="hfTokenInput">Hugging Face token <span class="value">optional · higher video quota</span></label>
+          <input id="hfTokenInput" type="password" placeholder="Free read token for LTX-Video" spellcheck="false" />
+          <p class="help">LTX-Video bina token bhi chalta hai, par free anonymous queue chhota hai. <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">Free token</a></p>
+        </div>
+
+        <div class="field">
+          <label for="modelFilter">Available models <span class="value" id="modelCount">Loading…</span></label>
+          <input id="modelFilter" type="search" placeholder="Filter models by name…" autocomplete="off" />
+          <div class="model-list" id="modelList"><p class="help">Add a key to load your provider's model list.</p></div>
+        </div>
+
+        <div class="field">
+          <label for="modelInput">Selected model</label>
+          <input id="modelInput" type="text" list="modelOptions" placeholder="Pick from list or type a model ID" spellcheck="false" />
+          <datalist id="modelOptions"></datalist>
+          <p class="help">Overrides the Auto / Fast / Expert / Heavy tier.</p>
+        </div>
+
+        <div class="field">
+          <label for="imageModelSelect">Free image model</label>
+          <select id="imageModelSelect"></select>
+          <p class="help">Pollinations fallback ke liye model. Bing aur Cloudflare apne best model khud use karte hain.</p>
+        </div>
+
+        <div class="field">
+          <label for="videoModelSelect">Free video model</label>
+          <select id="videoModelSelect"></select>
+          <p class="help">Sirf Pollinations video provider ke liye. LTX provider is model list se independent hai.</p>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="videoRatioSelect">Video ratio</label>
+            <select id="videoRatioSelect">
+              <option value="16:9" selected>16:9 · normal video</option>
+              <option value="9:16">9:16 · reels / shorts</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="videoDurationSelect">Scene length</label>
+            <select id="videoDurationSelect">
+              <option value="3">3 seconds</option>
+              <option value="5" selected>5 seconds</option>
+              <option value="8">8 seconds</option>
+              <option value="10">10 seconds</option>
+            </select>
+          </div>
+        </div>
+        <p class="help">Video Studio story, cartoon, meme aur MP3 song videos banata hai. Scenes AI images (aur key ho to AI motion clips) se ban kar browser me render hote hain — kaam restart ke baad bhi resume hota hai.</p>
+
+        <div class="field">
+          <label for="tempInput">Creativity <span class="value" id="tempValue">0.7</span></label>
+          <input id="tempInput" type="range" min="0" max="1.5" step="0.1" value="0.7" />
+        </div>
+
+        <div class="field">
+          <label for="systemInput">Custom instructions</label>
+          <textarea id="systemInput" rows="3" placeholder="You are Nova, a helpful assistant…"></textarea>
+        </div>
+
+        <div class="modal-actions">
+          <button class="ghost-btn" id="clearAllBtn">Delete all chats</button>
+          <button class="primary-btn" id="saveSettings">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nova — Free AI Agent Tool</title>
+  <meta name="description" content="Nova: zero-dependency local AI agent with free image/video providers, browser automation, scheduler and Video Studio." />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #08090c;
+      --panel: #12141a;
+      --panel-2: #181b23;
+      --border: #262a35;
+      --text: #f4f6fb;
+      --muted: #9aa3b5;
+      --accent: #8b5cf6;
+      --accent-2: #22d3ee;
+      --green: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(900px 500px at 15% -10%, rgba(139,92,246,.26), transparent 60%),
+        radial-gradient(800px 500px at 90% 0%, rgba(34,211,238,.16), transparent 55%),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    a { color: var(--accent-2); }
+    .wrap { width: min(1080px, calc(100% - 36px)); margin: 0 auto; }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 22px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 20px; }
+    .logo {
+      width: 34px; height: 34px; border-radius: 11px;
+      display: grid; place-items: center;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      box-shadow: 0 0 28px rgba(139,92,246,.45);
+    }
+    .pill {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--muted);
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+    }
+    .hero { padding: 76px 0 44px; }
+    h1 {
+      margin: 0 0 16px;
+      font-size: clamp(38px, 7vw, 72px);
+      line-height: 1.03;
+      letter-spacing: -2px;
+    }
+    .grad {
+      background: linear-gradient(90deg, #c4b5fd, #67e8f9);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .lead { max-width: 720px; color: var(--muted); font-size: 18px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+    .badge {
+      border: 1px solid var(--border);
+      background: rgba(24,27,35,.75);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #cbd5e1;
+    }
+    section { padding: 34px 0; }
+    h2 { margin: 0 0 6px; font-size: 28px; letter-spacing: -.6px; }
+    .sub { color: var(--muted); margin: 0 0 24px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+    }
+    .card {
+      background: linear-gradient(180deg, var(--panel-2), var(--panel));
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+    }
+    .card h3 { margin: 0 0 8px; font-size: 17px; }
+    .card p { margin: 0; color: var(--muted); font-size: 14px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+    .g { background: var(--green); } .b { background: var(--accent-2); } .p { background: var(--accent); }
+    pre {
+      overflow: auto;
+      margin: 0;
+      padding: 20px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: #0c0e13;
+      color: #d7ddea;
+      font-size: 14px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; }
+    .note {
+      border-left: 3px solid var(--accent);
+      background: rgba(139,92,246,.09);
+      padding: 14px 18px;
+      border-radius: 0 12px 12px 0;
+      color: #ddd6fe;
+    }
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 24px 0 40px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    @media (max-width: 640px) { .hero { padding-top: 48px; } .pill { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand"><span class="logo">N</span> Nova</div>
+      <span class="pill">Free · Local · Zero dependency</span>
+    </header>
+
+    <main>
+      <div class="hero">
+        <h1>Grok-jaisa <span class="grad">AI agent tool</span><br />poorani tarah free.</h1>
+        <p class="lead">
+          Nova ek local AI chat + agent hai jo khud plan banakar web search, file operations, browser automation,
+          image generation aur video banane ka kaam karta hai — bina `npm install` ke.
+        </p>
+        <div class="badges">
+          <span class="badge">⚡ Agent mode</span>
+          <span class="badge">🖼 Bing / Cloudflare / Pollinations</span>
+          <span class="badge">🎬 LTX-Video</span>
+          <span class="badge">🌐 CDP browser tools</span>
+          <span class="badge">📅 Schedulers + bots</span>
+        </div>
+      </div>
+
+      <section>
+        <h2>Kya kar sakta hai?</h2>
+        <p class="sub">Sab kuch ek hi desktop app jaisi local experience me.</p>
+        <div class="grid">
+          <div class="card"><h3><span class="dot g"></span>End-to-end agent</h3><p>Plan banata hai, tools chalata hai, files/report banakar deta hai — sirf jawab nahi.</p></div>
+          <div class="card"><h3><span class="dot p"></span>Free best-quality images</h3><p>Bing Image Creator primary, Cloudflare Flux fallback, Pollinations backup.</p></div>
+          <div class="card"><h3><span class="dot b"></span>Free AI video</h3><p>LTX-Video open-source model GitHub/Hugging Face Space se. MP3 ke saath Video Studio.</p></div>
+          <div class="card"><h3><span class="dot g"></span>Video Studio</h3><p>16:9 aur 9:16, style/FX/transitions auto-infer, scene images + AI motion clips.</p></div>
+          <div class="card"><h3><span class="dot b"></span>Browser automation</h3><p>Chrome/Edge CDP se sites khole, click/type/text/screenshot — Gmail/YouTube flows ke saath.</p></div>
+          <div class="card"><h3><span class="dot p"></span>Schedule + bots</h3><p>Master prompt, date/time, allowed folders, multiple bots ek click se run.</p></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Quick start</h2>
+        <p class="sub">Node 20.6+ aur Chrome/Edge hona chahiye.</p>
+<pre><code>cd "G:\Nova Bot"
+copy .env.example .env
+npm start</code></pre>
+        <p class="sub" style="margin-top:12px">Phir kholein: <strong>http://localhost:4173</strong></p>
+      </section>
+
+      <section>
+        <h2>Free providers</h2>
+        <p class="sub">Settings me provider aur model dono badle ja sakte hain.</p>
+        <table>
+          <thead><tr><th>Kaam</th><th>Default</th><th>Backup</th><th>Note</th></tr></thead>
+          <tbody>
+            <tr><td>Chat</td><td>NVIDIA / Groq / any OpenAI-compatible</td><td>Ollama</td><td>Key browser localStorage me</td></tr>
+            <tr><td>Image</td><td>Bing Image Creator</td><td>Cloudflare Flux → Pollinations</td><td>Bing UI automation, free credits</td></tr>
+            <tr><td>Video</td><td>LTX-Video (GitHub/HF)</td><td>Pollinations</td><td>LTX ke liye key nahi chahiye</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <div class="note">
+          <strong>GitHub Pages note:</strong> Ye page sirf project landing/demo page hai. Poori Nova app chalane ke liye
+          repository clone karke local ya kisi Node-hosting provider par <code>node server.js</code> chalana hota hai.
+          GitHub Pages sirf static files serve karta hai, isliye <code>/api/*</code> endpoints yahan available nahi hote.
+        </div>
+      </section>
+    </main>
+
+    <footer>Made for a totally free, local-first AI workflow. · Nova</footer>
+  </div>
+</body>
+</html>

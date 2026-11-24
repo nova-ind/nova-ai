@@ -30,7 +30,8 @@ let mediaKey = (process.env.POLLINATIONS_API_KEY || '').trim();
 let cloudflareAccount = (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
 let cloudflareToken = (process.env.CLOUDFLARE_API_TOKEN || '').trim();
 let hfToken = (process.env.HF_TOKEN || '').trim();
-const DEFAULT_IMAGE_PROVIDER = process.env.DEFAULT_IMAGE_PROVIDER || 'bing';
+const BING_SUPPORTED = process.platform === 'win32'; // Chrome/CDP profile sirf local Windows par hota hai
+const DEFAULT_IMAGE_PROVIDER = process.env.DEFAULT_IMAGE_PROVIDER || (BING_SUPPORTED ? 'bing' : 'auto');
 const DEFAULT_VIDEO_PROVIDER = process.env.DEFAULT_VIDEO_PROVIDER || 'ltx';
 const CF_IMAGE_MODELS = [
   '@cf/black-forest-labs/flux-1-schnell',
@@ -748,10 +749,14 @@ async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'po
 
 async function generateImageSmart(prompt, options = {}) {
   const requested = options.provider || DEFAULT_IMAGE_PROVIDER;
-  const order =
-    requested === 'auto'
-      ? ['bing', ...(cloudflareToken && cloudflareAccount ? ['cloudflare'] : []), 'pollinations']
-      : [requested];
+  const useAuto = requested === 'auto' || (requested === 'bing' && !BING_SUPPORTED);
+  const order = useAuto
+    ? [
+        ...(BING_SUPPORTED ? ['bing'] : []),
+        ...(cloudflareToken && cloudflareAccount ? ['cloudflare'] : []),
+        'pollinations',
+      ]
+    : [requested];
   let lastError = null;
   for (const provider of order) {
     try {
@@ -1562,7 +1567,10 @@ function mediaProviderState() {
     defaults: { image: DEFAULT_IMAGE_PROVIDER, video: DEFAULT_VIDEO_PROVIDER },
     image: IMAGE_PROVIDERS.map((item) => ({
       ...item,
-      configured: item.id !== 'cloudflare' || Boolean(cloudflareAccount && cloudflareToken),
+      configured:
+        item.id === 'bing'
+          ? BING_SUPPORTED
+          : item.id !== 'cloudflare' || Boolean(cloudflareAccount && cloudflareToken),
     })),
     video: VIDEO_PROVIDERS.map((item) => ({
       ...item,

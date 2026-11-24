@@ -20,11 +20,33 @@ Phir browser me kholo: **http://localhost:4173**
 
 > Node 20.6+ chahiye (aapke system par v26 hai).
 
-### GitHub Pages (optional landing site)
+### Live app: Render (free) + auto crawler
 
-Repo push karne ke baad GitHub par **Settings → Pages → Build and deployment → Deploy from a branch → main → /docs** chuno.
-`docs/index.html` ek static project landing page hai. Poori app GitHub Pages par nahi chal sakti (uske liye `server.js`/APIs chahiye);
-live app ke liye clone karke local ya kisi Node host par `npm start` chalao.
+GitHub Pages sirf static landing page dikhata hai; **poori Nova app wahan nahi chal sakti** kyunki usko `server.js` aur `/api/*` chahiye.
+App ko online chalane ka free tarika:
+
+1. Ye repo GitHub par push karein (`.env` aur `workspace/` hargiz nahi).
+2. https://dashboard.render.com → **New + → Web Service** → repo select karein.
+3. `render.yaml` automatically detect ho jayega, ya manually:
+   - **Build Command:** `npm install --no-audit --no-fund`
+   - **Start Command:** `npm start`
+   - **Health Check Path:** `/api/health`
+   - **Plan:** Free
+4. Render dashboard me **Environment** me apni keys daalein (optional — har visitor apni key Settings me bhi daal sakta hai).
+5. Free service 15 minute idle ke baad sleep karta hai. Is repo me `.github/workflows/keep-awake.yml` hai jo har 5 minute par health endpoint ping karta hai — yani Render service hamesha jagi rehti hai. Apne URL ke liye workflow me `https://nova-ai-9gbh.onrender.com/api/health` update kar lo. GitHub repo public ho to Actions free me chalte hain.
+
+Manual alternative: **UptimeRobot** ya **cron-job.org** se har 5 minute par GET karo:
+
+```text
+https://nova-ai-9gbh.onrender.com/api/health
+```
+
+> Render par Chrome/CDP browser profile nahi hota. Isliye `browser_open`, Bing Image Creator UI, Gmail/YouTube login jaise tools wahan kaam nahi karenge. Chat, web search, Cloudflare/Pollinations images aur LTX video chalenge. In sab tools ke saath poori app chahiye to PC par `npm start` + Cloudflare Tunnel/ngrok use karein.
+
+### GitHub Pages (sirf static landing page, optional)
+
+Agar browsing ke liye ek simple project page chahiye: **Settings → Pages → Deploy from a branch → main → /docs**.
+Ye sirf marketing/landing page hai; actual app ka live URL Render ka hoga.
 
 ### API key kahan se milegi (free)
 

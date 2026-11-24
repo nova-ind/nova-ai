@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: nova-ai-bot
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: npm install --no-audit --no-fund
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: DEFAULT_IMAGE_PROVIDER
+        value: auto
+      - key: DEFAULT_VIDEO_PROVIDER
+        value: ltx
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: UPSTREAM_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: DEFAULT_MODEL
+        value: minimaxai/minimax-m3.1-flash
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: HF_TOKEN
+        sync: false
+      - key: POLLINATIONS_API_KEY
+        sync: false
