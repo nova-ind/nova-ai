@@ -27,6 +27,7 @@ const ffmpegJobs = [];
 const ffmpegRunning = new Set();
 const ffmpegChildren = new Map();
 let ffmpegVersionCache = null;
+let ffmpegEncodersCache = null;
 
 const PORT = Number(process.env.PORT || 4173);
 const UPSTREAM_BASE = (process.env.UPSTREAM_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
@@ -2911,6 +2912,28 @@ async function ffmpegExecutable(kind = 'ffmpeg') {
   return null;
 }
 
+async function ffmpegEncoderSet(bin) {
+  if (!ffmpegEncodersCache) {
+    const result = await runCommand(bin, ['-hide_banner', '-encoders'], 15_000);
+    const text = `${result.out || ''}\n${result.err || ''}`;
+    ffmpegEncodersCache = new Set(
+      [...text.matchAll(/(?:^|\n)\s*[VAS.]{6}\s+([A-Za-z0-9_-]+)/g)].map((match) => match[1]),
+    );
+  }
+  return ffmpegEncodersCache;
+}
+
+async function ffmpegVideoCodecArgs(bin, crf = 23) {
+  const encoders = await ffmpegEncoderSet(bin);
+  if (encoders.has('libx264')) {
+    return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(crf)];
+  }
+  if (encoders.has('libopenh264')) {
+    return ['-c:v', 'libopenh264', '-b:v', '4M'];
+  }
+  return ['-c:v', 'mpeg4', '-q:v', '3'];
+}
+
 async function ffmpegStatus() {
   const bin = await ffmpegExecutable('ffmpeg');
   if (!bin) return { available: false, version: null, note: 'FFmpeg bundled nahi mila.' };
@@ -2973,7 +2996,11 @@ async function ffmpegBuildArgs(operation, payload, output) {
   const crf = Math.min(40, Math.max(18, Number(payload.crf) || 23));
   const width = Math.max(0, Math.min(3840, Number(payload.width) || 0));
   const height = Math.max(0, Math.min(3840, Number(payload.height) || 0));
-  const reencode = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(crf), '-c:a', 'aac', '-b:a', '128k'];
+  const bin = await ffmpegExecutable('ffmpeg');
+  const reencode = [
+    ...(bin ? await ffmpegVideoCodecArgs(bin, crf) : ['-c:v', 'mpeg4', '-q:v', '3']),
+    '-c:a', 'aac', '-b:a', '128k',
+  ];
 
   if (operation === 'trim') {
     if (accurate) args.push('-i', input, '-ss', String(start));
@@ -3357,7 +3384,7 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
     '-filter_complex', filters.join(';'),
     '-map', '[vout]', '-map', '[aout]',
     '-t', target.toFixed(3),
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+    ...await ffmpegVideoCodecArgs(bin, 23),
     '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '160k',
     '-movflags', '+faststart',
