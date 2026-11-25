@@ -211,6 +211,9 @@ let chats = readJson(CHATS_KEY, []);
 const storedSettings = readJson(SETTINGS_KEY, {});
 let settings = { ...DEFAULT_SETTINGS, ...storedSettings };
 settings.modes = { ...DEFAULT_SETTINGS.modes, ...(storedSettings.modes || {}) };
+// Purana "6 scenes" wala saved option ab 3/5 min videos ke liye auto ho jata hai.
+const legacySceneCount = Number(settings.videoSceneCount) || 0;
+if (legacySceneCount > 0 && legacySceneCount < 20) settings.videoSceneCount = 'auto';
 settings.apiKeys = { ...DEFAULT_SETTINGS.apiKeys, ...(storedSettings.apiKeys || {}) };
 settings.providerModels = { ...DEFAULT_SETTINGS.providerModels, ...(storedSettings.providerModels || {}) };
 settings.mediaModels = { ...DEFAULT_SETTINGS.mediaModels, ...(storedSettings.mediaModels || {}) };
@@ -2259,8 +2262,12 @@ async function startVideoJob(chat, prompt, audioAttachment) {
   if (!audioPath && settings.songPath) audioPath = settings.songPath;
   const type = inferVideoType(prompt, Boolean(audioPath));
   const videoProvider = settings.videoProvider || DEFAULT_SETTINGS.videoProvider;
-  const requestedScenes = settings.videoSceneCount === 'auto' ? 0 : (Number(settings.videoSceneCount) || 0);
-  // Auto scenes server par duration/BPM se decide hote hain — yahan fixed 6 nahi bhejte.
+  let requestedScenes = settings.videoSceneCount === 'auto' ? 0 : (Number(settings.videoSceneCount) || 0);
+  // Song upload ya 3+ min story me purana chhota scene count (6/8) kabhi na bhejein.
+  if (requestedScenes > 0 && requestedScenes < 20 && (audioPath || (Number(settings.videoLengthSeconds) || 60) >= 180)) {
+    requestedScenes = 0;
+  }
+  // Auto scenes server par actual duration/BPM se decide hote hain — fixed 6 nahi.
   const sceneCount = type === 'meme' && !requestedScenes ? 8 : requestedScenes;
   const payload = {
     prompt,

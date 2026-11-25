@@ -1025,7 +1025,12 @@ async function createMediaJob(payload = {}) {
   const durationSeconds = Math.min(900, Math.max(15,
     audioDuration > 0 ? Math.round(audioDuration) : requestedDuration || 60,
   ));
-  const requestedScenes = Number(payload.sceneCount) || 0;
+  const rawRequestedScenes = Number(payload.sceneCount) || 0;
+  // Purane settings me 6 scenes saved ho to 3/5 min ke video me ignore karo — auto count lagao.
+  const requestedScenes = rawRequestedScenes > 0 && rawRequestedScenes < 20
+    && (audioPath || durationSeconds >= 120 || type === 'song')
+    ? 0
+    : rawRequestedScenes;
   const sceneCount = sceneCountForDuration(durationSeconds, 0, requestedScenes);
 
   const job = {
@@ -1360,6 +1365,571 @@ async function listScriptFiles(dir) {
 
 const DESTRUCTIVE_COMMAND = /(?:^|[;&|]\s*)(?:format\s|diskpart(?:\s|$)|shutdown\s|rd\s+\/s\s+\/q\s+[a-z]:\\?\s*$)/i;
 
+/* ---------------------- built-in REA-style analysis tools ------------------ */
+
+const ANALYSIS_TEXT_EXT = new Set([
+  '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.html', '.htm', '.css', '.scss', '.json',
+  '.py', '.go', '.rs', '.java', '.php', '.rb', '.sh', '.ps1', '.sql', '.md', '.yml', '.yaml',
+  '.vue', '.svelte', '.env', '.txt', '.config', '.xml',
+]);
+const ANALYSIS_SKIP_DIRS = new Set([
+  'node_modules', '.git', '.next', 'dist', 'build', 'out', 'runtime', '.cache', 'coverage',
+]);
+
+async function walkAnalysisFiles(root, maxFiles = 400) {
+  const files = [];
+  async function walk(current, depth) {
+    if (files.length >= maxFiles || depth > 7) return;
+    let entries = [];
+    try { entries = await readdir(current, { withFileTypes: true }); } catch { return; }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (files.length >= maxFiles) break;
+      if (entry.name.startsWith('.') && entry.name !== '.env') continue;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (!ANALYSIS_SKIP_DIRS.has(entry.name.toLowerCase())) await walk(full, depth + 1);
+        continue;
+      }
+      let size = 0;
+      try { size = (await stat(full)).size; } catch { continue; }
+      files.push({ full, rel: path.relative(root, full).replace(/\\/g, '/'), ext: path.extname(entry.name).toLowerCase(), size });
+    }
+  }
+  await walk(root, 0);
+  return files;
+}
+
+function uniqueLimited(values, limit = 40) {
+  return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))].slice(0, limit);
+}
+
+function detectStack(text, files, pkg) {
+  const stack = new Set();
+  const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+  for (const [name, aliases] of Object.entries({
+    React: ['react'], Next: ['next'], Vue: ['vue'], Nuxt: ['nuxt'], Angular: ['@angular/core'],
+    Svelte: ['svelte'], Express: ['express'], Fastify: ['fastify'], Koa: ['koa'],
+    Vite: ['vite'], Webpack: ['webpack'], Tailwind: ['tailwindcss'], TypeScript: ['typescript'],
+    Electron: ['electron'], SQLite: ['sqlite3', 'better-sqlite3'], Postgres: ['pg', 'prisma'],
+    MongoDB: ['mongoose', 'mongodb'], FFmpeg: ['fluent-ffmpeg'],
+  })) {
+    if (aliases.some((alias) => deps[alias])) stack.add(name);
+  }
+  if (/from\s+['"]react|require\(['"]react/.test(text)) stack.add('React');
+  if (/from\s+['"]vue|new Vue\(/.test(text)) stack.add('Vue');
+  if (/\bcreateServer\(|app\.listen\(/.test(text)) stack.add('Node HTTP');
+  if (/<html[\s>]/i.test(text)) stack.add('HTML/CSS');
+  if (files.some((file) => file.ext === '.py')) stack.add('Python');
+  if (files.some((file) => file.ext === '.ps1')) stack.add('PowerShell');
+  return [...stack];
+}
+
+async function analyzeAppFolder(dir, root, options = {}) {
+  const files = await walkAnalysisFiles(dir, Math.min(800, Math.max(20, Number(options.maxFiles) || 400)));
+  const texts = [];
+  for (const file of files) {
+    if (!ANALYSIS_TEXT_EXT.has(file.ext) || file.size > 300_000) continue;
+    const value = await readFile(file.full, 'utf8').catch(() => '');
+    if (value) texts.push({ rel: file.rel, text: value.slice(0, 120_000) });
+  }
+  const allText = texts.map((item) => item.text).join('\n').slice(0, 900_000);
+  let pkg = {};
+  const pkgFile = files.find((file) => file.rel === 'package.json');
+  if (pkgFile) pkg = JSON.parse(await readFile(pkgFile.full, 'utf8').catch(() => '{}'));
+
+  const routes = [];
+  for (const pattern of [
+    /(?:app|router|server)\.(?:get|post|put|delete|patch|use)\(\s*['"`]([^'"`]+)/g,
+    /(?:fetch|axios\.(?:get|post))\(\s*['"`]([^'"`]+)/g,
+    /path\s*:\s*['"`]([^'"`]+)/g,
+    /href\s*=\s*['"`](\/[^'"`]*)/g,
+  ]) {
+    for (const match of allText.matchAll(pattern)) routes.push(match[1]);
+  }
+
+  const headings = [];
+  const buttons = [];
+  const inputs = [];
+  const links = [];
+  for (const match of allText.matchAll(/<(h1|h2|h3|button|a|input|label)\b([^>]*)>/gi)) {
+    const tag = match[1].toLowerCase();
+    const attrs = match[2] || '';
+    const textMatch = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]{0,160}?)<\\/${tag}>`, 'i').exec(allText.slice(match.index, match.index + 400));
+    const label = textMatch ? textMatch[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
+    const id = /\bid\s*=\s*['"]([^'"]+)/.exec(attrs)?.[1] || '';
+    const className = /\bclass\s*=\s*['"]([^'"]+)/.exec(attrs)?.[1] || '';
+    const placeholder = /\bplaceholder\s*=\s*['"]([^'"]+)/.exec(attrs)?.[1] || '';
+    const href = /\bhref\s*=\s*['"]([^'"]+)/.exec(attrs)?.[1] || '';
+    if (tag === 'h1' || tag === 'h2' || tag === 'h3') headings.push({ tag, text: label || id || className, className });
+    if (tag === 'button' || /btn|button/.test(className)) buttons.push({ text: label || id || className, className });
+    if (tag === 'input') inputs.push({ placeholder, id, className, type: /\btype\s*=\s*['"]([^'"]+)/.exec(attrs)?.[1] || 'text' });
+    if (tag === 'a' && href) links.push({ text: label || href, href });
+  }
+
+  const componentNames = [];
+  for (const pattern of [
+    /function\s+([A-Z][A-Za-z0-9_]{2,})\s*\(/g,
+    /const\s+([A-Z][A-Za-z0-9_]{2,})\s*=\s*(?:\([^)]*\)|\w)?\s*=>/g,
+    /class\s+([A-Z][A-Za-z0-9_]{2,})/g,
+  ]) {
+    for (const match of allText.matchAll(pattern)) componentNames.push(match[1]);
+  }
+
+  const colors = uniqueLimited([...allText.matchAll(/#(?:[0-9a-f]{3}|[0-9a-f]{6})\b/gi)].map((match) => match[0]), 30);
+  const fonts = uniqueLimited([...allText.matchAll(/font-family\s*:\s*([^;}]+)/gi)].map((match) => match[1]), 12);
+  const cssVars = uniqueLimited([...allText.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;}]+)/gi)].map((match) => `${match[1]}: ${match[2]}`), 24);
+  const titleFromHtml = /<title>([\s\S]*?)<\/title>/i.exec(allText)?.[1]?.trim();
+  const titleFromReadme = /^#\s+(.+)$/m.exec(allText)?.[1]?.trim();
+
+  const report = {
+    kind: 'app-folder',
+    source: dir,
+    generatedAt: new Date().toISOString(),
+    title: titleFromHtml || titleFromReadme || pkg.name || path.basename(dir),
+    stack: detectStack(allText, files, pkg),
+    scripts: pkg?.scripts || {},
+    dependencies: { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) },
+    files: files.slice(0, 200).map(({ rel, ext, size }) => ({ path: rel, ext, size })),
+    entryPoints: uniqueLimited(files
+      .filter((file) => /^(index\.html|server\.(js|ts)|app\.(js|ts)|main\.(js|ts)|src\/index\.(js|ts|jsx|tsx)|package\.json)$/.test(file.rel))
+      .map((file) => file.rel), 20),
+    routes: uniqueLimited(routes, 80),
+    components: uniqueLimited(componentNames, 60),
+    ui: {
+      headings: uniqueLimited(headings.map((item) => item.text), 24).slice(0, 24),
+      buttons: uniqueLimited(buttons.map((item) => item.text), 24),
+      inputs: inputs.slice(0, 20),
+      links: links.slice(0, 30),
+    },
+    design: { colors, fonts, cssVars },
+    assets: uniqueLimited(files.filter((file) => ['.png', '.jpg', '.jpeg', '.svg', '.webp', '.woff', '.woff2', '.mp4'].includes(file.ext)).map((file) => file.rel), 50),
+    hints: {
+      hasDatabase: /mongoose|sqlite|postgres|prisma|mongodb|CREATE TABLE/i.test(allText),
+      hasAuth: /jwt|oauth|login|session|bcrypt|passport/i.test(allText),
+      hasApi: /\/api\/|fetch\(|axios/i.test(allText),
+      hasRealtime: /websocket|socket\.io|EventSource/i.test(allText),
+    },
+  };
+
+  let file = null;
+  if (options.save !== false) {
+    const slug = path.basename(dir).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 50) || 'app';
+    const analysisDir = safeWorkspacePath('analysis', root);
+    await mkdir(analysisDir, { recursive: true });
+    file = path.join(analysisDir, `${slug}-analysis.json`);
+    await writeFile(file, JSON.stringify(report, null, 2), 'utf8');
+  }
+  return { report, file };
+}
+
+async function analyzeWebPage(rawUrl, root) {
+  const url = String(rawUrl || '').trim();
+  if (!/^https?:\/\/[^\s]+$/i.test(url)) throw new Error('Valid http(s) URL chahiye.');
+  const target = await browserTarget(url);
+  await sleep(1500);
+  const expression = `(() => {
+    const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, 180);
+    const bodyStyle = getComputedStyle(document.body);
+    const nodes = [...document.querySelectorAll('body *')].slice(0, 500);
+    const headings = [...document.querySelectorAll('h1,h2,h3')].slice(0, 24).map((el) => ({ tag: el.tagName.toLowerCase(), text: clean(el.innerText), className: clean(el.className) }));
+    const buttons = [...document.querySelectorAll('button,a.button,[role=button]')].slice(0, 30).map((el) => ({ text: clean(el.innerText), className: clean(el.className), bg: getComputedStyle(el).backgroundColor }));
+    const inputs = [...document.querySelectorAll('input,textarea,select')].slice(0, 30).map((el) => ({ tag: el.tagName.toLowerCase(), type: el.type || '', placeholder: clean(el.placeholder), name: clean(el.name), id: clean(el.id) }));
+    const links = [...document.querySelectorAll('a[href]')].slice(0, 40).map((el) => ({ text: clean(el.innerText), href: el.getAttribute('href') }));
+    const structure = nodes.slice(0, 120).map((el) => ({ tag: el.tagName.toLowerCase(), id: clean(el.id), className: clean(el.className).slice(0, 90) })).filter((item) => item.id || item.className);
+    const colors = [...new Set([bodyStyle.backgroundColor, bodyStyle.color, ...buttons.map((b) => b.bg)])].slice(0, 20);
+    const resources = performance.getEntriesByType('resource').slice(0, 60).map((item) => item.name);
+    return {
+      url: location.href,
+      title: document.title,
+      description: clean(document.querySelector('meta[name=description]')?.content),
+      headings, buttons, inputs, links, structure, colors,
+      font: bodyStyle.fontFamily,
+      bodyBackground: bodyStyle.backgroundColor,
+      bodyColor: bodyStyle.color,
+      textSample: clean(document.body.innerText).slice(0, 2000),
+      resources,
+      frameworks: {
+        react: Boolean(window.React || document.querySelector('#root')),
+        vue: Boolean(window.Vue || document.querySelector('#app')),
+        next: Boolean(window.__NEXT_DATA__),
+        jquery: Boolean(window.jQuery),
+      },
+    };
+  })()`;
+  const data = await pageEvaluate(expression) || {};
+  let screenshot = null;
+  try {
+    const shot = await cdpCommand(target.webSocketDebuggerUrl, 'Page.captureScreenshot', { format: 'png' });
+    if (shot.data) screenshot = Buffer.from(shot.data, 'base64');
+  } catch { /* screenshot optional */ }
+
+  const slug = String(data.title || url).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 50) || 'webpage';
+  const analysisDir = safeWorkspacePath('analysis', root);
+  await mkdir(analysisDir, { recursive: true });
+  const file = path.join(analysisDir, `${slug}-webpage.json`);
+  const report = {
+    kind: 'webpage',
+    source: data.url || url,
+    generatedAt: new Date().toISOString(),
+    title: data.title || slug,
+    description: data.description || '',
+    stack: Object.entries(data.frameworks || {}).filter(([, value]) => value).map(([name]) => name),
+    ui: {
+      headings: (data.headings || []).map((item) => item.text).filter(Boolean),
+      buttons: (data.buttons || []).map((item) => item.text).filter(Boolean),
+      inputs: data.inputs || [],
+      links: data.links || [],
+      structure: data.structure || [],
+      text: data.textSample || '',
+    },
+    design: {
+      colors: data.colors || [],
+      background: data.bodyBackground || '',
+      color: data.bodyColor || '',
+      font: data.font || '',
+    },
+    routes: (data.links || []).map((item) => item.href).filter((href) => href && href.startsWith('/')),
+    resources: data.resources || [],
+  };
+  await writeFile(file, JSON.stringify(report, null, 2), 'utf8');
+  if (screenshot) await writeFile(path.join(analysisDir, `${slug}-screenshot.png`), screenshot);
+  return { report, file };
+}
+
+async function analyzeBinaryFile(rawPath, root) {
+  const file = safeWorkspacePath(rawPath || '', root);
+  const info = await stat(file);
+  const size = Math.min(info.size, 4 * 1024 * 1024);
+  const handle = await (await import('node:fs/promises')).open(file, 'r');
+  const buffer = Buffer.alloc(size);
+  try { await handle.read(buffer, 0, size, 0); } finally { await handle.close(); }
+  const ascii = buffer.toString('latin1');
+  const utf16 = buffer.toString('utf16le');
+  const magic = buffer.length > 4 ? buffer.subarray(0, 4).toString('hex').toUpperCase() : '';
+  const kind = magic.startsWith('4D5A') ? 'PE/EXE/DLL'
+    : magic.startsWith('504B') ? 'ZIP/Office'
+      : buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])) ? 'PNG'
+        : magic.startsWith('7F454C46') ? 'ELF' : 'unknown';
+  const strings = uniqueLimited([
+    ...(ascii.match(/[\x20-\x7E]{6,}/g) || []),
+    ...(utf16.match(/[\x20-\x7E]{8,}/g) || []),
+  ], 120);
+  const report = {
+    kind: 'binary',
+    source: file,
+    generatedAt: new Date().toISOString(),
+    size: info.size,
+    format: kind,
+    magic,
+    urls: uniqueLimited(strings.filter((value) => /^https?:\/\//.test(value)), 30),
+    paths: uniqueLimited(strings.filter((value) => /^[A-Za-z]:\\|^\/[\w.-]+\//.test(value)), 30),
+    dlls: uniqueLimited(strings.filter((value) => /^(?:kernel32|user32|gdi32|advapi32|shell32|winhttp|ws2_32)\.dll$/i.test(value)), 30),
+    strings: strings.slice(0, 120),
+  };
+  const analysisDir = safeWorkspacePath('analysis', root);
+  await mkdir(analysisDir, { recursive: true });
+  const slug = path.basename(file).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 50) || 'binary';
+  const out = path.join(analysisDir, `${slug}-binary.json`);
+  await writeFile(out, JSON.stringify(report, null, 2), 'utf8');
+  return { report, file: out };
+}
+
+function safeCssValue(value, fallback) {
+  const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned || cleaned.length > 180) return fallback;
+  if (new RegExp("[^a-zA-Z0-9#.,()%\\-\\/\\s\"']").test(cleaned)) return fallback;
+  return cleaned;
+}
+
+function replicateFromReport(report, prompt, root, target) {
+  const title = String(report.title || prompt || 'Nova Replica App').slice(0, 120);
+  const headings = (report.ui?.headings || []).filter(Boolean);
+  const buttons = (report.ui?.buttons || []).filter(Boolean);
+  const inputs = Array.isArray(report.ui?.inputs) ? report.ui.inputs.slice(0, 6) : [];
+  const links = Array.isArray(report.ui?.links) ? report.ui.links.slice(0, 8) : [];
+  const colors = report.design?.colors || [];
+  const accent = safeCssValue(colors.find((color) => /^#/.test(color)) || colors[0], '#6c5ce7');
+  const background = safeCssValue(report.design?.background, '#0d0e11');
+  const foreground = safeCssValue(report.design?.color, '#f2f3f5');
+  const font = safeCssValue(report.design?.font, 'system-ui, -apple-system, Segoe UI, sans-serif');
+  const heroTitle = headings[0] || title;
+  const subtitle = headings[1] || report.description || (report.ui?.text || '').slice(0, 160) || 'Nova ne is app ka structure analyse karke waisa hi interface banaya hai.';
+  const features = headings.slice(1, 7);
+  while (features.length < 6) features.push(`Feature ${features.length + 1}`);
+  const esc = (value) => escapeHtmlText(String(value || '')).slice(0, 160);
+
+  const navHtml = links.length
+    ? links.map((link) => `<a href="${esc(link.href || '#')}">${esc(link.text || 'Link')}</a>`).join('\n        ')
+    : '<a href="#features">Features</a>\n        <a href="#workspace">Workspace</a>';
+  const actionsHtml = buttons.slice(0, 4).map((button, index) =>
+    `<button class="${index === 0 ? 'primary' : 'ghost'}" data-action="${esc(button)}" type="button">${esc(button)}</button>`).join('\n          ')
+    || '<button class="primary" data-action="Get started" type="button">Get started</button>';
+  const cardsHtml = features.map((feature, index) =>
+    `<article class="card"><span class="card-index">0${index + 1}</span><h3>${esc(feature)}</h3><p>${esc(`Smart workflow for ${feature}`.slice(0, 140))}</p></article>`).join('\n        ');
+  const inputsHtml = inputs.length
+    ? inputs.map((input) => `<label><span>${esc(input.placeholder || input.name || input.id || 'Field')}</span><input id="${esc(input.id || `field-${Math.random().toString(36).slice(2, 7)}`)}" type="${esc(input.type || 'text')}" placeholder="${esc(input.placeholder || 'Type here')}" /></label>`).join('\n          ')
+    : '<label><span>New item</span><input id="itemInput" type="text" placeholder="Add something…" maxlength="140" /></label>';
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${esc(title)}</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">N</span><strong>${esc(title)}</strong></div>
+    <nav>${navHtml}</nav>
+    <button id="themeBtn" class="ghost" type="button">Theme</button>
+  </header>
+  <main>
+    <section class="hero">
+      <p class="eyebrow">Nova replica · analysed build</p>
+      <h1>${esc(heroTitle)}</h1>
+      <p class="subtitle">${esc(subtitle)}</p>
+      <div class="actions">${actionsHtml}</div>
+    </section>
+    <section class="grid" id="features">${cardsHtml}</section>
+    <section class="panel" id="workspace">
+      <div>
+        <h2>Quick workspace</h2>
+        <p>Original app ke inputs/actions ko yahin reproduce kiya gaya hai.</p>
+      </div>
+      <form id="itemForm">
+        ${inputsHtml}
+        <button class="primary" type="submit">Save</button>
+      </form>
+      <ul id="list" class="list"></ul>
+    </section>
+  </main>
+  <footer>Built by Nova · source: ${esc(report.source || prompt || 'analysis')}</footer>
+  <script src="app.js"></script>
+</body>
+</html>
+`;
+
+  const css = `:root {
+  color-scheme: dark;
+  --accent: ${accent};
+  --bg: ${background};
+  --text: ${foreground};
+  --card: rgba(127, 127, 127, 0.10);
+  --line: rgba(127, 127, 127, 0.22);
+  --muted: ${foreground};
+}
+body.light {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --text: #16171a;
+  --card: #ffffff;
+  --line: #e4e6eb;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ${font};
+}
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 12% -10%, var(--accent), transparent 42%);
+  opacity: .16;
+}
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 14px clamp(18px, 5vw, 56px);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+}
+.brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+.logo {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 800;
+}
+nav { display: flex; gap: 16px; }
+nav a { color: var(--text); text-decoration: none; opacity: .78; font-size: 14px; }
+nav a:hover { opacity: 1; }
+main { width: min(1080px, calc(100% - 36px)); margin: 0 auto; padding: 56px 0 40px; }
+.hero { max-width: 760px; margin-bottom: 38px; }
+.eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+h1 { margin: 10px 0; font-size: clamp(34px, 6vw, 62px); line-height: 1.05; }
+.subtitle { max-width: 640px; opacity: .72; font-size: 17px; line-height: 1.6; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+button, input {
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 11px 15px;
+  background: var(--card);
+  color: var(--text);
+}
+button { cursor: pointer; font-weight: 700; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.card { padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); }
+.card-index { color: var(--accent); font-size: 12px; font-weight: 800; }
+.card h3 { margin: 10px 0 6px; font-size: 17px; }
+.card p { margin: 0; opacity: .68; font-size: 14px; line-height: 1.5; }
+.panel { margin-top: 26px; padding: 24px; border: 1px solid var(--line); border-radius: 18px; background: var(--card); }
+.panel h2 { margin: 0 0 6px; }
+.panel p { margin: 0 0 18px; opacity: .7; }
+#itemForm { display: grid; gap: 12px; max-width: 560px; }
+#itemForm label { display: grid; gap: 6px; font-size: 13px; opacity: .85; }
+.list { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 8px; }
+.list li { display: flex; align-items: center; gap: 10px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 10px; }
+.list li.done span { text-decoration: line-through; opacity: .55; }
+.list span { flex: 1; overflow-wrap: anywhere; }
+.list button { padding: 5px 9px; font-size: 12px; }
+footer { padding: 24px; text-align: center; opacity: .55; font-size: 12px; }
+@media (max-width: 700px) { nav { display: none; } .topbar { padding: 12px 18px; } }
+`;
+
+  const js = `const STORE_KEY = 'nova-replica-items';
+const items = JSON.parse(localStorage.getItem(STORE_KEY) || '[]');
+const list = document.getElementById('list');
+const form = document.getElementById('itemForm');
+const input = document.getElementById('itemInput') || form?.querySelector('input');
+const themeBtn = document.getElementById('themeBtn');
+
+function save() {
+  localStorage.setItem(STORE_KEY, JSON.stringify(items));
+  render();
+}
+function render() {
+  if (!list) return;
+  list.replaceChildren();
+  items.forEach((item, index) => {
+    const li = document.createElement('li');
+    if (item.done) li.className = 'done';
+    const span = document.createElement('span');
+    span.textContent = item.text;
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.textContent = item.done ? 'Undo' : 'Done';
+    toggle.onclick = () => { item.done = !item.done; save(); };
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = 'Delete';
+    del.onclick = () => { items.splice(index, 1); save(); };
+    li.append(span, toggle, del);
+    list.append(li);
+  });
+}
+form?.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const value = (input?.value || '').trim();
+  if (!value) return;
+  items.push({ text: value, done: false, ts: Date.now() });
+  if (input) input.value = '';
+  save();
+});
+themeBtn?.addEventListener('click', () => {
+  document.body.classList.toggle('light');
+});
+document.querySelectorAll('[data-action]').forEach((button) => {
+  button.addEventListener('click', () => {
+    button.textContent = button.dataset.action + ' ✓';
+  });
+});
+render();
+`;
+
+  const notes = [
+    `# ${title} — replica notes`,
+    '',
+    `- Source: ${report.source || prompt || 'analysis report'}`,
+    `- Detected stack: ${(report.stack || []).join(', ') || 'unknown'}`,
+    `- Headings used: ${headings.slice(0, 8).join(' | ') || 'none'}`,
+    `- Buttons used: ${buttons.slice(0, 6).join(' | ') || 'none'}`,
+    `- Inputs detected: ${inputs.map((item) => item.placeholder || item.id || item.type).join(' | ') || 'none'}`,
+    `- Theme: accent ${accent}, background ${background}, text ${foreground}, font ${font}`,
+    '',
+    'Generated files: index.html, styles.css, app.js, server.js, README.md.',
+    'Run with: node server.js (or ask Nova: "run this app").',
+  ].join('\n');
+
+  return {
+    'index.html': html,
+    'styles.css': css,
+    'app.js': js,
+    'server.js': `'use strict';\n${NODE_STATIC_SERVER}\n`,
+    'README.md': notes,
+    'REPLICATION_NOTES.md': notes,
+  };
+}
+
+async function replicateApp(args, root) {
+  const target = safeWorkspacePath(args.targetPath || 'replica-app', root);
+  await mkdir(target, { recursive: true });
+  let report;
+  if (args.reportPath) {
+    const reportFile = safeWorkspacePath(args.reportPath, root);
+    report = JSON.parse(await readFile(reportFile, 'utf8'));
+  } else {
+    const { report: analyzed } = await analyzeAppFolder(target, root, { save: false, maxFiles: 80 });
+    report = analyzed;
+    if (!args.prompt) report.title = path.basename(target);
+  }
+  if (args.prompt) report.title = String(args.prompt).slice(0, 120);
+  const files = replicateFromReport(report, args.prompt, root, target);
+  const written = [];
+  for (const [name, content] of Object.entries(files)) {
+    const full = path.join(target, name);
+    await writeFile(full, content, 'utf8');
+    written.push(`${name} (${content.length} chars) FILE:${full}`);
+  }
+  return [
+    `Replica app ready: ${target}`,
+    `Source analysis: ${report.source || report.title}`,
+    ...written,
+  ].join('\n');
+}
+
+async function compareApps(args, root) {
+  const reportFile = safeWorkspacePath(args.reportPath || '', root);
+  const original = JSON.parse(await readFile(reportFile, 'utf8'));
+  const candidateDir = safeWorkspacePath(args.candidatePath || '', root);
+  const { report: candidate } = await analyzeAppFolder(candidateDir, root, { save: false, maxFiles: 200 });
+  const originalRoutes = original.routes || [];
+  const missingRoutes = originalRoutes.filter((route) => !(candidate.routes || []).includes(route));
+  const originalHeadings = (original.ui?.headings || []).filter(Boolean);
+  const missingHeadings = originalHeadings.filter((heading) => !(candidate.ui?.headings || []).includes(heading));
+  const stackMissing = (original.stack || []).filter((name) => !(candidate.stack || []).includes(name));
+  const score = Math.max(0, Math.round(100
+    - missingRoutes.length * 4
+    - missingHeadings.length * 3
+    - stackMissing.length * 6));
+  return [
+    `Similarity score: ${score}/100`,
+    `Original: ${original.title || reportFile}`,
+    `Candidate: ${candidate.title || candidateDir}`,
+    `Missing routes: ${missingRoutes.slice(0, 15).join(', ') || 'none'}`,
+    `Missing headings: ${missingHeadings.slice(0, 15).join(', ') || 'none'}`,
+    `Missing stack hints: ${stackMissing.join(', ') || 'none'}`,
+    `Next action: ${score < 80 ? 'write_file se missing features add karein, phir compare_apps dobara chalayein.' : 'Ready — start_app aur test_app karke final answer dein.'}`,
+  ].join('\n');
+}
+
 const AGENT_TOOLS = [
   {
     type: 'function',
@@ -1561,6 +2131,75 @@ const AGENT_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'analyze_app',
+      description: 'Built-in REA-style static analysis of any app folder. Detects stack, entry points, routes, APIs, UI headings/buttons/inputs, components, design colors/fonts, assets and project hints. Saves a JSON report. Use this before cloning or modifying an unknown app.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          maxFiles: { type: 'number' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'analyze_webpage',
+      description: 'Analyse a live webpage with the controlled browser: title, headings, buttons, inputs, links, DOM structure, colors, fonts, resources and framework hints. Saves a JSON report and screenshot. Use for website cloning requests.',
+      parameters: {
+        type: 'object',
+        properties: { url: { type: 'string' } },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'analyze_binary',
+      description: 'Inspect an EXE/DLL/ZIP/binary inside the allowed folder: magic bytes, embedded strings, URLs, paths and DLL imports. Saves a JSON report. Use when the user asks what an app/binary contains.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'replicate_app',
+      description: 'Generate a working vanilla replica app from an analysis report into a target folder. Uses detected title, headings, buttons, inputs, colors and fonts. Writes index.html, styles.css, app.js, server.js and notes. Follow with start_app/test_app and iterate with write_file.',
+      parameters: {
+        type: 'object',
+        properties: {
+          reportPath: { type: 'string' },
+          targetPath: { type: 'string' },
+          prompt: { type: 'string' },
+        },
+        required: ['targetPath'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'compare_apps',
+      description: 'Compare an original analysis report with a generated candidate folder and return a similarity score plus missing routes, headings and stack hints. Use after replicating to improve the clone.',
+      parameters: {
+        type: 'object',
+        properties: {
+          reportPath: { type: 'string' },
+          candidatePath: { type: 'string' },
+        },
+        required: ['reportPath', 'candidatePath'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'create_folder',
       description: 'Create a folder inside the allowed root folder.',
       parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
@@ -1678,6 +2317,11 @@ const TOOL_LABELS = {
   test_app: 'Testing the built app…',
   git: 'Running git…',
   github_login: 'Opening GitHub login…',
+  analyze_app: 'Analysing app structure…',
+  analyze_webpage: 'Analysing live webpage…',
+  analyze_binary: 'Inspecting binary/app file…',
+  replicate_app: 'Generating replica app…',
+  compare_apps: 'Comparing replica with original…',
   create_folder: 'Creating a folder…',
   delete_file: 'Deleting a file…',
   copy_file: 'Copying a file…',
@@ -3109,6 +3753,67 @@ async function runTool(name, args, root = WORKSPACE) {
       ].join('\n');
     }
 
+    if (name === 'analyze_app') {
+      const dir = safeWorkspacePath(args.path || '', root);
+      const { report, file } = await analyzeAppFolder(dir, root, {
+        maxFiles: Number(args.maxFiles) || 400,
+      });
+      return [
+        `APP ANALYSIS — ${dir}`,
+        `Title: ${report.title}`,
+        `Stack: ${(report.stack || []).join(', ') || 'unknown'}`,
+        `Entries: ${(report.entryPoints || []).join(', ') || 'none'}`,
+        `Routes: ${(report.routes || []).slice(0, 40).join(', ') || 'none'}`,
+        `Headings: ${(report.ui?.headings || []).slice(0, 20).join(' | ') || 'none'}`,
+        `Buttons: ${(report.ui?.buttons || []).slice(0, 20).join(' | ') || 'none'}`,
+        `Inputs: ${(report.ui?.inputs || []).map((item) => item.placeholder || item.id || item.type).slice(0, 12).join(' | ') || 'none'}`,
+        `Colors: ${(report.design?.colors || []).slice(0, 12).join(', ') || 'none'}`,
+        `Font: ${report.design?.fonts?.[0] || 'default'}`,
+        `Hints: ${JSON.stringify(report.hints || {})}`,
+        file ? `FILE:${file}` : '',
+        `FULL_REPORT:${JSON.stringify(report).slice(0, 24_000)}`,
+      ].filter(Boolean).join('\n');
+    }
+
+    if (name === 'analyze_webpage') {
+      const { report, file } = await analyzeWebPage(args.url, root);
+      return [
+        `WEBPAGE ANALYSIS — ${report.source}`,
+        `Title: ${report.title}`,
+        `Description: ${report.description || 'none'}`,
+        `Framework hints: ${(report.stack || []).join(', ') || 'vanilla'}`,
+        `Headings: ${(report.ui?.headings || []).slice(0, 20).join(' | ') || 'none'}`,
+        `Buttons: ${(report.ui?.buttons || []).slice(0, 20).join(' | ') || 'none'}`,
+        `Inputs: ${(report.ui?.inputs || []).map((item) => item.placeholder || item.name || item.id || item.tag).slice(0, 12).join(' | ') || 'none'}`,
+        `Links: ${(report.ui?.links || []).slice(0, 15).map((link) => link.href).join(', ') || 'none'}`,
+        `Colors: ${(report.design?.colors || []).slice(0, 12).join(', ') || 'none'}`,
+        `Font: ${report.design?.font || 'default'}`,
+        `FILE:${file}`,
+        `FULL_REPORT:${JSON.stringify(report).slice(0, 24_000)}`,
+      ].join('\n');
+    }
+
+    if (name === 'analyze_binary') {
+      const { report, file } = await analyzeBinaryFile(args.path, root);
+      return [
+        `BINARY ANALYSIS — ${report.source}`,
+        `Format: ${report.format} · size ${report.size} bytes · magic ${report.magic}`,
+        `URLs: ${(report.urls || []).slice(0, 15).join(', ') || 'none'}`,
+        `Paths: ${(report.paths || []).slice(0, 15).join(', ') || 'none'}`,
+        `DLL imports: ${(report.dlls || []).join(', ') || 'none'}`,
+        `Strings: ${(report.strings || []).slice(0, 30).join(' | ')}`,
+        `FILE:${file}`,
+      ].join('\n');
+    }
+
+    if (name === 'replicate_app') {
+      return await replicateApp(args, root);
+    }
+
+    if (name === 'compare_apps') {
+      return await compareApps(args, root);
+    }
+
     if (name === 'create_folder') {
       const dir = safeWorkspacePath(args.path || 'new-folder', root);
       await mkdir(dir, { recursive: true });
@@ -3508,6 +4213,7 @@ function agentSystem(modes, customSystem = '', root = WORKSPACE, autoMode = true
     autoMode
       ? 'AUTO MODE (full permission): The user enabled OpenCode-style auto mode. When asked to run/test a built app, run CMD commands, check git, commit/push or log in to GitHub, call run_command/start_app/test_app/git/github_login directly. Do not ask for confirmation and do not merely print commands.'
       : 'Permission mode: ask before running shell commands, starting apps or pushing to git.',
+    'REA RULE: For clone/replicate/rebuild/similar-app requests, NEVER guess. First call analyze_app for a folder, analyze_webpage for a URL, or analyze_binary for an EXE/DLL. Then call replicate_app with the saved report, use write_file to add missing features, and finish with start_app + test_app. Use compare_apps to measure similarity and iterate until the score is high.',
     `Available tools: ${toolNames}.`,
     'You may emit several tool calls across several turns. After tools run, continue automatically. Only give the final Markdown answer when the task is complete; include links to any files or images you created.',
     'IMPORTANT fallback: if native tool calling is not available, put each action on its own line as <tool_call>{"name":"tool_name","arguments":{...}}</tool_call> and nothing else in that turn. After seeing results, continue. Never claim you did something you did not actually do.',
@@ -3651,14 +4357,15 @@ async function handleAgent(req, res, key) {
               : call.args;
           const result = await runTool(call.name, toolArgs, root);
           results.push(`${call.name}: ${result}`);
-          const fileMatch = /FILE:(.+)$/m.exec(result);
-          if (fileMatch) {
+          for (const fileMatch of result.matchAll(/FILE:(.+)$/gm)) {
             const fullPath = fileMatch[1].trim();
-            sse(res, {
-              type: 'file',
-              path: path.relative(root, fullPath).replace(/\\/g, '/'),
-              url: `/api/file?path=${encodeURIComponent(fullPath)}`,
-            });
+            try {
+              sse(res, {
+                type: 'file',
+                path: path.relative(root, fullPath).replace(/\\/g, '/'),
+                url: `/api/file?path=${encodeURIComponent(fullPath)}`,
+              });
+            } catch { /* skip paths outside root */ }
           }
           const openUrl = result.startsWith('OPEN:')
             ? result.slice(5).trim()
