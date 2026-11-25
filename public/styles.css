@@ -2050,3 +2050,48 @@ svg {
     transition-duration: 0.01ms !important;
   }
 }
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check-row input {
+  accent-color: var(--accent, #7c5cff);
+  width: 16px;
+  height: 16px;
+}
+
+.folder-item .ghost-btn {
+  justify-self: start;
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
+.ffmpeg-job a {
+  color: var(--accent, #8b7cff);
+  text-decoration: none;
+}
+
+.ffmpeg-job a:hover {
+  text-decoration: underline;
+}
+
+.progress-track {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent, #8b7cff);
+  transition: width 0.3s ease;
+}

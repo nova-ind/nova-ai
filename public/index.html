@@ -39,6 +39,10 @@
         <nav class="chat-list" id="chatList" aria-label="Chat history"></nav>
 
         <div class="sidebar-foot">
+          <button class="foot-btn" id="folderBtn" title="Choose coding folder" aria-label="Choose coding folder">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+            <span id="folderBtnText">Coding folder</span>
+          </button>
           <button class="foot-btn" id="settingsBtn">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" /><path d="M12 3v2.4M12 18.6V21M3 12h2.4M18.6 12H21M5.6 5.6l1.7 1.7M16.7 16.7l1.7 1.7M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7" /></svg>
             <span>Settings</span>
@@ -155,6 +159,9 @@
                 <button type="button" class="circle-btn" id="botsBtn" title="My bots" aria-label="My bots">
                   <svg viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="3" /><path d="M12 4v4M9 14h.01M15 14h.01M9 17h6" /></svg>
                 </button>
+                <button type="button" class="circle-btn" id="ffmpegBtn" title="Free FFmpeg video editor" aria-label="Free FFmpeg video editor">
+                  <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><path d="M8 7.5L20 18M8 16.5L20 6" /></svg>
+                </button>
                 <button type="button" class="circle-btn" id="micBtn" title="Voice input" aria-label="Voice input">
                   <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></svg>
                 </button>
@@ -261,9 +268,10 @@
           <label for="botFolderPath">Allow a folder on this PC</label>
           <div class="inline-row">
             <input id="botFolderPath" type="text" spellcheck="false" placeholder="G:\Projects\MyApp" />
+            <button class="ghost-btn" id="chooseFolderBtn" title="Native folder picker">📁 Choose</button>
             <button class="ghost-btn" id="allowFolderBtn">Allow</button>
           </div>
-          <p class="help">Bot ko sirf in folders tak pahunch milegi. Har naye folder pehle yahan allow karein.</p>
+          <p class="help">Native picker se folder chuno ya path type karo. Bot aur chat agent sirf in folders me coding kar sakte hain.</p>
           <div class="folder-list" id="folderList"></div>
         </div>
 
@@ -307,6 +315,98 @@
 
         <div class="subhead">Your bots</div>
         <div class="scheduled-list" id="botList"><p class="help">Abhi koi bot nahi hai.</p></div>
+      </div>
+    </div>
+
+    <div class="modal" id="ffmpegModal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="ffmpegTitle">
+        <div class="modal-head">
+          <h2 id="ffmpegTitle">Free FFmpeg video editor</h2>
+          <button class="icon-btn" id="closeFfmpeg" aria-label="Close">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
+
+        <p class="help" id="ffmpegStatusText">FFmpeg check ho raha hai…</p>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="ffmpegOperation">Operation</label>
+            <select id="ffmpegOperation">
+              <option value="trim">Trim / cut</option>
+              <option value="compress">Compress</option>
+              <option value="merge">Merge clips</option>
+              <option value="add-audio">Add / replace audio</option>
+              <option value="extract-audio">Extract MP3</option>
+              <option value="resize">Resize</option>
+              <option value="mute">Mute</option>
+              <option value="convert">Convert to MP4</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ffmpegOutputName">Output name</label>
+            <input id="ffmpegOutputName" type="text" spellcheck="false" placeholder="my-edited-video.mp4" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="ffmpegInput">Source video</label>
+          <div class="inline-row">
+            <input id="ffmpegInput" type="text" spellcheck="false" placeholder="D:\Videos\clip.mp4" />
+            <button class="ghost-btn" id="chooseVideoBtn">🎬 Choose</button>
+          </div>
+        </div>
+
+        <div class="field" id="ffmpegMergeFields" hidden>
+          <label for="ffmpegMergeInputs">Clips (ek path per line)</label>
+          <textarea id="ffmpegMergeInputs" rows="4" spellcheck="false" placeholder="D:\Videos\one.mp4&#10;D:\Videos\two.mp4"></textarea>
+          <button class="ghost-btn" id="chooseClipsBtn">➕ Add clips</button>
+        </div>
+
+        <div class="field" id="ffmpegAudioFields" hidden>
+          <label for="ffmpegAudioInput">Audio file</label>
+          <div class="inline-row">
+            <input id="ffmpegAudioInput" type="text" spellcheck="false" placeholder="D:\Music\song.mp3" />
+            <button class="ghost-btn" id="chooseAudioBtn">🎵 Choose</button>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="ffmpegStart">Start (sec)</label>
+            <input id="ffmpegStart" type="number" min="0" value="0" />
+          </div>
+          <div class="field">
+            <label for="ffmpegDuration">Duration (sec, 0 = end tak)</label>
+            <input id="ffmpegDuration" type="number" min="0" value="0" />
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="ffmpegWidth">Width (0 = auto)</label>
+            <input id="ffmpegWidth" type="number" min="0" value="0" />
+          </div>
+          <div class="field">
+            <label for="ffmpegHeight">Height (0 = auto)</label>
+            <input id="ffmpegHeight" type="number" min="0" value="0" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="ffmpegOutputFolder">Output folder</label>
+          <div class="inline-row">
+            <input id="ffmpegOutputFolder" type="text" spellcheck="false" placeholder="Same folder as source" />
+            <button class="ghost-btn" id="chooseOutputFolderBtn">📁 Choose</button>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button class="primary-btn" id="runFfmpeg">Start editing</button>
+        </div>
+
+        <div class="subhead">Editing jobs</div>
+        <div class="scheduled-list" id="ffmpegJobs"><p class="help">Abhi koi editing job nahi hai.</p></div>
       </div>
     </div>
 
@@ -425,7 +525,7 @@
 
         <div class="field-row">
           <div class="field">
-            <label for="videoDurationSelect">Scene length</label>
+            <label for="videoDurationSelect">Scene length (small videos)</label>
             <select id="videoDurationSelect">
               <option value="3">3 seconds</option>
               <option value="5" selected>5 seconds</option>
@@ -433,8 +533,49 @@
               <option value="10">10 seconds</option>
             </select>
           </div>
+          <div class="field">
+            <label for="videoLengthSelect">Target video length</label>
+            <select id="videoLengthSelect">
+              <option value="60">1 minute</option>
+              <option value="180">3 minutes</option>
+              <option value="600">10 minutes</option>
+              <option value="900">15 minutes</option>
+            </select>
+          </div>
         </div>
-        <p class="help">Video Studio story, cartoon, meme aur MP3 song videos banata hai. Scenes AI images (aur key ho to AI motion clips) se ban kar browser me render hote hain — kaam restart ke baad bhi resume hota hai.</p>
+        <div class="field-row">
+          <div class="field">
+            <label for="sceneCountSelect">Scenes</label>
+            <select id="sceneCountSelect">
+              <option value="auto">Auto (length ke hisaab se)</option>
+              <option value="20">20 scenes</option>
+              <option value="30">30 scenes</option>
+              <option value="50">50 scenes</option>
+              <option value="60">60 scenes</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="voiceInput">Voice-over voice</label>
+            <input id="voiceInput" type="text" spellcheck="false" placeholder="Microsoft Hazel Desktop" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="songPath">Song / audio file (optional)</label>
+          <div class="inline-row">
+            <input id="songPath" type="text" spellcheck="false" placeholder="D:\Songs\song.mp3" />
+            <button class="ghost-btn" id="chooseSongBtn">🎵 Choose</button>
+          </div>
+          <p class="help">Uploaded MP3 ya yahan chosen song — server BPM, zones aur energy analyse karega. Video usi song ke tempo ke hisaab se cut hoga.</p>
+        </div>
+        <div class="field">
+          <label for="lyricsInput">Lyrics (optional, ek line per scene)</label>
+          <textarea id="lyricsInput" rows="3" spellcheck="false" placeholder="Line 1&#10;Line 2&#10;Line 3"></textarea>
+          <p class="help">Agar lyrics likho to har scene caption us line se banta hai — song ke sahi scene bante hain.</p>
+        </div>
+        <div class="field">
+          <label class="check-row"><input id="narrationToggle" type="checkbox" checked /> Story/topic videos me free offline voice-over add karein</label>
+        </div>
+        <p class="help">Video Studio ab FFmpeg se final render karta hai: 15 minute tak, 20/30/50+ scenes, zoom/pan FX, xfade transitions, song + voice mixing. Browser refresh loop khatam.</p>
 
         <div class="field">
           <label for="tempInput">Creativity <span class="value" id="tempValue">0.7</span></label>

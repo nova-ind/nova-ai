@@ -44,8 +44,33 @@ const els = {
   botsModal: $('botsModal'),
   closeBots: $('closeBots'),
   botFolderPath: $('botFolderPath'),
+  chooseFolderBtn: $('chooseFolderBtn'),
   allowFolderBtn: $('allowFolderBtn'),
   folderList: $('folderList'),
+  folderBtn: $('folderBtn'),
+  folderBtnText: $('folderBtnText'),
+  ffmpegBtn: $('ffmpegBtn'),
+  ffmpegModal: $('ffmpegModal'),
+  closeFfmpeg: $('closeFfmpeg'),
+  ffmpegStatusText: $('ffmpegStatusText'),
+  ffmpegOperation: $('ffmpegOperation'),
+  ffmpegOutputName: $('ffmpegOutputName'),
+  ffmpegInput: $('ffmpegInput'),
+  ffmpegMergeFields: $('ffmpegMergeFields'),
+  ffmpegMergeInputs: $('ffmpegMergeInputs'),
+  ffmpegAudioFields: $('ffmpegAudioFields'),
+  ffmpegAudioInput: $('ffmpegAudioInput'),
+  ffmpegStart: $('ffmpegStart'),
+  ffmpegDuration: $('ffmpegDuration'),
+  ffmpegWidth: $('ffmpegWidth'),
+  ffmpegHeight: $('ffmpegHeight'),
+  ffmpegOutputFolder: $('ffmpegOutputFolder'),
+  ffmpegJobs: $('ffmpegJobs'),
+  chooseVideoBtn: $('chooseVideoBtn'),
+  chooseClipsBtn: $('chooseClipsBtn'),
+  chooseAudioBtn: $('chooseAudioBtn'),
+  chooseOutputFolderBtn: $('chooseOutputFolderBtn'),
+  runFfmpeg: $('runFfmpeg'),
   botName: $('botName'),
   botRoot: $('botRoot'),
   botPrompt: $('botPrompt'),
@@ -81,6 +106,13 @@ const els = {
   videoModelSelect: $('videoModelSelect'),
   videoRatioSelect: $('videoRatioSelect'),
   videoDurationSelect: $('videoDurationSelect'),
+  videoLengthSelect: $('videoLengthSelect'),
+  sceneCountSelect: $('sceneCountSelect'),
+  songPath: $('songPath'),
+  chooseSongBtn: $('chooseSongBtn'),
+  lyricsInput: $('lyricsInput'),
+  voiceInput: $('voiceInput'),
+  narrationToggle: $('narrationToggle'),
   modelInput: $('modelInput'),
   modelOptions: $('modelOptions'),
   modelFilter: $('modelFilter'),
@@ -161,6 +193,13 @@ const DEFAULT_SETTINGS = {
   tier: 'auto',
   videoRatio: '16:9',
   videoDuration: 5,
+  videoLengthSeconds: 60,
+  videoSceneCount: 'auto',
+  songPath: '',
+  lyrics: '',
+  voice: 'Microsoft Hazel Desktop',
+  narration: true,
+  codingFolder: '',
   modes: { agent: true, think: false, search: false, imagine: false, video: false, fun: false },
 };
 
@@ -212,6 +251,10 @@ let allowedFolders = [];
 let serverConfig = { tiers: TIER_FALLBACK, hasServerKey: false, features: {} };
 let mediaCatalog = { image: MEDIA_FALLBACK.image, video: MEDIA_FALLBACK.video };
 let mediaJobs = [];
+let ffmpegJobs = [];
+let ffmpegAvailable = false;
+const nativeRequests = new Map();
+let nativeRequestSeq = 0;
 const mediaRendering = new Set();
 const notifiedJobs = new Set();
 const renderQueue = [];
@@ -1367,6 +1410,7 @@ async function runChat(chat) {
     temperature: settings.temperature,
     system: settings.system,
     modes,
+    rootDir: settings.codingFolder || '',
   };
   if (settings.customModel) body.model = settings.customModel;
   else if (settings.provider !== 'nvidia' && PROVIDERS[settings.provider]?.model) {
@@ -1497,6 +1541,7 @@ async function runAgent(chat) {
     system: settings.system,
     modes,
     chatId: chat.id,
+    rootDir: settings.codingFolder || '',
   };
   if (settings.customModel) body.model = settings.customModel;
   else if (settings.provider !== 'nvidia' && PROVIDERS[settings.provider]?.model) {
@@ -2127,9 +2172,12 @@ async function startVideoJob(chat, prompt, audioAttachment) {
     }
   }
 
+  if (!audioPath && settings.songPath) audioPath = settings.songPath;
   const type = inferVideoType(prompt, Boolean(audioPath));
-  const sceneCount = type === 'song' ? 6 : type === 'meme' ? 4 : 5;
   const videoProvider = settings.videoProvider || DEFAULT_SETTINGS.videoProvider;
+  const requestedScenes = Number(settings.videoSceneCount) || 0;
+  const autoScenes = Math.round((Number(settings.videoLengthSeconds) || 60) / 12);
+  const sceneCount = type === 'meme' ? 8 : (requestedScenes || autoScenes);
   const payload = {
     prompt,
     chatId: chat.id,
@@ -2141,6 +2189,10 @@ async function startVideoJob(chat, prompt, audioAttachment) {
     audioPath,
     sceneCount,
     clipSeconds: Number(settings.videoDuration) || 5,
+    durationSeconds: Number(settings.videoLengthSeconds) || 60,
+    lyrics: settings.lyrics || '',
+    narration: settings.narration !== false,
+    voice: settings.voice || 'Microsoft Hazel Desktop',
     useAiVideo: videoProvider === 'auto' || videoProvider === 'ltx',
     imageProvider: settings.imageProvider || DEFAULT_SETTINGS.imageProvider,
     videoProvider,
@@ -2902,6 +2954,13 @@ function openSettings() {
   fillMediaSelect(els.videoModelSelect, mediaCatalog.video, settings.mediaModels.video, MEDIA_FALLBACK.video);
   els.videoRatioSelect.value = settings.videoRatio || '16:9';
   els.videoDurationSelect.value = String(settings.videoDuration || 5);
+  els.videoLengthSelect.value = String(settings.videoLengthSeconds || 60);
+  els.sceneCountSelect.value = settings.videoSceneCount || 'auto';
+  els.songPath.value = settings.songPath || '';
+  els.lyricsInput.value = settings.lyrics || '';
+  els.voiceInput.value = settings.voice || 'Microsoft Hazel Desktop';
+  els.narrationToggle.checked = settings.narration !== false;
+  updateFolderButton();
   els.modelInput.value = settings.customModel || '';
   els.tempInput.value = String(settings.temperature ?? 0.7);
   els.tempValue.textContent = Number(settings.temperature ?? 0.7).toFixed(1);
@@ -3236,6 +3295,96 @@ async function saveNewSchedule() {
   toast(isYouTube ? `Scheduled · agent ${lead}m pehle chalega` : 'Task scheduled');
 }
 
+function nativeRequest(type, extra = {}) {
+  return new Promise((resolve) => {
+    if (!window.chrome?.webview?.postMessage) {
+      resolve(null);
+      return;
+    }
+    const requestId = `native_${Date.now()}_${++nativeRequestSeq}`;
+    nativeRequests.set(requestId, resolve);
+    window.chrome.webview.postMessage({ type, requestId, ...extra });
+  });
+}
+
+if (window.chrome?.webview?.addEventListener) {
+  window.chrome.webview.addEventListener('message', (event) => {
+    const data = event.data || {};
+    if (!data.requestId || !nativeRequests.has(data.requestId)) return;
+    const resolve = nativeRequests.get(data.requestId);
+    nativeRequests.delete(data.requestId);
+    resolve(data);
+  });
+}
+
+function folderOf(filePath) {
+  const clean = String(filePath || '').replace(/^"|"$/g, '');
+  const cut = Math.max(clean.lastIndexOf('\\'), clean.lastIndexOf('/'));
+  return cut > 0 ? clean.slice(0, cut) : clean;
+}
+
+function updateFolderButton() {
+  if (!els.folderBtnText) return;
+  const folder = settings.codingFolder || '';
+  const short = folder.split(/[\\/]/).filter(Boolean).pop() || '';
+  els.folderBtnText.textContent = short || 'Coding folder';
+  els.folderBtn.title = folder ? `Coding folder: ${folder}` : 'Choose coding folder';
+}
+
+async function allowFolderPath(folderPath, options = {}) {
+  const response = await fetch('/api/folders', {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: JSON.stringify({ path: folderPath }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Folder allow nahi hua');
+  allowedFolders = data.folders || allowedFolders;
+  if (options.selectCoding) {
+    settings.codingFolder = data.added || folderPath;
+    saveSettings();
+  }
+  if (els.botFolderPath) els.botFolderPath.value = '';
+  await loadFolders();
+  if (data.added && els.botRoot) els.botRoot.value = data.added;
+  if (!options.quiet) {
+    toast(options.selectCoding ? 'Coding folder set — ab yahan kaam hoga' : 'Folder allowed');
+  }
+  return data.added || folderPath;
+}
+
+async function chooseCodingFolder() {
+  const result = await nativeRequest('choose-folder', { initialPath: settings.codingFolder || '' });
+  if (!result) {
+    if (els.botFolderPath) els.botFolderPath.focus();
+    toast('Desktop app me folder picker available hai. Yahan path type karein.');
+    return;
+  }
+  if (result.cancelled || !result.path) return;
+  try {
+    await allowFolderPath(result.path, { selectCoding: true });
+  } catch (err) {
+    toast(err.message || 'Folder set nahi hua');
+  }
+}
+
+async function chooseNativeFile(input, multiple = false) {
+  const result = await nativeRequest(multiple ? 'choose-files' : 'choose-file', {});
+  if (!result) {
+    input.focus();
+    toast('Desktop app me file picker available hai. Yahan path type karein.');
+    return;
+  }
+  const paths = result.paths || (result.path ? [result.path] : []);
+  if (!paths.length) return;
+  input.value = multiple ? paths.join('\n') : paths[0];
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  for (const filePath of paths) {
+    const parent = folderOf(filePath);
+    if (parent) await allowFolderPath(parent, { quiet: true }).catch(() => {});
+  }
+}
+
 async function loadFolders() {
   try {
     const response = await fetch('/api/folders');
@@ -3244,6 +3393,11 @@ async function loadFolders() {
   } catch {
     allowedFolders = [];
   }
+  if (settings.codingFolder && !allowedFolders.includes(settings.codingFolder)) {
+    settings.codingFolder = '';
+    saveSettings();
+  }
+  updateFolderButton();
 
   els.botRoot.replaceChildren();
   for (const folder of allowedFolders) {
@@ -3252,14 +3406,185 @@ async function loadFolders() {
     option.textContent = folder;
     els.botRoot.append(option);
   }
+  if (settings.codingFolder) els.botRoot.value = settings.codingFolder;
 
   els.folderList.replaceChildren();
   for (const folder of allowedFolders) {
     const item = document.createElement('div');
     item.className = 'folder-item';
-    item.textContent = folder;
+    const label = document.createElement('span');
+    label.textContent = folder;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'ghost-btn';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', async () => {
+      try {
+        const response = await fetch('/api/folders', {
+          method: 'DELETE',
+          headers: apiHeaders(),
+          body: JSON.stringify({ path: folder }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Remove nahi hua');
+        if (settings.codingFolder === folder) {
+          settings.codingFolder = '';
+          saveSettings();
+        }
+        await loadFolders();
+        toast('Folder access hata diya');
+      } catch (err) {
+        toast(err.message || 'Folder remove nahi hua');
+      }
+    });
+    item.append(label, remove);
     els.folderList.append(item);
   }
+}
+
+function openFfmpeg() {
+  els.ffmpegModal.hidden = false;
+  loadFfmpegStatus();
+  loadFfmpegJobs();
+}
+
+function closeFfmpeg() {
+  els.ffmpegModal.hidden = true;
+}
+
+async function loadFfmpegStatus() {
+  try {
+    const response = await fetch('/api/ffmpeg/status');
+    const data = await response.json();
+    ffmpegAvailable = Boolean(data.available);
+    els.ffmpegStatusText.textContent = ffmpegAvailable
+      ? `FFmpeg ready · ${data.version || 'installed'}`
+      : 'FFmpeg bundled nahi mila — installer dobara install karein.';
+  } catch {
+    ffmpegAvailable = false;
+    els.ffmpegStatusText.textContent = 'FFmpeg status check nahi hua.';
+  }
+}
+
+async function loadFfmpegJobs() {
+  try {
+    const response = await fetch('/api/ffmpeg/jobs');
+    const data = await response.json();
+    ffmpegJobs = data.jobs || [];
+    renderFfmpegJobs();
+  } catch {
+    /* keep local list */
+  }
+}
+
+function renderFfmpegJobs() {
+  els.ffmpegJobs.replaceChildren();
+  if (!ffmpegJobs.length) {
+    const empty = document.createElement('p');
+    empty.className = 'help';
+    empty.textContent = 'Abhi koi editing job nahi hai.';
+    els.ffmpegJobs.append(empty);
+    return;
+  }
+  for (const job of ffmpegJobs.slice(0, 8)) {
+    const item = document.createElement('div');
+    item.className = 'job-item ffmpeg-job';
+    const head = document.createElement('div');
+    head.className = 'job-title';
+    const name = document.createElement('strong');
+    name.textContent = `${job.operation} · ${job.status || 'queued'}`;
+    const badge = document.createElement('span');
+    badge.textContent = `${job.progress || 0}%`;
+    head.append(name, badge);
+    const step = document.createElement('div');
+    step.textContent = job.step || '';
+    const bar = document.createElement('div');
+    bar.className = 'progress-track';
+    const fill = document.createElement('span');
+    fill.style.width = `${Math.max(0, Math.min(100, job.progress || 0))}%`;
+    bar.append(fill);
+    item.append(head, step, bar);
+    if (job.status === 'done' && job.outputUrl) {
+      const link = document.createElement('a');
+      link.href = job.outputUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = 'Open / download edited video';
+      item.append(link);
+    }
+    if (job.status === 'error') {
+      const error = document.createElement('div');
+      error.className = 'help';
+      error.textContent = job.error || 'Editing failed';
+      item.append(error);
+    }
+    if (['queued', 'rendering'].includes(job.status)) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'ghost-btn';
+      cancel.textContent = 'Cancel';
+      cancel.addEventListener('click', async () => {
+        await fetch(`/api/ffmpeg/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
+        await loadFfmpegJobs();
+      });
+      item.append(cancel);
+    }
+    els.ffmpegJobs.append(item);
+  }
+}
+
+function syncFfmpegOperationFields() {
+  const operation = els.ffmpegOperation.value;
+  els.ffmpegMergeFields.hidden = operation !== 'merge';
+  els.ffmpegAudioFields.hidden = operation !== 'add-audio';
+  els.ffmpegStart.closest('.field').hidden = operation !== 'trim';
+  els.ffmpegDuration.closest('.field').hidden = operation !== 'trim';
+  els.ffmpegWidth.closest('.field').hidden = operation !== 'resize';
+  els.ffmpegHeight.closest('.field').hidden = operation !== 'resize';
+}
+
+async function runFfmpegJob() {
+  if (!ffmpegAvailable) {
+    toast('FFmpeg available nahi hai');
+    return;
+  }
+  const operation = els.ffmpegOperation.value;
+  const inputs = els.ffmpegMergeInputs.value.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+  const input = operation === 'merge' ? inputs[0] : els.ffmpegInput.value.trim();
+  if (!input) {
+    toast('Source video choose karein');
+    return;
+  }
+  if (operation === 'merge' && inputs.length < 2) {
+    toast('Merge ke liye 2 clips choose karein');
+    return;
+  }
+  const payload = {
+    operation,
+    input,
+    inputs,
+    audio: els.ffmpegAudioInput.value.trim(),
+    outputName: els.ffmpegOutputName.value.trim(),
+    outputFolder: els.ffmpegOutputFolder.value.trim(),
+    start: Number(els.ffmpegStart.value) || 0,
+    duration: Number(els.ffmpegDuration.value) || 0,
+    width: Number(els.ffmpegWidth.value) || 0,
+    height: Number(els.ffmpegHeight.value) || 0,
+    accurate: true,
+  };
+  const response = await fetch('/api/ffmpeg/jobs', {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.id) {
+    toast(data.error || 'Editing job shuru nahi hua');
+    return;
+  }
+  ffmpegJobs.unshift(data);
+  renderFfmpegJobs();
+  toast('FFmpeg editing shuru ho gaya');
 }
 
 function openBots() {
@@ -3511,6 +3836,24 @@ els.messages.addEventListener('click', async (event) => {
 
 els.scheduleBtn.addEventListener('click', openSchedule);
 els.botsBtn.addEventListener('click', openBots);
+els.folderBtn.addEventListener('click', chooseCodingFolder);
+els.chooseFolderBtn.addEventListener('click', chooseCodingFolder);
+els.ffmpegBtn.addEventListener('click', openFfmpeg);
+els.closeFfmpeg.addEventListener('click', closeFfmpeg);
+els.ffmpegModal.addEventListener('click', (event) => {
+  if (event.target === els.ffmpegModal) closeFfmpeg();
+});
+els.ffmpegOperation.addEventListener('change', syncFfmpegOperationFields);
+els.runFfmpeg.addEventListener('click', runFfmpegJob);
+els.chooseVideoBtn.addEventListener('click', () => chooseNativeFile(els.ffmpegInput));
+els.chooseClipsBtn.addEventListener('click', () => chooseNativeFile(els.ffmpegMergeInputs, true));
+els.chooseAudioBtn.addEventListener('click', () => chooseNativeFile(els.ffmpegAudioInput));
+els.chooseOutputFolderBtn.addEventListener('click', async () => {
+  const result = await nativeRequest('choose-folder', { initialPath: els.ffmpegOutputFolder.value });
+  if (!result || result.cancelled || !result.path) return;
+  els.ffmpegOutputFolder.value = result.path;
+  await allowFolderPath(result.path, { quiet: true }).catch(() => {});
+});
 els.closeSchedule.addEventListener('click', closeSchedule);
 els.cancelSchedule.addEventListener('click', closeSchedule);
 els.closeBots.addEventListener('click', closeBots);
@@ -3525,26 +3868,19 @@ els.scheduleDate.addEventListener('input', syncScheduleForm);
 els.scheduleTime.addEventListener('input', syncScheduleForm);
 els.videoFile.addEventListener('input', syncScheduleForm);
 els.videoTopic.addEventListener('input', syncScheduleForm);
+els.chooseSongBtn.addEventListener('click', () => chooseNativeFile(els.songPath));
 els.schedulePrompt.addEventListener('input', () => {
   if (els.schedulePrompt.dataset.auto) els.schedulePrompt.dataset.auto = 'user';
 });
 els.saveSchedule.addEventListener('click', saveNewSchedule);
 els.allowFolderBtn.addEventListener('click', async () => {
-  const path = els.botFolderPath.value.trim();
-  if (!path) return;
-  const response = await fetch('/api/folders', {
-    method: 'POST',
-    headers: apiHeaders(),
-    body: JSON.stringify({ path }),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    toast(data.error || 'Folder allow nahi hua');
-    return;
+  const folderPath = els.botFolderPath.value.trim();
+  if (!folderPath) return;
+  try {
+    await allowFolderPath(folderPath, { selectCoding: true });
+  } catch (err) {
+    toast(err.message || 'Folder allow nahi hua');
   }
-  els.botFolderPath.value = '';
-  await loadFolders();
-  toast('Folder allowed');
 });
 els.addBot.addEventListener('click', addNewBot);
 els.runAllBots.addEventListener('click', runAllBotsNow);
@@ -3697,6 +4033,12 @@ els.saveSettings.addEventListener('click', async () => {
   settings.mediaModels.video = els.videoModelSelect.value || DEFAULT_SETTINGS.mediaModels.video;
   settings.videoRatio = els.videoRatioSelect.value === '9:16' ? '9:16' : '16:9';
   settings.videoDuration = Number(els.videoDurationSelect.value) || 5;
+  settings.videoLengthSeconds = Number(els.videoLengthSelect.value) || 60;
+  settings.videoSceneCount = els.sceneCountSelect.value || 'auto';
+  settings.songPath = els.songPath.value.trim();
+  settings.lyrics = els.lyricsInput.value.trim();
+  settings.voice = els.voiceInput.value.trim() || 'Microsoft Hazel Desktop';
+  settings.narration = els.narrationToggle.checked;
   settings.baseUrl = els.baseUrlInput.value.trim() || PROVIDERS[settings.provider]?.base || PROVIDERS.nvidia.base;
   settings.customModel = els.modelInput.value.trim();
   syncActiveModel();
@@ -3775,6 +4117,9 @@ function boot() {
   renderAll();
   autoGrow();
   els.input.focus();
+  updateFolderButton();
+  syncFfmpegOperationFields();
+  loadFolders();
   loadConfig().then(() => {
     syncMediaCredentials();
     loadMediaModels();
@@ -3782,6 +4127,7 @@ function boot() {
   });
   setInterval(() => {
     if (document.visibilityState !== 'hidden') loadMediaJobs();
+    if (!els.ffmpegModal.hidden) loadFfmpegJobs();
   }, 3000);
   setInterval(() => {
     if (document.visibilityState !== 'hidden') syncMediaCredentials();

@@ -11,6 +11,10 @@ const WORKSPACE = path.join(__dirname, 'workspace');
 const SCHEDULES_FILE = path.join(WORKSPACE, 'schedules.json');
 const FOLDERS_FILE = path.join(WORKSPACE, 'allowed-folders.json');
 const MEDIA_JOBS_FILE = path.join(WORKSPACE, 'media-jobs.json');
+const FFMPEG_BIN = process.env.FFMPEG_PATH
+  || path.join(__dirname, 'runtime', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+const FFPROBE_BIN = process.env.FFPROBE_PATH
+  || path.join(__dirname, 'runtime', process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
 await mkdir(WORKSPACE, { recursive: true });
 
 let jobs = [];
@@ -19,6 +23,10 @@ let mediaJobs = [];
 const runningJobs = new Set();
 const mediaRunning = new Set();
 const cancelledJobs = new Set();
+const ffmpegJobs = [];
+const ffmpegRunning = new Set();
+const ffmpegChildren = new Map();
+let ffmpegVersionCache = null;
 
 const PORT = Number(process.env.PORT || 4173);
 const UPSTREAM_BASE = (process.env.UPSTREAM_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
@@ -849,13 +857,17 @@ async function createMediaJob(payload = {}) {
 
   let audioPath = null;
   if (payload.audioPath) {
-    try {
-      const absolute = safeWorkspacePath(String(payload.audioPath), WORKSPACE);
-      audioPath = path.relative(WORKSPACE, absolute).replace(/\\/g, '/');
-    } catch {
-      audioPath = null;
+    audioPath = resolveJobAudioPath(payload.audioPath);
+    if (audioPath && !path.isAbsolute(String(payload.audioPath))) {
+      audioPath = path.relative(WORKSPACE, audioPath).replace(/\\/g, '/');
     }
   }
+
+  const durationSeconds = Math.min(900, Math.max(15, Number(payload.durationSeconds) || 60));
+  const requestedScenes = Number(payload.sceneCount) || 0;
+  const sceneCount = Math.min(60, Math.max(6,
+    requestedScenes > 0 ? requestedScenes : Math.round(durationSeconds / 12),
+  ));
 
   const job = {
     id,
@@ -865,9 +877,14 @@ async function createMediaJob(payload = {}) {
     style,
     fx: fx.length ? fx : inferMediaFx(prompt),
     transitions: transitions.length ? transitions : inferTransitions(prompt),
-    sceneCount: Math.min(12, Math.max(3, Number(payload.sceneCount) || 5)),
-    clipSeconds: Math.min(8, Math.max(2, Number(payload.clipSeconds) || 4)),
+    sceneCount,
+    durationSeconds,
+    clipSeconds: Math.min(10, Math.max(2, Number(payload.clipSeconds) || 5)),
     audioPath,
+    lyrics: String(payload.lyrics || '').slice(0, 12_000),
+    narration: payload.narration !== false,
+    voice: String(payload.voice || '').slice(0, 120),
+    analysis: null,
     useAiVideo:
       payload.useAiVideo !== false &&
       (Boolean(mediaKey) || String(payload.videoProvider || DEFAULT_VIDEO_PROVIDER) === 'ltx'),
@@ -881,6 +898,7 @@ async function createMediaJob(payload = {}) {
     step: 'Job queue me hai…',
     scenes: [],
     output: null,
+    outputUrl: null,
     error: null,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -900,11 +918,44 @@ async function runMediaJob(job) {
     await updateMediaJob(job, { status: 'assets', step: 'Scene assets prepare ho rahe hain…', progress: 5 });
     const directory = path.join(WORKSPACE, 'media-jobs', job.id);
     await mkdir(directory, { recursive: true });
-    const captions = splitCaptions(job.prompt, job.sceneCount);
+    const audioPath = resolveJobAudioPath(job.audioPath);
+    let captions = splitCaptions(job.prompt, job.sceneCount);
 
+    if (audioPath && (job.type === 'song' || job.lyrics)) {
+      await updateMediaJob(job, {
+        step: 'Song analyse ho raha hai — BPM, zones aur energy…',
+        progress: 6,
+      });
+      const analysis = await analyzeSongAudio(audioPath).catch(() => null);
+      if (analysis?.available) {
+        job.analysis = analysis;
+        await updateMediaJob(job, {
+          step: `Song ${analysis.bpm} BPM · ${analysis.zones.length} zones mil gaye`,
+          progress: 8,
+        });
+      }
+    }
+
+    const lyricsLines = String(job.lyrics || '')
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const hooks = ['Hook', 'Setup', 'Build-up', 'Twist', 'Climax', 'Reveal', 'Payoff', 'Takeaway'];
+    const zones = job.analysis?.zones || [];
+    captions = captions.map((caption, index) => {
+      const zone = zones.length ? zones[Math.floor((index / job.sceneCount) * zones.length)] : null;
+      if (lyricsLines.length) {
+        return `${lyricsLines[index % lyricsLines.length]}${zone ? ` · ${zone.label}` : ''}`;
+      }
+      if (zone) return `${zone.label} · ${caption}`;
+      return `${hooks[index % hooks.length]}: ${caption}`;
+    });
+
+    const useMotion = job.useAiVideo && job.sceneCount <= 8 && !job.analysis;
     for (let index = 0; index < job.sceneCount; index += 1) {
       if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
       const scene = job.scenes[index] || { index: index + 1, caption: captions[index] || `Scene ${index + 1}` };
+      scene.caption = captions[index] || scene.caption;
       if (!scene.image) {
         await updateMediaJob(job, {
           step: `Scene ${index + 1}/${job.sceneCount}: ${job.style} image ban rahi hai…`,
@@ -917,7 +968,7 @@ async function runMediaJob(job) {
         scene.image = `media-jobs/${job.id}/${file}`;
       }
 
-      if (job.useAiVideo && !scene.video && !scene.videoError) {
+      if (useMotion && !scene.video && !scene.videoError) {
         await updateMediaJob(job, {
           step: `Scene ${index + 1}/${job.sceneCount}: AI motion clip ban raha hai…`,
           progress: 10 + Math.round(((index + 0.7) / job.sceneCount) * 60),
@@ -946,11 +997,30 @@ async function runMediaJob(job) {
     }
 
     if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
-    await updateMediaJob(job, {
-      status: 'awaiting-render',
-      progress: 75,
-      step: 'Final video browser me render hona baaki hai…',
-    });
+    let narrationPath = null;
+    if (job.narration && !audioPath) {
+      await updateMediaJob(job, { step: 'Voice-over ban raha hai…', progress: 73 });
+      try {
+        narrationPath = await synthesizeNarration(
+          captions.join('. '),
+          job.voice,
+          path.join(directory, 'narration.wav'),
+        );
+      } catch (err) {
+        await updateMediaJob(job, { step: `Voice optional chhod diya: ${String(err.message || err).slice(0, 120)}` });
+      }
+    }
+
+    const bin = await ffmpegExecutable('ffmpeg');
+    if (!bin) {
+      await updateMediaJob(job, {
+        status: 'awaiting-render',
+        progress: 75,
+        step: 'Final video browser me render hona baaki hai…',
+      });
+    } else {
+      await assembleVideoWithFfmpeg(job, directory, { narration: narrationPath });
+    }
   } catch (err) {
     await updateMediaJob(job, {
       status: 'error',
@@ -965,7 +1035,7 @@ async function runMediaJob(job) {
 async function resumeMediaJobs() {
   for (const job of mediaJobs) {
     const lastTouch = Number(job.updatedAt || job.createdAt || 0);
-    if (!['done', 'error'].includes(job.status) && Date.now() - lastTouch > 30 * 60_000) {
+    if (!['done', 'error'].includes(job.status) && Date.now() - lastTouch > 45 * 60_000) {
       await updateMediaJob(job, {
         status: 'error',
         error: 'Video job timeout — dobara try karein.',
@@ -976,7 +1046,10 @@ async function resumeMediaJobs() {
     if (job.status === 'queued' || job.status === 'assets') {
       runMediaJob(job).catch(() => {});
     } else if (job.status === 'rendering') {
-      await updateMediaJob(job, { status: 'awaiting-render', step: 'Restart ke baad render resume…', progress: 75 });
+      const directory = path.join(WORKSPACE, 'media-jobs', job.id);
+      await updateMediaJob(job, { step: 'Restart ke baad FFmpeg render resume…', progress: 75 });
+      if (job.scenes?.length) assembleVideoWithFfmpeg(job, directory, {}).catch(() => {});
+      else await updateMediaJob(job, { status: 'awaiting-render', step: 'Browser render resume…', progress: 75 });
     }
   }
 }
@@ -2760,6 +2833,508 @@ function pathInAllowedFolders(target) {
   return allowedFolders.some((root) => target === root || target.startsWith(root + path.sep));
 }
 
+/* ------------------------------- ffmpeg --------------------------------- */
+
+const FFMPEG_OPERATIONS = new Set([
+  'trim', 'compress', 'convert', 'mute', 'add-audio', 'extract-audio', 'resize', 'merge',
+]);
+
+async function ffmpegExecutable(kind = 'ffmpeg') {
+  const candidates = kind === 'ffprobe'
+    ? [FFPROBE_BIN, 'ffprobe']
+    : [FFMPEG_BIN, 'ffmpeg'];
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+async function ffmpegStatus() {
+  const bin = await ffmpegExecutable('ffmpeg');
+  if (!bin) return { available: false, version: null, note: 'FFmpeg bundled nahi mila.' };
+  if (!ffmpegVersionCache) {
+    const result = await runCommand(bin, ['-version'], 8000);
+    ffmpegVersionCache = (result.out || result.err || '').split('\n')[0].slice(0, 180) || 'FFmpeg ready';
+  }
+  return { available: true, version: ffmpegVersionCache };
+}
+
+function ffmpegAllowedPath(raw, label) {
+  const clean = String(raw || '').trim().replace(/^"|"$/g, '');
+  if (!clean) throw new Error(`${label} path required hai.`);
+  const abs = path.resolve(clean);
+  if (!pathInAllowedFolders(abs)) {
+    throw new Error(`${label} allowed folder ke bahar hai. Pehle folder allow karein.`);
+  }
+  return abs;
+}
+
+function ffmpegSafeName(raw, fallback, ext) {
+  let name = path.basename(String(raw || fallback))
+    .replace(/[^a-zA-Z0-9._ -]+/g, '_')
+    .replace(/^\.+/, '')
+    .slice(0, 120);
+  if (!name) name = fallback;
+  if (!path.extname(name)) name += ext;
+  return name;
+}
+
+async function probeMediaDuration(bin, file) {
+  if (!bin) return 0;
+  const result = await runCommand(
+    bin,
+    ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', file],
+    10_000,
+  );
+  const seconds = Number(String(result.out || '').trim());
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+function sanitizeFfmpegJob(job) {
+  const { _concatFile, ...clean } = job;
+  return clean;
+}
+
+async function updateFfmpegJob(job, patch) {
+  Object.assign(job, patch, { updatedAt: Date.now() });
+  return sanitizeFfmpegJob(job);
+}
+
+async function ffmpegBuildArgs(operation, payload, output) {
+  const args = ['-y'];
+  const input = ffmpegAllowedPath(payload.input, 'Source file');
+  const accurate = payload.accurate !== false;
+  const start = Math.max(0, Number(payload.start) || 0);
+  const duration = Math.max(0, Number(payload.duration) || 0);
+  const end = Math.max(0, Number(payload.end) || 0);
+  const span = duration || (end > start ? end - start : 0);
+  const crf = Math.min(40, Math.max(18, Number(payload.crf) || 23));
+  const width = Math.max(0, Math.min(3840, Number(payload.width) || 0));
+  const height = Math.max(0, Math.min(3840, Number(payload.height) || 0));
+  const reencode = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(crf), '-c:a', 'aac', '-b:a', '128k'];
+
+  if (operation === 'trim') {
+    if (accurate) args.push('-i', input, '-ss', String(start));
+    else args.push('-ss', String(start), '-i', input);
+    if (span) args.push('-t', String(span));
+    args.push(...(accurate ? reencode : ['-c', 'copy']), '-movflags', '+faststart', output);
+  } else if (operation === 'compress' || operation === 'convert') {
+    args.push('-i', input, ...reencode, '-movflags', '+faststart', output);
+  } else if (operation === 'mute') {
+    args.push('-i', input, '-an', '-c:v', 'copy', '-movflags', '+faststart', output);
+  } else if (operation === 'add-audio') {
+    const audio = ffmpegAllowedPath(payload.audio, 'Audio file');
+    args.push(
+      '-i', input, '-i', audio,
+      '-map', '0:v:0', '-map', '1:a:0',
+      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-shortest',
+      '-movflags', '+faststart', output,
+    );
+  } else if (operation === 'extract-audio') {
+    args.push('-i', input, '-vn', '-c:a', 'libmp3lame', '-q:a', '2', output);
+  } else if (operation === 'resize') {
+    if (!width && !height) throw new Error('Width ya height do mein se kam se kam ek do.');
+    const filter = `scale=${width || -2}:${height || -2}`;
+    args.push('-i', input, '-vf', filter, ...reencode, '-movflags', '+faststart', output);
+  } else if (operation === 'merge') {
+    const files = (Array.isArray(payload.inputs) ? payload.inputs : [])
+      .map((item) => ffmpegAllowedPath(item, 'Clip'));
+    if (files.length < 2) throw new Error('Merge ke liye kam se kam 2 clips chahiye.');
+    for (const file of files) await stat(file);
+    const listFile = path.join(WORKSPACE, `ffmpeg-concat-${Date.now()}-${randomBytes(3).toString('hex')}.txt`);
+    const lines = files.map((file) => `file '${file.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
+    await writeFile(listFile, lines.join('\n'), 'utf8');
+    payload._concatFile = listFile;
+    args.push('-f', 'concat', '-safe', '0', '-i', listFile, ...reencode, '-movflags', '+faststart', output);
+  } else {
+    throw new Error(`Unknown FFmpeg operation: ${operation}`);
+  }
+  return args;
+}
+
+async function createFfmpegJob(payload = {}) {
+  const operation = String(payload.operation || '').trim().toLowerCase();
+  if (!FFMPEG_OPERATIONS.has(operation)) throw new Error('Supported editing operation nahi mila.');
+  const sourceRaw = operation === 'merge' ? (payload.inputs || [])[0] : payload.input;
+  const source = ffmpegAllowedPath(sourceRaw, operation === 'merge' ? 'First clip' : 'Source file');
+  await stat(source);
+  if (operation === 'add-audio') await stat(ffmpegAllowedPath(payload.audio, 'Audio file'));
+
+  const outputFolder = ffmpegAllowedPath(payload.outputFolder || path.dirname(source), 'Output folder');
+  await mkdir(outputFolder, { recursive: true });
+  const ext = operation === 'extract-audio' ? '.mp3' : '.mp4';
+  const output = path.join(
+    outputFolder,
+    ffmpegSafeName(payload.outputName, `nova-${operation}-${Date.now()}`, ext),
+  );
+  const args = await ffmpegBuildArgs(operation, payload, output);
+  const probe = await ffmpegExecutable('ffprobe');
+  const duration = await probeMediaDuration(probe, source);
+  const job = {
+    id: `ff_${Date.now()}_${randomBytes(3).toString('hex')}`,
+    operation,
+    status: 'queued',
+    step: 'Job queue me hai…',
+    progress: 0,
+    error: null,
+    duration,
+    output,
+    outputUrl: `/api/file?path=${encodeURIComponent(output)}`,
+    args,
+    _concatFile: payload._concatFile || null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  ffmpegJobs.unshift(job);
+  runFfmpegJob(job).catch(() => {});
+  return sanitizeFfmpegJob(job);
+}
+
+async function runFfmpegCommand(bin, args, duration, onProgress, jobId) {
+  return new Promise((resolve, reject) => {
+    const runArgs = args[0] === '-y'
+      ? ['-y', '-progress', 'pipe:1', '-nostats', ...args.slice(1)]
+      : ['-y', '-progress', 'pipe:1', '-nostats', ...args];
+    const child = spawn(bin, runArgs, { cwd: WORKSPACE, windowsHide: true });
+    if (jobId) ffmpegChildren.set(jobId, child);
+    let stderr = '';
+    let lastUpdate = 0;
+    const finish = () => {
+      if (jobId) ffmpegChildren.delete(jobId);
+    };
+    child.stdout?.on('data', (chunk) => {
+      const text = chunk.toString();
+      const micros = /out_time_ms=(\d+)/.exec(text);
+      const clock = /out_time=(\d+):(\d+):([\d.]+)/.exec(text);
+      let seconds = 0;
+      if (micros) seconds = Number(micros[1]) / 1_000_000;
+      else if (clock) seconds = Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3]);
+      const now = Date.now();
+      if (seconds > 0 && duration > 0 && now - lastUpdate > 600) {
+        lastUpdate = now;
+        onProgress(Math.min(99, Math.round((seconds / duration) * 100)));
+      }
+    });
+    child.stderr?.on('data', (chunk) => {
+      stderr = (stderr + chunk.toString()).slice(-4000);
+    });
+    child.on('error', (error) => {
+      finish();
+      reject(error);
+    });
+    child.on('close', (code) => {
+      finish();
+      if (code === 0) resolve();
+      else reject(new Error(`FFmpeg failed (${code}): ${stderr.slice(-500) || 'unknown error'}`));
+    });
+  });
+}
+
+async function runFfmpegJob(job) {
+  if (ffmpegRunning.has(job.id)) return;
+  ffmpegRunning.add(job.id);
+  try {
+    if (cancelledJobs.has(job.id)) throw new Error('Editing cancelled.');
+    const bin = await ffmpegExecutable('ffmpeg');
+    if (!bin) throw new Error('FFmpeg available nahi hai — installer reinstall karein.');
+    await updateFfmpegJob(job, { status: 'rendering', step: 'FFmpeg editing chal raha hai…', progress: 1 });
+    await runFfmpegCommand(
+      bin,
+      job.args,
+      job.duration,
+      (progress) => updateFfmpegJob(job, { progress, step: `Editing… ${progress}%` }),
+      job.id,
+    );
+    const info = await stat(job.output);
+    if (!info.size) throw new Error('FFmpeg ne koi output nahi banaya.');
+    await updateFfmpegJob(job, { status: 'done', step: 'Ready', progress: 100 });
+  } catch (err) {
+    await updateFfmpegJob(job, {
+      status: 'error',
+      error: String(err.message || err).slice(0, 600),
+      step: 'Error',
+    });
+  } finally {
+    ffmpegRunning.delete(job.id);
+    if (job._concatFile) await rm(job._concatFile, { force: true }).catch(() => {});
+  }
+}
+
+/* ----------------------- song analysis, TTS, assembly -------------------- */
+
+function resolveJobAudioPath(audioPath) {
+  const clean = String(audioPath || '').trim();
+  if (!clean) return null;
+  const abs = path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(WORKSPACE, clean);
+  return pathInAllowedFolders(abs) ? abs : null;
+}
+
+async function analyzeSongAudio(inputPath) {
+  const bin = await ffmpegExecutable('ffmpeg');
+  if (!bin) return { available: false, reason: 'FFmpeg unavailable.' };
+  const analysisDir = path.join(WORKSPACE, 'analysis');
+  await mkdir(analysisDir, { recursive: true });
+  const wavPath = path.join(analysisDir, `audio-${Date.now()}-${randomBytes(3).toString('hex')}.wav`);
+  try {
+    await runCommand(
+      bin,
+      ['-y', '-i', inputPath, '-ac', '1', '-ar', '22050', '-f', 'wav', wavPath],
+      180_000,
+    );
+    const buffer = await readFile(wavPath);
+    let offset = 12;
+    let dataOffset = -1;
+    let dataLength = 0;
+    let sampleRate = 22050;
+    while (offset + 8 <= buffer.length) {
+      const id = buffer.toString('ascii', offset, offset + 4);
+      const size = buffer.readUInt32LE(offset + 4);
+      if (id === 'fmt ') sampleRate = buffer.readUInt32LE(offset + 12) || sampleRate;
+      if (id === 'data') {
+        dataOffset = offset + 8;
+        dataLength = Math.min(size, buffer.length - dataOffset);
+        break;
+      }
+      offset += 8 + size + (size % 2);
+    }
+    if (dataOffset < 0 || dataLength < 4096) throw new Error('Audio decode fail.');
+
+    const frame = 1024;
+    const hop = 512;
+    const energies = [];
+    for (let i = 0; i + frame <= dataLength - (dataLength % 2); i += hop) {
+      let sum = 0;
+      for (let j = 0; j < frame; j += 1) {
+        const sample = buffer.readInt16LE(dataOffset + i + j * 2) / 32768;
+        sum += sample * sample;
+      }
+      energies.push(Math.sqrt(sum / frame));
+    }
+    if (!energies.length) throw new Error('Audio analysis fail.');
+
+    const duration = dataLength / 2 / sampleRate;
+    const flux = energies.map((value, index) => Math.max(0, value - (energies[index - 1] || 0)));
+    const mean = flux.reduce((a, b) => a + b, 0) / flux.length;
+    const variance = flux.reduce((a, b) => a + (b - mean) ** 2, 0) / flux.length;
+    const threshold = mean + Math.sqrt(variance) * 0.8;
+    const peaks = [];
+    for (let i = 2; i < flux.length - 2 && peaks.length < 400; i += 1) {
+      if (flux[i] > threshold && flux[i] >= flux[i - 1] && flux[i] > flux[i + 1]) {
+        const time = ((i * hop) + frame / 2) / sampleRate;
+        if (!peaks.length || time - peaks[peaks.length - 1] > 0.22) peaks.push(time);
+      }
+    }
+    const histogram = new Map();
+    for (let a = 0; a < peaks.length; a += 1) {
+      for (let b = a + 1; b < peaks.length; b += 1) {
+        const delta = peaks[b] - peaks[a];
+        if (delta < 0.25 || delta > 1.5) continue;
+        let bpm = 60 / delta;
+        while (bpm < 70) bpm *= 2;
+        while (bpm > 180) bpm /= 2;
+        const key = Math.round(bpm);
+        histogram.set(key, (histogram.get(key) || 0) + 1);
+      }
+    }
+    let bpm = 120;
+    let best = 0;
+    for (const [key, value] of histogram) {
+      if (value > best) {
+        best = value;
+        bpm = key;
+      }
+    }
+
+    const zoneCount = Math.min(16, Math.max(6, Math.ceil(duration / 15)));
+    const zoneSize = Math.max(1, Math.floor(energies.length / zoneCount));
+    const rawZones = [];
+    for (let z = 0; z < zoneCount; z += 1) {
+      const slice = energies.slice(z * zoneSize, (z + 1) * zoneSize);
+      rawZones.push(slice.reduce((a, b) => a + b, 0) / (slice.length || 1));
+    }
+    const maxEnergy = Math.max(...rawZones, 0.00001);
+    const zones = [];
+    rawZones.forEach((energy, index) => {
+      const level = energy / maxEnergy;
+      const label = level > 0.72 ? 'chorus' : level > 0.48 ? 'build' : level > 0.22 ? 'verse' : 'intro';
+      const zone = {
+        start: Number(((index * duration) / zoneCount).toFixed(2)),
+        end: Number((((index + 1) * duration) / zoneCount).toFixed(2)),
+        energy: Number(level.toFixed(3)),
+        label,
+      };
+      const last = zones[zones.length - 1];
+      if (last && last.label === label) {
+        last.end = zone.end;
+        last.energy = Number(((last.energy + zone.energy) / 2).toFixed(3));
+      } else {
+        zones.push(zone);
+      }
+    });
+
+    return {
+      available: true,
+      duration: Number(duration.toFixed(2)),
+      bpm,
+      onsetCount: peaks.length,
+      zones,
+      suggestedSceneCount: Math.min(60, Math.max(8, Math.round(duration / 12))),
+    };
+  } finally {
+    await rm(wavPath, { force: true }).catch(() => {});
+  }
+}
+
+async function synthesizeNarration(text, voice, outPath) {
+  const scriptPath = path.join(WORKSPACE, `tts-${Date.now()}-${randomBytes(3).toString('hex')}.ps1`);
+  const b64 = (value) => Buffer.from(String(value || ''), 'utf8').toString('base64');
+  const script = [
+    `$Text=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(String(text).slice(0, 14_000))}'))`,
+    `$Out=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(outPath)}'))`,
+    `$Voice=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(voice || '')}'))`,
+    'Add-Type -AssemblyName System.Speech',
+    '$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer',
+    'if ($Voice) { try { $synth.SelectVoice($Voice) } catch {} }',
+    '$synth.SetOutputToWaveFile($Out)',
+    '$synth.Speak($Text)',
+    '$synth.Dispose()',
+  ].join('\n');
+  try {
+    await writeFile(scriptPath, script, 'utf8');
+    await runCommand(
+      'powershell',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      180_000,
+    );
+    const info = await stat(outPath);
+    if (info.size < 1000) throw new Error('Voice audio ban nahi paya.');
+    return outPath;
+  } finally {
+    await rm(scriptPath, { force: true }).catch(() => {});
+  }
+}
+
+async function assembleVideoWithFfmpeg(job, directory, options = {}) {
+  const bin = await ffmpegExecutable('ffmpeg');
+  if (!bin) throw new Error('FFmpeg available nahi hai — installer reinstall karein.');
+  const scenes = (job.scenes || []).filter((scene) => scene.image);
+  if (!scenes.length) throw new Error('Video ke liye koi scene image nahi mili.');
+
+  const portrait = job.ratio === '9:16';
+  const width = portrait ? 720 : 1280;
+  const height = portrait ? 1280 : 720;
+  const fps = 24;
+  const count = scenes.length;
+  const target = Math.min(900, Math.max(5, Number(job.durationSeconds) || count * 5));
+  const transition = Math.min(0.8, Math.max(0.3, target / count / 8));
+  const perScene = target / count;
+  const allowedTransitions = new Set([
+    'fade', 'wipeleft', 'wiperight', 'slideleft', 'slideright', 'circleclose', 'circleopen',
+  ]);
+  const requested = String((job.transitions || [])[0] || 'fade').toLowerCase();
+  const transitionName = allowedTransitions.has(requested) ? requested : 'fade';
+  const output = path.join(directory, 'final.mp4');
+
+  const args = [];
+  for (const scene of scenes) {
+    const image = path.resolve(WORKSPACE, String(scene.image).replace(/\\/g, '/'));
+    if (!pathInAllowedFolders(image)) throw new Error('Scene image allowed folder ke bahar hai.');
+    const inputDuration = scenes.indexOf(scene) < count - 1 ? perScene + transition : perScene;
+    args.push('-loop', '1', '-framerate', String(fps), '-t', inputDuration.toFixed(3), '-i', image);
+  }
+
+  const audioPath = resolveJobAudioPath(job.audioPath);
+  const songIndex = audioPath ? count : null;
+  if (audioPath) args.push('-i', audioPath);
+  const narrationPath = options.narration || null;
+  const voiceIndex = narrationPath ? (songIndex === null ? count : count + 1) : null;
+  if (narrationPath) args.push('-i', narrationPath);
+  const silenceIndex = songIndex === null && voiceIndex === null ? count : null;
+  if (silenceIndex !== null) args.push('-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo');
+
+  const filters = [];
+  for (let index = 0; index < count; index += 1) {
+    filters.push(
+      `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,`
+      + `crop=${width}:${height},setsar=1,`
+      + `zoompan=z='min(pzoom+0.0012,1.18)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${width}x${height}:fps=${fps}[v${index}]`,
+    );
+  }
+  let current = 'v0';
+  for (let index = 1; index < count; index += 1) {
+    const label = `x${index}`;
+    filters.push(
+      `[${current}][v${index}]xfade=transition=${transitionName}:duration=${transition.toFixed(3)}`
+      + `:offset=${(index * perScene).toFixed(3)}[${label}]`,
+    );
+    current = label;
+  }
+  filters.push(`[${current}]fade=t=in:st=0:d=0.5,fade=t=out:st=${(target - 0.6).toFixed(3)}:d=0.6[vout]`);
+
+  if (songIndex !== null && voiceIndex !== null) {
+    filters.push(
+      `[${songIndex}:a]volume=0.62,apad=pad_dur=${target.toFixed(3)}[song];`
+      + `[${voiceIndex}:a]volume=1.1,apad=pad_dur=${target.toFixed(3)}[voice];`
+      + `[song][voice]amix=inputs=2:duration=first:dropout_transition=1:normalize=0,`
+      + `atrim=0:${target.toFixed(3)}[aout]`,
+    );
+  } else if (songIndex !== null) {
+    filters.push(
+      `[${songIndex}:a]volume=0.85,apad=pad_dur=${target.toFixed(3)},`
+      + `atrim=0:${target.toFixed(3)}[aout]`,
+    );
+  } else {
+    const index = voiceIndex === null ? silenceIndex : voiceIndex;
+    filters.push(
+      `[${index}:a]volume=1.1,apad=pad_dur=${target.toFixed(3)},`
+      + `atrim=0:${target.toFixed(3)}[aout]`,
+    );
+  }
+
+  args.push(
+    '-filter_complex', filters.join(';'),
+    '-map', '[vout]', '-map', '[aout]',
+    '-t', target.toFixed(3),
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '160k',
+    '-movflags', '+faststart',
+    output,
+  );
+
+  await updateMediaJob(job, {
+    status: 'rendering',
+    progress: 75,
+    step: `FFmpeg final render — ${count} scenes · ${Math.round(target)}s · ${transitionName}`,
+  });
+  await runFfmpegCommand(
+    bin,
+    args,
+    target,
+    (progress) => updateMediaJob(job, {
+      progress: 75 + Math.round(progress * 0.24),
+      step: `FFmpeg render… ${progress}%`,
+    }),
+    job.id,
+  );
+  const info = await stat(output);
+  if (!info.size) throw new Error('Final video ban nahi paya.');
+  await updateMediaJob(job, {
+    status: 'done',
+    progress: 100,
+    step: 'Ready',
+    output: path.relative(WORKSPACE, output).replace(/\\/g, '/'),
+    outputUrl: `/api/file?path=${encodeURIComponent(output)}`,
+    error: null,
+  });
+  return output;
+}
+
 function sanitizeSchedule(task) {
   const { key, base, ...rest } = task;
   return {
@@ -3179,6 +3754,7 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'DELETE') {
         cancelledJobs.add(job.id);
+        ffmpegChildren.get(job.id)?.kill('SIGKILL');
         mediaJobs = mediaJobs.filter((item) => item.id !== job.id);
         await saveMediaJobs();
         setTimeout(() => cancelledJobs.delete(job.id), 60_000).unref?.();
@@ -3345,6 +3921,60 @@ const server = http.createServer(async (req, res) => {
         await saveAllowedFolders();
       }
       return sendJson(res, 200, { folders: allowedFolders, added: abs });
+    }
+
+    if (url.pathname === '/api/folders' && req.method === 'DELETE') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        payload = {};
+      }
+      const abs = path.resolve(String(payload.path || '').replace(/^"|"$/g, ''));
+      if (abs === WORKSPACE) {
+        return sendJson(res, 400, { error: 'Default workspace cannot be removed.' });
+      }
+      allowedFolders = allowedFolders.filter((folder) => folder !== abs);
+      await saveAllowedFolders();
+      return sendJson(res, 200, { folders: allowedFolders, removed: abs });
+    }
+
+    if (url.pathname === '/api/ffmpeg/status' && req.method === 'GET') {
+      return sendJson(res, 200, await ffmpegStatus());
+    }
+
+    if (url.pathname === '/api/ffmpeg/jobs' && req.method === 'GET') {
+      return sendJson(res, 200, { jobs: ffmpegJobs.map(sanitizeFfmpegJob) });
+    }
+
+    if (url.pathname === '/api/ffmpeg/jobs' && req.method === 'POST') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      try {
+        return sendJson(res, 200, await createFfmpegJob(payload));
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Could not start FFmpeg job.' });
+      }
+    }
+
+    const ffmpegJobMatch = /^\/api\/ffmpeg\/jobs\/([^/]+)$/.exec(url.pathname);
+    if (ffmpegJobMatch) {
+      const job = ffmpegJobs.find((item) => item.id === ffmpegJobMatch[1]);
+      if (!job) return sendJson(res, 404, { error: 'FFmpeg job not found.' });
+      if (req.method === 'GET') return sendJson(res, 200, sanitizeFfmpegJob(job));
+      if (req.method === 'DELETE') {
+        cancelledJobs.add(job.id);
+        ffmpegChildren.get(job.id)?.kill('SIGKILL');
+        const index = ffmpegJobs.indexOf(job);
+        if (index !== -1) ffmpegJobs.splice(index, 1);
+        setTimeout(() => cancelledJobs.delete(job.id), 60_000).unref?.();
+        return sendJson(res, 200, { ok: true });
+      }
+      return sendJson(res, 405, { error: 'Method not allowed.' });
     }
 
     if (url.pathname === '/api/file' && req.method === 'GET') {

@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Text.RegularExpressions;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Threading;
@@ -213,6 +215,7 @@ namespace NovaDesktop
 
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
             webView.CoreWebView2.NewWindowRequested += WebView_NewWindowRequested;
+            webView.CoreWebView2.WebMessageReceived += WebView_WebMessageReceived;
             webView.CoreWebView2.ProcessFailed += (s, failed) =>
             {
                 WriteLog("WebView2 process failed — app window recover kar raha hai.");
@@ -242,6 +245,104 @@ namespace NovaDesktop
             catch
             {
                 // External link could not be opened; app window stays intact.
+            }
+        }
+
+        private static string JsonString(string value)
+        {
+            return "\"" + (value ?? string.Empty)
+                .Replace("\\", "\\\\")
+                .Replace("\"", "\\\"")
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n") + "\"";
+        }
+
+        private void SendWebMessage(string json)
+        {
+            try
+            {
+                if (webView.CoreWebView2 != null)
+                {
+                    webView.CoreWebView2.PostWebMessageAsJson(json);
+                }
+            }
+            catch (Exception error)
+            {
+                WriteLog("Web message send failed: " + error.Message);
+            }
+        }
+
+        private void WebView_WebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            string raw = e.WebMessageAsJson;
+            try
+            {
+                BeginInvoke(new MethodInvoker(() => HandleWebMessage(raw)));
+            }
+            catch
+            {
+                // Form already closing — ignore the picker request.
+            }
+        }
+
+        private void HandleWebMessage(string raw)
+        {
+            Match typeMatch = Regex.Match(raw, "\"type\"\\s*:\\s*\"([^\"]+)\"");
+            Match idMatch = Regex.Match(raw, "\"requestId\"\\s*:\\s*\"([^\"]+)\"");
+            if (!typeMatch.Success || !idMatch.Success) return;
+
+            string type = typeMatch.Groups[1].Value;
+            string requestId = idMatch.Groups[1].Value;
+
+            if (type == "choose-folder")
+            {
+                using (FolderBrowserDialog dialog = new FolderBrowserDialog())
+                {
+                    dialog.Description = "Choose a folder Nova can read and code in";
+                    dialog.ShowNewFolderButton = true;
+                    if (dialog.ShowDialog(this) == DialogResult.OK)
+                    {
+                        SendWebMessage("{\"type\":\"folderChosen\",\"requestId\":" + JsonString(requestId)
+                            + ",\"path\":" + JsonString(dialog.SelectedPath) + "}");
+                    }
+                    else
+                    {
+                        SendWebMessage("{\"type\":\"folderChosen\",\"requestId\":" + JsonString(requestId)
+                            + ",\"cancelled\":true}");
+                    }
+                }
+                return;
+            }
+
+            if (type == "choose-file" || type == "choose-files")
+            {
+                using (OpenFileDialog dialog = new OpenFileDialog())
+                {
+                    dialog.Title = type == "choose-files" ? "Choose video clips" : "Choose a file";
+                    dialog.Filter = "Video and audio|*.mp4;*.mkv;*.webm;*.mov;*.avi;*.m4v;*.mp3;*.wav;*.aac;*.flac;*.m4a|All files|*.*";
+                    dialog.Multiselect = type == "choose-files";
+                    dialog.CheckFileExists = true;
+                    if (dialog.ShowDialog(this) == DialogResult.OK)
+                    {
+                        if (dialog.Multiselect)
+                        {
+                            List<string> parts = new List<string>();
+                            foreach (string file in dialog.FileNames) parts.Add(JsonString(file));
+                            SendWebMessage("{\"type\":\"filesChosen\",\"requestId\":" + JsonString(requestId)
+                                + ",\"paths\":[" + string.Join(",", parts) + "]}");
+                        }
+                        else
+                        {
+                            SendWebMessage("{\"type\":\"fileChosen\",\"requestId\":" + JsonString(requestId)
+                                + ",\"path\":" + JsonString(dialog.FileName) + "}");
+                        }
+                    }
+                    else
+                    {
+                        SendWebMessage("{\"type\":\"" + (type == "choose-files" ? "filesChosen" : "fileChosen")
+                            + "\",\"requestId\":" + JsonString(requestId) + ",\"cancelled\":true}");
+                    }
+                }
             }
         }
 
