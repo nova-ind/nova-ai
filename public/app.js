@@ -804,40 +804,77 @@ function videoCard(message) {
 }
 
 function imageCard(message, isLast) {
+  const urls = Array.isArray(message.images) && message.images.length
+    ? message.images
+    : message.url
+      ? [message.url]
+      : [];
   const card = document.createElement('div');
-  card.className = 'image-card';
-
-  const link = document.createElement('a');
-  link.href = message.url;
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
+  card.className = `image-card${urls.length > 1 ? ' multi' : ''}`;
 
   if (message.status === 'error') {
     const fallback = document.createElement('div');
     fallback.className = 'image-fallback';
     fallback.textContent = message.error || 'Image generation failed. Try again.';
     card.append(fallback);
+  } else if (!urls.length) {
+    const loading = document.createElement('div');
+    loading.className = 'image-loading';
+    loading.textContent = 'Bing background me 4 images bana raha hai…';
+    card.append(loading);
   } else {
-    const img = document.createElement('img');
-    img.alt = message.prompt || 'Generated image';
-    img.loading = 'lazy';
-    img.src = message.url;
-    if (message.status === 'loading') img.style.opacity = '0.35';
-    img.addEventListener('load', () => {
-      img.style.opacity = '1';
-      if (message.status === 'loading') {
-        message.status = 'done';
-        saveChats();
+    const grid = document.createElement('div');
+    grid.className = 'image-grid';
+    urls.forEach((url, index) => {
+      const item = document.createElement('div');
+      item.className = 'image-item';
+
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      const img = document.createElement('img');
+      img.alt = `${message.prompt || 'Generated image'} · ${index + 1}`;
+      img.loading = 'lazy';
+      img.src = url;
+      if (message.status === 'loading') img.style.opacity = '0.35';
+      img.addEventListener('load', () => {
+        img.style.opacity = '1';
+        if (message.status === 'loading') {
+          message.status = 'done';
+          saveChats();
+        }
+      });
+      img.addEventListener('error', () => {
+        img.style.opacity = '1';
+        img.classList.add('image-broken');
+        img.alt = 'Image load nahi hui';
+      });
+      link.append(img);
+      item.append(link);
+
+      const itemCaption = document.createElement('div');
+      itemCaption.className = 'image-item-caption';
+      if (urls.length > 1) {
+        const num = document.createElement('span');
+        num.textContent = `#${index + 1}`;
+        itemCaption.append(num);
       }
+      const open = document.createElement('a');
+      open.href = url;
+      open.target = '_blank';
+      open.rel = 'noopener noreferrer';
+      open.textContent = 'Open';
+      itemCaption.append(open);
+      const download = document.createElement('a');
+      download.href = url;
+      download.download = `nova-${message.seed || Date.now()}-${index + 1}.jpg`;
+      download.textContent = 'Download';
+      itemCaption.append(download);
+      item.append(itemCaption);
+      grid.append(item);
     });
-    img.addEventListener('error', () => {
-      message.status = 'error';
-      message.error = 'Image could not be loaded.';
-      saveChats();
-      img.replaceWith(imageCard(message, isLast).firstChild);
-    });
-    link.append(img);
-    card.append(link);
+    card.append(grid);
   }
 
   const caption = document.createElement('div');
@@ -846,17 +883,17 @@ function imageCard(message, isLast) {
   text.textContent = message.prompt || 'Generated image';
   caption.append(text);
 
-  if (message.status !== 'error') {
+  if (message.status !== 'error' && urls.length) {
     const open = document.createElement('a');
-    open.href = message.url;
+    open.href = urls[0];
     open.target = '_blank';
     open.rel = 'noopener noreferrer';
     open.textContent = 'Open';
     caption.append(open);
 
     const download = document.createElement('a');
-    download.href = message.url;
-    download.download = `nova-${message.seed || Date.now()}.jpg`;
+    download.href = urls[0];
+    download.download = `nova-${message.seed || Date.now()}-1.jpg`;
     download.textContent = 'Download';
     caption.append(download);
   }
@@ -865,24 +902,39 @@ function imageCard(message, isLast) {
   return card;
 }
 
-function messageActions(message, index, isLast) {
+function messageCopyText(message) {
+  const parts = [];
+  if (message.content) parts.push(message.content);
+  if (message.files?.length) parts.push(message.files.map((f) => `📎 ${f.name}`).join('  ·  '));
+  const images = Array.isArray(message.images) && message.images.length
+    ? message.images
+    : message.url
+      ? [message.url]
+      : [];
+  if (images.length) parts.push(images.join('\n'));
+  return parts.join('\n').trim();
+}
+
+function messageActions(message, index, isLast, isUser = false) {
   const foot = document.createElement('div');
   foot.className = 'msg-foot';
 
-  if (!['image', 'video', 'job'].includes(message.kind) && message.content) {
+  const text = messageCopyText(message);
+  if (text) {
     const copy = document.createElement('button');
     copy.className = 'tool-btn';
     copy.type = 'button';
+    copy.title = 'Copy full message';
     copy.innerHTML =
       '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>Copy';
     copy.addEventListener('click', async () => {
-      await copyText(message.content);
+      await copyText(text);
       toast('Copied');
     });
     foot.append(copy);
   }
 
-  if (isLast && !busy()) {
+  if (!isUser && isLast && !busy() && !['image', 'video', 'job'].includes(message.kind)) {
     const regen = document.createElement('button');
     regen.className = 'tool-btn';
     regen.type = 'button';
@@ -892,7 +944,7 @@ function messageActions(message, index, isLast) {
     foot.append(regen);
   }
 
-  if (!['image', 'video', 'job'].includes(message.kind)) {
+  if (!isUser && !['image', 'video', 'job'].includes(message.kind)) {
     for (const [value, label, icon] of [
       ['up', 'Good response', '<path d="M7 21V9l4-6 2 1v6h6a2 2 0 0 1 2 2.3l-1.4 7A2 2 0 0 1 17.6 21H7z"/><path d="M7 9H4v12h3"/>'],
       ['down', 'Bad response', '<path d="M17 3v12l-4 6-2-1v-6H5a2 2 0 0 1-2-2.3l1.4-7A2 2 0 0 1 6.4 3H17z"/><path d="M17 15h3V3h-3"/>'],
@@ -912,15 +964,33 @@ function messageActions(message, index, isLast) {
     }
   }
 
+  const del = document.createElement('button');
+  del.className = 'tool-btn danger';
+  del.type = 'button';
+  del.title = 'Delete this message';
+  del.innerHTML =
+    '<svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><path d="M10 11v6M14 11v6"/></svg>Delete';
+  del.addEventListener('click', () => {
+    deleteMessageAt(index);
+    toast('Message deleted');
+  });
+  foot.append(del);
+
   return foot;
 }
 
 function buildMessage(message, index, isLast) {
   const wrap = document.createElement('div');
   wrap.dataset.index = String(index);
+  wrap.className = `msg ${message.role === 'user' ? 'user' : 'ai'}`;
+
+  // Har message ek hi card me — copy/delete dono isi box me milte hain.
+  const card = document.createElement('div');
+  card.className = 'msg-card';
+  if (['image', 'video', 'job'].includes(message.kind)) card.classList.add('flat');
+  wrap.append(card);
 
   if (message.role === 'user') {
-    wrap.className = 'msg user';
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = message.content || '';
@@ -937,24 +1007,24 @@ function buildMessage(message, index, isLast) {
       names.textContent = message.files.map((f) => `📎 ${f.name}`).join('  ·  ');
       bubble.append(names);
     }
-    wrap.append(bubble);
+    card.append(bubble);
+    if (!message.pending) card.append(messageActions(message, index, isLast, true));
     return wrap;
   }
 
-  wrap.className = 'msg ai';
-  wrap.append(metaRow(message, isLast));
+  card.append(metaRow(message, isLast));
 
-  if (message.sources?.length) wrap.append(sourcesEl(message.sources));
-  if (message.reasoning) wrap.append(reasoningEl(message.reasoning, Boolean(message.streaming)));
+  if (message.sources?.length) card.append(sourcesEl(message.sources));
+  if (message.reasoning) card.append(reasoningEl(message.reasoning, Boolean(message.streaming)));
   const trace = agentTraceEl(message);
-  if (trace) wrap.append(trace);
+  if (trace) card.append(trace);
 
   if (message.kind === 'job') {
-    wrap.append(jobCard(message));
+    card.append(jobCard(message));
   } else if (message.kind === 'video') {
-    wrap.append(videoCard(message));
+    card.append(videoCard(message));
   } else if (message.kind === 'image') {
-    wrap.append(imageCard(message, isLast));
+    card.append(imageCard(message, isLast));
   } else {
     const body = document.createElement('div');
     body.className = 'body';
@@ -969,10 +1039,10 @@ function buildMessage(message, index, isLast) {
     } else {
       body.innerHTML = renderMarkdown(message.content || '');
     }
-    wrap.append(body);
+    card.append(body);
   }
 
-  if (!message.pending && !message.streaming) wrap.append(messageActions(message, index, isLast));
+  if (!message.pending && !message.streaming) card.append(messageActions(message, index, isLast));
   return wrap;
 }
 
@@ -1146,6 +1216,16 @@ function deleteChat(id) {
   chats.splice(index, 1);
   if (activeId === id) activeId = null;
   saveChats();
+  renderAll();
+}
+
+function deleteMessageAt(index) {
+  const chat = activeChat();
+  if (!chat || !Number.isInteger(index) || !chat.messages[index]) return;
+  // Stream chal raha ho to pehle rokein, warna aborted likhna dobara aa jata hai.
+  if (busy() && index >= chat.messages.length - 2) stopStream();
+  chat.messages.splice(index, 1);
+  touch(chat);
   renderAll();
 }
 
@@ -1678,6 +1758,20 @@ async function generateHuggingFaceImageBrowser(prompt, ratio = '16:9') {
   throw new Error(`Hugging Face Flux abhi image nahi bana pa raha. ${lastError?.message || ''}`.trim());
 }
 
+async function loadServerImages(chat, assistant, provider, imagineUrl) {
+  const response = await fetch(`${imagineUrl(provider)}&multi=1`);
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data?.images?.length) {
+    throw new Error(data?.error || `Image generation failed (${response.status}).`);
+  }
+  assistant.images = data.images;
+  assistant.url = data.images[0];
+  assistant.provider = data.provider || provider;
+  assistant.status = 'done';
+  touch(chat);
+  renderMessages();
+}
+
 async function generateImage(chat, prompt) {
   const seed = Math.floor(Math.random() * 1_000_000);
   const provider = settings.imageProvider || DEFAULT_SETTINGS.imageProvider;
@@ -1686,6 +1780,7 @@ async function generateImage(chat, prompt) {
     kind: 'image',
     prompt,
     url: '',
+    images: [],
     seed,
     status: 'loading',
     ts: Date.now(),
@@ -1706,7 +1801,9 @@ async function generateImage(chat, prompt) {
   if (provider === 'puter') {
     try {
       assistant.url = await generatePuterBrowserImage(prompt, settings.imageRatio || '16:9');
+      assistant.images = [assistant.url];
       assistant.provider = 'puter';
+      assistant.status = 'done';
       touch(chat);
       renderMessages();
       return;
@@ -1725,7 +1822,9 @@ async function generateImage(chat, prompt) {
       await loadPuter();
       if (puterIsSignedIn()) {
         assistant.url = await generatePuterBrowserImage(prompt, settings.imageRatio || '16:9');
+        assistant.images = [assistant.url];
         assistant.provider = 'puter';
+        assistant.status = 'done';
         touch(chat);
         renderMessages();
         return;
@@ -1740,17 +1839,22 @@ async function generateImage(chat, prompt) {
     serverConfig.imageWorkerConnected || serverConfig.mediaProviders?.imageWorker,
   );
   if (provider === 'auto' && !isLocal && workerReady) {
-    assistant.url = imagineUrl('auto');
-    touch(chat);
-    renderMessages();
-    return;
+    try {
+      await loadServerImages(chat, assistant, 'auto', imagineUrl);
+      return;
+    } catch (err) {
+      // Worker offline ho to neeche HF / direct fallback chalao.
+      assistant.error = err.message;
+    }
   }
 
   const tryBrowserHf = provider === 'huggingface' || (provider === 'auto' && !isLocal);
   if (tryBrowserHf) {
     try {
       assistant.url = await generateHuggingFaceImageBrowser(prompt, settings.imageRatio || '16:9');
+      assistant.images = [assistant.url];
       assistant.provider = 'huggingface';
+      assistant.status = 'done';
       touch(chat);
       renderMessages();
       return;
@@ -1765,9 +1869,14 @@ async function generateImage(chat, prompt) {
     }
   }
 
-  assistant.url = imagineUrl(provider);
-  touch(chat);
-  renderMessages();
+  try {
+    await loadServerImages(chat, assistant, provider, imagineUrl);
+  } catch (err) {
+    assistant.status = 'error';
+    assistant.error = err.message || assistant.error || 'Image generation failed.';
+    touch(chat);
+    renderMessages();
+  }
 }
 
 /* ------------------------------ video studio ------------------------------- */

@@ -54,6 +54,11 @@ const VIDEO_PROVIDERS = [
 ];
 const CDP_PORT = Number(process.env.CDP_PORT || 9222);
 const BROWSER_PROFILE = path.join(WORKSPACE, '.browser-profile');
+// Alag headless Chrome — Bing generation iske andar hoti hai, screen par kuch nahi dikhta.
+const IMG_CDP_PORT = Number(process.env.IMG_CDP_PORT || 9223);
+const IMG_BROWSER_PROFILE = path.join(WORKSPACE, '.bing-headless-profile');
+// Login cookies ka reader — asli profile ko hidden Chrome me kholkar cookies nikalta hai.
+const COOKIE_CDP_PORT = Number(process.env.COOKIE_CDP_PORT || 9224);
 const BING_COOKIE_FILE = path.join(WORKSPACE, 'bing-auth.json');
 const WORKER_TOKEN_FILE = path.join(WORKSPACE, 'image-worker-token.json');
 const LIVE_URL = (process.env.LIVE_URL || 'https://nova-ai-9gbh.onrender.com').replace(/\/+$/, '');
@@ -82,6 +87,7 @@ if (BING_SUPPORTED && !imageWorkerToken) {
   ).catch(() => {});
 }
 let browserTargetId = null;
+let imageTargetId = null;
 
 const TIERS = [
   { id: 'auto', label: 'Auto', hint: 'Balanced default', model: 'minimaxai/minimax-m3.1-flash' },
@@ -552,9 +558,21 @@ async function handleImagine(req, res, url) {
     ? url.searchParams.get('ratio')
     : '16:9';
   const finalPrompt = `${prompt}${style}`;
+  const multi = url.searchParams.get('multi') === '1';
 
   try {
-    const { bytes } = await generateImageSmart(finalPrompt, { provider, model, ratio });
+    const { bytes, images = [bytes], provider: usedProvider } = await generateImageSmart(finalPrompt, {
+      provider,
+      model,
+      ratio,
+    });
+    if (multi) {
+      return sendJson(res, 200, {
+        images: images.map((item) => `data:${imageContentType(item)};base64,${item.toString('base64')}`),
+        provider: usedProvider,
+        count: images.length,
+      });
+    }
     res.writeHead(200, {
       'content-type': imageContentType(bytes),
       'content-length': bytes.length,
@@ -694,18 +712,34 @@ async function updateMediaJob(job, patch) {
   await saveMediaJobs().catch(() => {});
 }
 
+async function fetchImageResult(prompt, model, provider, ratio) {
+  if (provider === 'bing') {
+    if (!BING_SUPPORTED) {
+      throw new Error(
+        'Bing direct Render par captcha dikhaata hai. Local PC chalte rehne dein (auto image worker) ya Cloudflare/Hugging Face free token use karein.',
+      );
+    }
+    return { images: await generateBingImages(prompt), provider: 'bing' };
+  }
+  if (provider === 'cloudflare') {
+    return { images: [await generateCloudflareImage(prompt, model)], provider: 'cloudflare' };
+  }
+  if (provider === 'huggingface') {
+    return { images: [await generateHuggingFaceImage(prompt, model, ratio)], provider: 'huggingface' };
+  }
+  if (provider === 'worker') {
+    return { images: await generateImageViaWorker(prompt, ratio), provider: 'worker' };
+  }
+  if (provider === 'pollinations') {
+    throw new Error('Pollinations band hai — app Bing/Cloudflare/Hugging Face free providers use karti hai.');
+  }
+  throw new Error(`Unknown image provider: ${provider}. Available: bing, cloudflare, huggingface, worker.`);
+}
+
 async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'auto', ratio = '16:9') {
   if (kind === 'image') {
-    if (provider === 'bing') {
-      return BING_SUPPORTED ? generateBingImage(prompt) : generateBingImageHttp(prompt);
-    }
-    if (provider === 'cloudflare') return generateCloudflareImage(prompt, model);
-    if (provider === 'huggingface') return generateHuggingFaceImage(prompt, model, ratio);
-    if (provider === 'worker') return generateImageViaWorker(prompt, ratio);
-    if (provider === 'pollinations') {
-      throw new Error('Pollinations band hai — app Bing/Cloudflare/Hugging Face free providers use karti hai.');
-    }
-    throw new Error(`Unknown image provider: ${provider}. Available: bing, cloudflare, huggingface, worker.`);
+    const { images } = await fetchImageResult(prompt, model, provider, ratio);
+    return images[0];
   }
   if (provider === 'ltx') return generateLtxVideo(prompt, { duration, ratio });
   if (provider === 'pollinations') {
@@ -718,7 +752,7 @@ async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'au
 function configuredImageProviders() {
   return [
     ...(!BING_SUPPORTED && imageWorkerConnected() ? ['worker'] : []),
-    ...(BING_SUPPORTED || bingCookie ? ['bing'] : []),
+    ...(BING_SUPPORTED ? ['bing'] : []),
     ...(cloudflareAccount && cloudflareToken ? ['cloudflare'] : []),
     ...(hfToken ? ['huggingface'] : []),
   ];
@@ -736,15 +770,17 @@ async function generateImageSmart(prompt, options = {}) {
   let lastError = null;
   for (const provider of order) {
     try {
-      const bytes = await fetchMediaBytes(
-        'image',
+      const result = await fetchImageResult(
         prompt,
         options.model || DEFAULT_IMAGE_MODEL,
-        5,
         provider,
         options.ratio || '16:9',
       );
-      return { bytes, provider };
+      return {
+        bytes: result.images[0],
+        images: result.images,
+        provider: result.provider,
+      };
     } catch (err) {
       lastError = err;
     }
@@ -1270,6 +1306,58 @@ async function ensureBrowser() {
   throw new Error('The browser started but the debugging port did not open.');
 }
 
+async function cookieCdpAvailable() {
+  try {
+    const response = await fetch(`http://127.0.0.1:${COOKIE_CDP_PORT}/json/version`, {
+      signal: AbortSignal.timeout(1200),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureCookieBrowser() {
+  if (await cookieCdpAvailable()) return;
+  const executable = await findBrowserExecutable();
+  if (!executable) throw new Error('Chrome or Edge was not found on this PC.');
+  // Visible Chrome nahi chal raha — yahi profile hidden mode me kholkar login cookies padhein.
+  for (const lock of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    await rm(path.join(BROWSER_PROFILE, lock), { force: true }).catch(() => {});
+  }
+  const child = spawn(
+    executable,
+    [
+      '--headless=new',
+      `--remote-debugging-port=${COOKIE_CDP_PORT}`,
+      `--user-data-dir="${BROWSER_PROFILE}"`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      'about:blank',
+    ],
+    { detached: true, stdio: 'ignore', windowsHide: true },
+  );
+  child.unref();
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await sleep(400);
+    if (await cookieCdpAvailable()) return;
+  }
+  throw new Error('Cookie reader browser start nahi hua.');
+}
+
+async function cookiesFromCdpPort(port) {
+  const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+    signal: AbortSignal.timeout(8000),
+  });
+  const targets = await response.json();
+  const target = targets.find((item) => item.type === 'page') || targets[0];
+  if (!target?.webSocketDebuggerUrl) throw new Error('Browser me page nahi mila.');
+  const result = await cdpCommand(target.webSocketDebuggerUrl, 'Storage.getCookies', {});
+  return (result.cookies || []).filter((item) =>
+    /bing\.com$/i.test(String(item.domain || '').replace(/^\./, '')),
+  );
+}
+
 async function openBrowserLogin() {
   const urls = [
     'https://www.bing.com/images/create',
@@ -1356,6 +1444,121 @@ async function pageEvaluate(expression) {
   return result.result?.value;
 }
 
+/* ---------- hidden Chrome for Bing (screen par page kabhi nahi dikhta) ------- */
+
+async function imageCdpAvailable() {
+  try {
+    const response = await fetch(`http://127.0.0.1:${IMG_CDP_PORT}/json/version`, {
+      signal: AbortSignal.timeout(1200),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureImageBrowser() {
+  if (await imageCdpAvailable()) return;
+  const executable = await findBrowserExecutable();
+  if (!executable) throw new Error('Chrome or Edge was not found on this PC.');
+  await mkdir(IMG_BROWSER_PROFILE, { recursive: true });
+  for (const lock of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    await rm(path.join(IMG_BROWSER_PROFILE, lock), { force: true }).catch(() => {});
+  }
+  const child = spawn(
+    executable,
+    [
+      '--headless=new',
+      `--remote-debugging-port=${IMG_CDP_PORT}`,
+      `--user-data-dir=${IMG_BROWSER_PROFILE}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-gpu',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
+      '--disable-backgrounding-occluded-windows',
+      'about:blank',
+    ],
+    { detached: true, stdio: 'ignore', windowsHide: true },
+  );
+  child.unref();
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(400);
+    if (await imageCdpAvailable()) return;
+  }
+  throw new Error('Hidden Bing browser started, par debugging port nahi khula.');
+}
+
+async function imageBrowserTarget(openUrl = '') {
+  await ensureImageBrowser();
+  if (openUrl) {
+    const response = await fetch(`http://127.0.0.1:${IMG_CDP_PORT}/json/new?${encodeURIComponent(openUrl)}`, {
+      method: 'PUT',
+      signal: AbortSignal.timeout(8000),
+    });
+    if (response.ok) {
+      const target = await response.json();
+      imageTargetId = target.id;
+      return target;
+    }
+  }
+  const response = await fetch(`http://127.0.0.1:${IMG_CDP_PORT}/json/list`, {
+    signal: AbortSignal.timeout(8000),
+  });
+  const targets = await response.json();
+  const target =
+    targets.find((item) => item.type === 'page' && item.id === imageTargetId) ||
+    targets.find((item) => item.type === 'page');
+  if (!target) throw new Error('Hidden Bing browser me koi page nahi hai.');
+  imageTargetId = target.id;
+  return target;
+}
+
+async function imagePageEvaluate(expression) {
+  const target = await imageBrowserTarget();
+  const result = await cdpCommand(target.webSocketDebuggerUrl, 'Runtime.evaluate', {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.exception?.description || 'Page script failed.');
+  }
+  return result.result?.value;
+}
+
+function cookiesFromHeader(header) {
+  return String(header || '')
+    .split(';')
+    .map((part) => {
+      const index = part.indexOf('=');
+      if (index < 1) return null;
+      return {
+        name: part.slice(0, index).trim(),
+        value: part.slice(index + 1).trim(),
+        domain: '.bing.com',
+        path: '/',
+      };
+    })
+    .filter((item) => item?.name && item.value);
+}
+
+async function injectImageBrowserCookies(cookies) {
+  if (!cookies?.length) return;
+  const target = await imageBrowserTarget();
+  const clean = cookies
+    .filter((item) => item?.name && item?.value)
+    .map((item) => ({
+      name: item.name,
+      value: item.value,
+      domain: item.domain,
+      path: item.path || '/',
+      secure: Boolean(item.secure),
+      httpOnly: Boolean(item.httpOnly),
+    }));
+  await cdpCommand(target.webSocketDebuggerUrl, 'Storage.setCookies', { cookies: clean });
+}
+
 /* --------------------------- free media providers -------------------------- */
 
 let bingQueue = Promise.resolve();
@@ -1386,12 +1589,12 @@ async function bingImageTarget() {
   return browserTarget('https://www.bing.com/images/create');
 }
 
-async function waitForPageValue(expression, timeout = 120_000) {
+async function waitForPageValue(expression, timeout = 120_000, evaluator = pageEvaluate) {
   const deadline = Date.now() + timeout;
   let last = null;
   while (Date.now() < deadline) {
     try {
-      last = await pageEvaluate(expression);
+      last = await evaluator(expression);
     } catch {
       last = null; // page navigation ke dauran evaluate fail ho sakta hai
     }
@@ -1401,9 +1604,42 @@ async function waitForPageValue(expression, timeout = 120_000) {
   return last || false;
 }
 
-async function generateBingImage(prompt) {
+const BING_IMG_SELECTOR = 'img.aigc-display__img, img.aigc-batch__thumb';
+
+function bingImageUrlsScript(previous, minCount) {
+  return `(() => {
+    const nodes = [...document.querySelectorAll('${BING_IMG_SELECTOR}')];
+    const srcs = [...new Set(nodes
+      .map((i) => i.src || i.dataset.src || '')
+      .filter((u) => u.indexOf('http') === 0))];
+    const fresh = srcs.filter((u) => !${JSON.stringify(previous)}.includes(u));
+    const loaded = fresh.filter((u) => nodes.some(
+      (i) => (i.src || i.dataset.src || '') === u && i.naturalWidth > 0,
+    ));
+    if (loaded.length >= ${minCount}) return JSON.stringify(loaded.slice(0, 4));
+    const text = document.body.innerText || '';
+    if (/guest creation limit|sign in to use your own prompts|out of creations|you.?ve reached|creation limit|captcha|unusual traffic/i.test(text)) {
+      return 'ERROR: Bing free limit ya captcha. Hidden Chrome profile me Microsoft sign-in check karein.';
+    }
+    return false;
+  })()`;
+}
+
+async function generateBingImages(prompt) {
   return withBingLock(async () => {
-    const target = await bingImageTarget();
+    // Login cookies hidden browser me copy — generation poori tarah background me, koi page visible nahi.
+    try {
+      if (await cdpAvailable()) {
+        await injectImageBrowserCookies(await cookiesFromCdpPort(CDP_PORT));
+      } else {
+        await ensureCookieBrowser();
+        await injectImageBrowserCookies(await cookiesFromCdpPort(COOKIE_CDP_PORT));
+      }
+    } catch {
+      if (bingCookie) await injectImageBrowserCookies(cookiesFromHeader(bingCookie)).catch(() => {});
+    }
+
+    const target = await imageBrowserTarget();
     // Bing UI "Generating" state ko clear karne ke liye har baar fresh page.
     await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', {
       url: 'https://www.bing.com/images/create',
@@ -1418,17 +1654,18 @@ async function generateBingImage(prompt) {
         return /^Generate/i.test(label) && !/Generating/i.test(label);
       })()`,
       60_000,
+      imagePageEvaluate,
     );
     await sleep(1800); // Bing React UI ko hydrate hone do
 
-    const previous = await pageEvaluate(
-      `(() => {
-        const img = document.querySelector('img.aigc-display__img') || document.querySelector('img.aigc-batch__thumb');
-        return img ? img.src : '';
-      })()`,
-    );
+    const previousSrcs =
+      (await imagePageEvaluate(
+        `(() => [...new Set([...document.querySelectorAll('${BING_IMG_SELECTOR}')]
+          .map((i) => i.src || i.dataset.src || '')
+          .filter((u) => u.indexOf('http') === 0))])()`,
+      )) || [];
 
-    const started = await pageEvaluate(
+    const started = await imagePageEvaluate(
       `(() => {
         const box = document.querySelector('textarea.gmc__textarea');
         if (!box) throw new Error('Bing prompt box not found.');
@@ -1448,34 +1685,55 @@ async function generateBingImage(prompt) {
     if (!started) throw new Error('Bing image generation could not start.');
     await sleep(1500);
 
-    const result = await waitForPageValue(
-      `(() => {
-        const img = document.querySelector('img.aigc-display__img') || document.querySelector('img.aigc-batch__thumb[src*="OIG4"]');
-        if (img && img.src && img.src !== ${JSON.stringify(previous || '')} && img.naturalWidth > 0) return img.src;
-        const text = document.body.innerText || '';
-        if (/guest creation limit|sign in to use your own prompts|out of creations|you.?ve reached|creation limit|captcha|unusual traffic/i.test(text)) {
-          return 'ERROR: Bing free limit reached. Chrome profile me Microsoft account se sign in karein.';
-        }
-        return false;
-      })()`,
-      240_000,
+    const first = await waitForPageValue(bingImageUrlsScript(previousSrcs, 1), 240_000, imagePageEvaluate);
+    if (typeof first === 'string' && first.startsWith('ERROR:')) throw new Error(first.slice(6));
+    if (!first || typeof first !== 'string') {
+      throw new Error('Bing ne image return nahi ki. Free limit ya sign-in check karein.');
+    }
+    let urls = JSON.parse(first).slice(0, 4);
+
+    // Bing usually 4 images deta hai — thoda wait karke baaki bhi pakad lein.
+    if (urls.length < 4) {
+      const extra = await waitForPageValue(
+        bingImageUrlsScript(previousSrcs, 4),
+        25_000,
+        imagePageEvaluate,
+      ).catch(() => null);
+      if (typeof extra === 'string' && extra.startsWith('[')) {
+        urls = [...new Set([...urls, ...JSON.parse(extra)])].slice(0, 4);
+      }
+    }
+    if (!urls.length) throw new Error('Bing ne image return nahi ki.');
+
+    const settled = await Promise.allSettled(
+      urls.map((url) =>
+        fetch(url, {
+          headers: { 'user-agent': UA },
+          signal: AbortSignal.timeout(90_000),
+        }).then(async (response) => {
+          if (!response.ok) throw new Error(`Bing image download failed (${response.status}).`);
+          return Buffer.from(await response.arrayBuffer());
+        }),
+      ),
     );
-
-    if (typeof result === 'string' && result.startsWith('ERROR:')) throw new Error(result.slice(6));
-    if (!result || !/^https?:\/\//.test(result)) throw new Error('Bing ne image return nahi ki. Free limit ya sign-in check karein.');
-
-    const response = await fetch(result, {
-      headers: { 'user-agent': UA },
-      signal: AbortSignal.timeout(90_000),
-    });
-    if (!response.ok) throw new Error(`Bing image download failed (${response.status}).`);
-    return Buffer.from(await response.arrayBuffer());
+    const images = settled
+      .filter((item) => item.status === 'fulfilled' && item.value?.length > 128)
+      .map((item) => item.value);
+    if (!images.length) {
+      throw new Error(settled.find((item) => item.status === 'rejected')?.reason?.message || 'Bing image download failed.');
+    }
+    return images;
   });
 }
 
-async function bingCookiesFromBrowser() {
+async function generateBingImage(prompt) {
+  const images = await generateBingImages(prompt);
+  return images[0];
+}
+
+async function bingCookiesFromBrowser(openTab = false) {
   await ensureBrowser();
-  const target = await browserTarget('https://www.bing.com/images/create');
+  const target = await browserTarget(openTab ? 'https://www.bing.com/images/create' : '');
   const result = await cdpCommand(target.webSocketDebuggerUrl, 'Storage.getCookies', {});
   const cookies = (result.cookies || []).filter((item) =>
     /bing\.com$/i.test(String(item.domain || '').replace(/^\./, '')),
@@ -1484,11 +1742,27 @@ async function bingCookiesFromBrowser() {
   if (!auth) {
     throw new Error('Bing me Microsoft sign-in nahi hua. Pehle Settings → “Open login tabs in Chrome” se login karein.');
   }
-  return cookies.map((item) => `${item.name}=${item.value}`).join('; ').slice(0, 12_000);
+  return {
+    header: cookies.map((item) => `${item.name}=${item.value}`).join('; ').slice(0, 12_000),
+    cookies,
+  };
 }
 
 async function syncBingLoginToLive() {
-  const cookie = await bingCookiesFromBrowser();
+  let cookie;
+  let cookies;
+  if (await cdpAvailable()) {
+    ({ header: cookie, cookies } = await bingCookiesFromBrowser());
+  } else {
+    await ensureCookieBrowser();
+    cookies = await cookiesFromCdpPort(COOKIE_CDP_PORT);
+    cookie = cookies.map((item) => `${item.name}=${item.value}`).join('; ').slice(0, 12_000);
+  }
+  if (!cookie || !/_U=[^;]+/.test(cookie)) {
+    throw new Error('Bing me Microsoft sign-in nahi hai. Settings → “Open login tabs in Chrome” se ek baar login karein.');
+  }
+  // Login cookies hidden image browser me bhi copy — generation bilkul background me chalegi.
+  await injectImageBrowserCookies(cookies).catch(() => {});
   const response = await fetch(`${LIVE_URL}/api/bing-cookie`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -1618,13 +1892,13 @@ function generateImageViaWorker(prompt, ratio) {
       ratio: ratio || '16:9',
       status: 'queued',
       createdAt: Date.now(),
-      finish: (err, bytes) => {
+      finish: (err, images) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         pendingImageJobs.delete(id);
         if (err) reject(err);
-        else resolve(bytes);
+        else resolve(Array.isArray(images) ? images : [images]);
       },
     });
   });
@@ -1669,15 +1943,20 @@ async function handleImageWorkerResult(req, res) {
     job.finish(new Error(String(body.error).slice(0, 500)));
     return sendJson(res, 200, { ok: true });
   }
-  let bytes;
+  let images;
   try {
-    bytes = Buffer.from(String(body.image || ''), 'base64');
-    if (bytes.length < 128) throw new Error('Empty image.');
+    const encoded = Array.isArray(body.images) && body.images.length
+      ? body.images
+      : [String(body.image || '')];
+    images = encoded
+      .map((item) => Buffer.from(String(item || ''), 'base64'))
+      .filter((item) => item.length >= 128);
+    if (!images.length) throw new Error('Empty image.');
   } catch (err) {
     job.finish(new Error('Local worker sent invalid image bytes.'));
     return sendJson(res, 200, { ok: true });
   }
-  job.finish(null, bytes);
+  job.finish(null, images.slice(0, 4));
   return sendJson(res, 200, { ok: true });
 }
 
@@ -1700,17 +1979,21 @@ async function pollImageWorker() {
     const job = data.job;
     if (!job?.id) return;
     try {
-      const bytes = await generateBingImage(String(job.prompt || '').slice(0, 700));
+      const images = await generateBingImages(String(job.prompt || '').slice(0, 700));
       await fetch(`${LIVE_URL}/api/image-worker/result`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           'x-worker-token': imageWorkerToken,
         },
-        body: JSON.stringify({ id: job.id, image: bytes.toString('base64') }),
+        body: JSON.stringify({
+          id: job.id,
+          image: images[0].toString('base64'),
+          images: images.map((item) => item.toString('base64')),
+        }),
         signal: AbortSignal.timeout(120_000),
       });
-      console.log(`  Image worker: image bheji gayi -> ${String(job.id).slice(0, 8)}`);
+      console.log(`  Image worker: ${images.length} image bheji gayi -> ${String(job.id).slice(0, 8)}`);
     } catch (err) {
       await fetch(`${LIVE_URL}/api/image-worker/result`, {
         method: 'POST',
