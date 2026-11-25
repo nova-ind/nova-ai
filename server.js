@@ -3291,7 +3291,7 @@ async function ffmpegEncoderSet(bin) {
     const result = await runCommand(bin, ['-hide_banner', '-encoders'], 15_000);
     const text = `${result.out || ''}\n${result.err || ''}`;
     ffmpegEncodersCache = new Set(
-      [...text.matchAll(/(?:^|\n)\s*[VAS.]{6}\s+([A-Za-z0-9_-]+)/g)].map((match) => match[1]),
+      [...text.matchAll(/(?:^|\n)\s*[VASD.]{6}\s+([A-Za-z0-9_-]+)/g)].map((match) => match[1]),
     );
   }
   return ffmpegEncodersCache;
