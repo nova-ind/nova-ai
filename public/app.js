@@ -3066,6 +3066,7 @@ async function loadConfig() {
       settings.baseUrl = PROVIDERS[configured[0]].base;
       syncActiveKey();
       saveSettings();
+      renderSettings();
     }
   }
   await refreshKeyStatus();
