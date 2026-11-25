@@ -213,7 +213,7 @@ namespace NovaDesktop
 
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
             webView.CoreWebView2.NewWindowRequested += WebView_NewWindowRequested;
-            webView.CoreWebView2.ProcessFailed += (s, e) =>
+            webView.CoreWebView2.ProcessFailed += (s, failed) =>
             {
                 WriteLog("WebView2 process failed — app window recover kar raha hai.");
                 try
