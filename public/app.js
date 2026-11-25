@@ -820,7 +820,10 @@ function imageCard(message, isLast) {
   } else if (!urls.length) {
     const loading = document.createElement('div');
     loading.className = 'image-loading';
-    loading.textContent = 'Bing background me 4 images bana raha hai…';
+    loading.innerHTML =
+      '<span class="image-spinner"></span>' +
+      '<span class="image-loading-text">Processing your images…</span>' +
+      '<span class="image-progress"><i></i></span>';
     card.append(loading);
   } else {
     const grid = document.createElement('div');
