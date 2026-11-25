@@ -53,6 +53,15 @@ const VIDEO_PROVIDERS = [
 ];
 const CDP_PORT = Number(process.env.CDP_PORT || 9222);
 const BROWSER_PROFILE = path.join(WORKSPACE, '.browser-profile');
+const BING_COOKIE_FILE = path.join(WORKSPACE, 'bing-auth.json');
+const LIVE_URL = (process.env.LIVE_URL || 'https://nova-ai-9gbh.onrender.com').replace(/\/+$/, '');
+let bingCookie = (process.env.BING_AUTH_COOKIE || '').trim();
+try {
+  const savedBing = JSON.parse(await readFile(BING_COOKIE_FILE, 'utf8'));
+  bingCookie = String(savedBing.cookie || '').trim() || bingCookie;
+} catch {
+  /* first run */
+}
 let browserTargetId = null;
 
 const TIERS = [
@@ -668,7 +677,9 @@ async function updateMediaJob(job, patch) {
 
 async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'auto', ratio = '16:9') {
   if (kind === 'image') {
-    if (provider === 'bing') return generateBingImage(prompt);
+    if (provider === 'bing') {
+      return BING_SUPPORTED ? generateBingImage(prompt) : generateBingImageHttp(prompt);
+    }
     if (provider === 'cloudflare') return generateCloudflareImage(prompt, model);
     if (provider === 'huggingface') return generateHuggingFaceImage(prompt, model, ratio);
     if (provider === 'pollinations') {
@@ -686,7 +697,7 @@ async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'au
 
 function configuredImageProviders() {
   return [
-    ...(BING_SUPPORTED ? ['bing'] : []),
+    ...(BING_SUPPORTED || bingCookie ? ['bing'] : []),
     ...(cloudflareAccount && cloudflareToken ? ['cloudflare'] : []),
     ...(hfToken ? ['huggingface'] : []),
   ];
@@ -694,7 +705,7 @@ function configuredImageProviders() {
 
 async function generateImageSmart(prompt, options = {}) {
   const requested = options.provider || DEFAULT_IMAGE_PROVIDER;
-  const useAuto = requested === 'auto' || (requested === 'bing' && !BING_SUPPORTED);
+  const useAuto = requested === 'auto';
   const order = useAuto ? configuredImageProviders() : [requested];
   if (!order.length) {
     throw new Error(
@@ -1441,6 +1452,117 @@ async function generateBingImage(prompt) {
   });
 }
 
+async function bingCookiesFromBrowser() {
+  await ensureBrowser();
+  const target = await browserTarget('https://www.bing.com/images/create');
+  const result = await cdpCommand(target.webSocketDebuggerUrl, 'Storage.getCookies', {});
+  const cookies = (result.cookies || []).filter((item) =>
+    /bing\.com$/i.test(String(item.domain || '').replace(/^\./, '')),
+  );
+  const auth = cookies.find((item) => item.name === '_U' && item.value);
+  if (!auth) {
+    throw new Error('Bing me Microsoft sign-in nahi hua. Pehle Settings → “Open login tabs in Chrome” se login karein.');
+  }
+  return cookies.map((item) => `${item.name}=${item.value}`).join('; ').slice(0, 12_000);
+}
+
+async function syncBingLoginToLive() {
+  const cookie = await bingCookiesFromBrowser();
+  const response = await fetch(`${LIVE_URL}/api/bing-cookie`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cookie }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Live sync failed (${response.status}).`);
+  return LIVE_URL;
+}
+
+function bingHttpHeaders() {
+  return {
+    'content-type': 'application/x-www-form-urlencoded',
+    'user-agent': UA,
+    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'accept-language': 'en-US,en;q=0.9',
+    origin: 'https://www.bing.com',
+    referer: 'https://www.bing.com/images/create/',
+    cookie: bingCookie,
+  };
+}
+
+async function generateBingImageHttp(prompt) {
+  if (!bingCookie) {
+    throw new Error('Bing login cookie sync nahi hua. Local PC se Settings → “Sync Bing login to live” dabayein.');
+  }
+  const q = encodeURIComponent(String(prompt).slice(0, 700));
+  const headers = bingHttpHeaders();
+  const post = (rt) =>
+    fetch(`https://www.bing.com/images/create?q=${q}&rt=${rt}&FORM=GENCRE`, {
+      method: 'POST',
+      headers,
+      body: `q=${q}&rt=${rt}&FORM=GENCRE`,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(120_000),
+    });
+
+  let response = await post(4);
+  let body = await response.text();
+  if (/0 coins available|out of creations|you.?ve reached|creation limit|captcha|unusual traffic/i.test(body)) {
+    throw new Error('Bing free limit ya captcha — Microsoft account check karein.');
+  }
+  let location = response.headers.get('location') || '';
+  if (response.status !== 302 || !location) {
+    response = await post(3);
+    body = await response.text();
+    location = response.headers.get('location') || '';
+    if (response.status !== 302 || !location) throw new Error(`Bing image start failed (${response.status}).`);
+  }
+
+  const redirectUrl = (/^https?:\/\//i.test(location) ? location : `https://www.bing.com${location}`).replace(
+    /&nfy=1/i,
+    '',
+  );
+  const id = decodeURIComponent((redirectUrl.split('id=').pop() || '').split('&')[0]);
+  if (!id) throw new Error('Bing ne request id nahi diya.');
+  await fetch(redirectUrl, { headers, redirect: 'manual', signal: AbortSignal.timeout(60_000) }).catch(() => {});
+
+  const pollUrl = `https://www.bing.com/images/create/async/results/${encodeURIComponent(id)}?q=${q}`;
+  const deadline = Date.now() + 180_000;
+  while (Date.now() < deadline) {
+    const polled = await fetch(pollUrl, { headers, signal: AbortSignal.timeout(60_000) });
+    const text = await polled.text();
+    if (!polled.ok) throw new Error(`Bing polling failed (${polled.status}).`);
+    if (!text || /GenerativeImagesStatusPage/i.test(text)) {
+      await sleep(1200);
+      continue;
+    }
+    let errorMessage = '';
+    try {
+      errorMessage = JSON.parse(text)?.errorMessage || '';
+    } catch {
+      /* html result */
+    }
+    if (errorMessage) throw new Error(`Bing: ${errorMessage}`);
+
+    const urls = [...text.matchAll(/<img\b[^>]*>/gi)]
+      .map((match) => match[0])
+      .filter((tag) => /\bmimg\b/i.test(tag))
+      .map((tag) => (/\bsrc\s*=\s*["']([^"']+)["']/i.exec(tag) || [])[1] || '')
+      .map((url) => url.replace(/&amp;/g, '&').split('?w=')[0])
+      .filter((url) => /^https?:\/\//i.test(url));
+    if (!urls.length) throw new Error('Bing ne image return nahi ki.');
+
+    const imageResponse = await fetch(urls[0], {
+      headers: { 'user-agent': UA },
+      signal: AbortSignal.timeout(90_000),
+    });
+    if (!imageResponse.ok) throw new Error(`Bing image download failed (${imageResponse.status}).`);
+    return Buffer.from(await imageResponse.arrayBuffer());
+  }
+  throw new Error('Bing image generation timed out.');
+}
+
 async function generateCloudflareImage(prompt, model) {
   if (!cloudflareAccount || !cloudflareToken) {
     throw new Error('Cloudflare image ke liye Settings → Cloudflare Account ID + API token chahiye.');
@@ -1703,13 +1825,14 @@ function mediaProviderState() {
       ...item,
       configured:
         item.id === 'bing'
-          ? BING_SUPPORTED
+          ? Boolean(BING_SUPPORTED || bingCookie)
           : item.id === 'cloudflare'
             ? Boolean(cloudflareAccount && cloudflareToken)
             : Boolean(hfToken),
     })),
     video: VIDEO_PROVIDERS.map((item) => ({ ...item, configured: true })),
     credentials: {
+      bing: Boolean(BING_SUPPORTED || bingCookie),
       cloudflare: Boolean(cloudflareAccount && cloudflareToken),
       huggingface: Boolean(hfToken),
     },
@@ -1737,6 +1860,10 @@ async function handleMediaCredentials(req, res) {
     }
     if (!kind || kind === 'pollinations') mediaKey = '';
     if (!kind || kind === 'huggingface') hfToken = '';
+    if (!kind || kind === 'bing') {
+      bingCookie = '';
+      await rm(BING_COOKIE_FILE, { force: true }).catch(() => {});
+    }
     return sendJson(res, 200, { ok: true, ...mediaProviderState() });
   }
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed.' });
@@ -2367,6 +2494,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         hasServerKey: Object.values(serverKeyState()).some(Boolean),
         serverKeys: serverKeyState(),
+        liveUrl: LIVE_URL,
         tiers: TIERS.map(({ id, label, hint, model }) => ({ id, label, hint, model })),
         defaultTier: 'auto',
         defaultModel: DEFAULT_MODEL,
@@ -2442,6 +2570,39 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true, opened, profile: BROWSER_PROFILE });
       } catch (err) {
         return sendJson(res, 502, { error: err.message || 'Chrome login tab nahi khul paaya.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/sync-bing-login') {
+      if (!BING_SUPPORTED) {
+        return sendJson(res, 400, { error: 'Bing login sync sirf local Windows PC se chalega.' });
+      }
+      try {
+        const target = await syncBingLoginToLive();
+        return sendJson(res, 200, { ok: true, target });
+      } catch (err) {
+        return sendJson(res, 502, { error: err.message || 'Bing login live par sync nahi hua.' });
+      }
+    }
+
+    if (url.pathname === '/api/bing-cookie') {
+      if (req.method === 'GET') {
+        return sendJson(res, 200, { configured: Boolean(bingCookie) });
+      }
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed.' });
+      try {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const cookie = String(body.cookie || '').trim().slice(0, 12_000);
+        if (!/_U=[^;]+/.test(cookie)) throw new Error('Bing auth cookie (_U) missing.');
+        bingCookie = cookie;
+        await writeFile(
+          BING_COOKIE_FILE,
+          JSON.stringify({ cookie, updatedAt: Date.now() }),
+          'utf8',
+        ).catch(() => {});
+        return sendJson(res, 200, { ok: true, configured: true });
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Invalid Bing cookie.' });
       }
     }
 

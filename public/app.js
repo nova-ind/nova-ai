@@ -94,6 +94,8 @@ const els = {
   saveSettings: $('saveSettings'),
   clearAllBtn: $('clearAllBtn'),
   browserLoginBtn: $('browserLoginBtn'),
+  bingSyncBtn: $('bingSyncBtn'),
+  bingSyncField: $('bingSyncField'),
   toast: $('toast'),
 };
 
@@ -248,6 +250,7 @@ function syncActiveModel() {
   if (settings.customModel) settings.providerModels[settings.provider] = settings.customModel;
 }
 const uid = () => `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+const appIsLocal = /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
 const activeChat = () => chats.find((c) => c.id === activeId) || null;
 const busy = () => Boolean(stream);
 
@@ -1652,7 +1655,36 @@ async function generateImage(chat, prompt) {
   scrollToBottom();
   syncComposer();
 
-  const isLocal = /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
+  const isLocal = appIsLocal;
+  const imagineUrl = (p) =>
+    `/api/imagine?prompt=${encodeURIComponent(prompt)}&seed=${seed}` +
+    `&ratio=${encodeURIComponent(settings.imageRatio || '16:9')}` +
+    `&model=${encodeURIComponent(settings.mediaModels.image || 'flux')}` +
+    `&provider=${encodeURIComponent(p)}`;
+
+  // Live site par Bing login sync ho to pehle Bing chalao — HF quota ka intezaar nahi.
+  let bingReady = Boolean(
+    serverConfig.mediaProviders?.image?.some?.((item) => item.id === 'bing' && item.configured),
+  );
+  if (provider === 'auto' && !isLocal && !bingReady) {
+    try {
+      const response = await fetch('/api/media-providers', { signal: AbortSignal.timeout(5000) });
+      if (response.ok) {
+        const data = await response.json();
+        serverConfig.mediaProviders = data;
+        bingReady = Boolean(data.image?.some((item) => item.id === 'bing' && item.configured));
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (provider === 'auto' && !isLocal && bingReady) {
+    assistant.url = imagineUrl('bing');
+    touch(chat);
+    renderMessages();
+    return;
+  }
+
   const tryBrowserHf = provider === 'huggingface' || (provider === 'auto' && !isLocal);
   if (tryBrowserHf) {
     try {
@@ -1672,11 +1704,7 @@ async function generateImage(chat, prompt) {
     }
   }
 
-  assistant.url =
-    `/api/imagine?prompt=${encodeURIComponent(prompt)}&seed=${seed}` +
-    `&ratio=${encodeURIComponent(settings.imageRatio || '16:9')}` +
-    `&model=${encodeURIComponent(settings.mediaModels.image || 'flux')}` +
-    `&provider=${encodeURIComponent(provider)}`;
+  assistant.url = imagineUrl(provider);
   touch(chat);
   renderMessages();
 }
@@ -3349,6 +3377,32 @@ els.browserLoginBtn?.addEventListener('click', async () => {
     toast('Chrome me login tabs khul gaye. Ek baar sign-in kar lo — baad me dobara nahi mangega.');
   } catch (err) {
     toast(err.message || 'Chrome login tab nahi khul paaya.');
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+});
+
+if (els.bingSyncField) {
+  els.bingSyncField.hidden = !appIsLocal;
+  els.bingSyncField.style.display = appIsLocal ? '' : 'none';
+}
+
+els.bingSyncBtn?.addEventListener('click', async () => {
+  const button = els.bingSyncBtn;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = 'Syncing…';
+  try {
+    const response = await fetch('/api/sync-bing-login', {
+      method: 'POST',
+      signal: AbortSignal.timeout(90_000),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Bing login sync nahi hua.');
+    toast('Bing login live site par sync ho gaya. Ab live par auto images Bing se banengi.');
+  } catch (err) {
+    toast(err.message || 'Bing login sync nahi hua.');
   } finally {
     button.disabled = false;
     button.textContent = original;

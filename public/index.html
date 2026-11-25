@@ -451,6 +451,12 @@
           <p class="help">Bing/Microsoft account ek hi baar sign-in karein. Ye tabs Nova ke apne Chrome profile (`workspace/.browser-profile`) me khulte hain — server restart ke baad bhi login rehta hai. Login complete karke tab band kar sakte hain.</p>
         </div>
 
+        <div class="field" id="bingSyncField">
+          <label for="bingSyncBtn">Live site par Bing <span class="value">localhost se ek baar sync</span></label>
+          <button class="ghost-btn" id="bingSyncBtn" type="button">Sync Bing login to live site</button>
+          <p class="help">Local Chrome me Microsoft login ho jane ke baad ye button usi login ko live site par bhej deta hai. Iske baad live site bhi Bing se images banayegi — Hugging Face quota ka intezaar nahi karna padega.</p>
+        </div>
+
         <div class="modal-actions">
           <button class="ghost-btn" id="clearAllBtn">Delete all chats</button>
           <button class="primary-btn" id="saveSettings">Save</button>
