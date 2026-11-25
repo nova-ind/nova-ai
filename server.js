@@ -2109,24 +2109,42 @@ async function generateCloudflareImage(prompt, model) {
   if (!cloudflareAccount || !cloudflareToken) {
     throw new Error('Cloudflare image ke liye Settings → Cloudflare Account ID + API token chahiye.');
   }
-  const useModel = CF_IMAGE_MODELS.includes(model) ? model : CF_IMAGE_MODELS[0];
-  const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cloudflareAccount)}/ai/run/${useModel}`,
-    {
-      method: 'POST',
-      headers: { authorization: `Bearer ${cloudflareToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: prompt.slice(0, 2048), steps: 4 }),
-      signal: AbortSignal.timeout(180_000),
-    },
-  );
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || data.success === false) {
-    const detail = data.errors?.map((item) => item.message).filter(Boolean).join('; ');
-    throw new Error(detail || `Cloudflare image failed (${response.status}).`);
+  const candidates = [...new Set([
+    CF_IMAGE_MODELS.includes(model) ? model : CF_IMAGE_MODELS[0],
+    CF_IMAGE_MODELS[0],
+  ])];
+  let lastError = null;
+  for (const useModel of candidates) {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cloudflareAccount)}/ai/run/${useModel}`,
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${cloudflareToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt.slice(0, 2048), steps: 4 }),
+        signal: AbortSignal.timeout(180_000),
+      },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.success === false) {
+      const detail = data.errors?.map((item) => item.message).filter(Boolean).join('; ');
+      const message = detail || `Cloudflare image failed (${response.status}).`;
+      if (/auth|unauthor|permission|forbidden|token|invalid|10000|9109/i.test(message)) {
+        throw new Error(
+          `${message} — token Workers AI ka hona chahiye (Global API key / Cloudflare Images token nahi). `
+          + 'Dashboard → AI → Workers AI → Use REST API se token banayein aur Settings me dobara daalein.',
+        );
+      }
+      lastError = new Error(`${message} (${useModel})`);
+      continue;
+    }
+    const raw = String(data.result?.image || '');
+    if (!raw) {
+      lastError = new Error('Cloudflare ne image return nahi ki.');
+      continue;
+    }
+    return Buffer.from(raw.replace(/^data:image\/[^;]+;base64,/i, ''), 'base64');
   }
-  const raw = String(data.result?.image || '');
-  if (!raw) throw new Error('Cloudflare ne image return nahi ki.');
-  return Buffer.from(raw.replace(/^data:image\/[^;]+;base64,/i, ''), 'base64');
+  throw lastError || new Error('Cloudflare image nahi ban payi.');
 }
 
 async function resolveHfImageRef(ref, space, useAuth = true) {
@@ -2396,22 +2414,31 @@ async function testCloudflareCredentials() {
     };
   }
   try {
+    // Actual Workers AI run call — isi se pata chalta hai ki token image bana bhi sakta hai.
     const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cloudflareAccount)}/ai/models/search?limit=1`,
+      `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cloudflareAccount)}/ai/run/${CF_IMAGE_MODELS[0]}`,
       {
-        headers: { authorization: `Bearer ${cloudflareToken}` },
-        signal: AbortSignal.timeout(20_000),
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${cloudflareToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ prompt: 'Nova token test', steps: 1 }),
+        signal: AbortSignal.timeout(120_000),
       },
     );
     const data = await response.json().catch(() => ({}));
     const detail = (data.errors || []).map((item) => item.message).filter(Boolean).join('; ');
     if (!response.ok || data.success === false) {
-      return { ok: false, error: detail || `Cloudflare API responded ${response.status}.` };
+      return {
+        ok: false,
+        error: `${detail || `Cloudflare API responded ${response.status}.`} — token Workers AI ka hona chahiye (Global API key / Images token nahi). Dashboard → AI → Workers AI → Use REST API se banayein.`,
+      };
     }
     return {
       ok: true,
       account: cloudflareAccount,
-      message: 'Cloudflare token + Account ID sahi hain. Workers AI access available hai.',
+      message: 'Token sahi hai aur Workers AI se image bhi ban gayi. Ab Imagine use karein.',
     };
   } catch (err) {
     return { ok: false, error: String(err.message || err).slice(0, 300) };

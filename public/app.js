@@ -1369,11 +1369,19 @@ async function send(rawText) {
 
   // User prompt/idea/caption maang raha hai to media mode ignore karo — video mat banao.
   const asksForText = /\b(prompt|prompts|idea|ideas|caption|captions|script|likh|likho)\b/i.test(text || '');
+  const wantsVideo = !asksForText && /\b(video|reel|reels|shorts|clip|music\s*video)\b[\s\S]{0,80}\b(ban|bana|bna|bno|bnao|banayein|banao|create|make|generate|chahiye|do|de)\b/i.test(text || '')
+    || !asksForText && /\b(ban|bana|bna|bno|bnao|banayein|banao|create|make|generate)\b[\s\S]{0,80}\b(video|reel|reels|shorts|clip)\b/i.test(text || '');
   if (asksForText && (settings.modes.video || settings.modes.imagine)) {
     settings.modes.video = false;
     settings.modes.imagine = false;
     saveSettings();
     renderModes();
+  }
+
+  // "Is song ki video bno" / "story video banao" — seedha pehle images, phir FFmpeg assembly.
+  if (wantsVideo) {
+    await startVideoJob(chat, text || 'A cinematic video', audio);
+    return;
   }
 
   if (settings.modes.video) {
@@ -1965,8 +1973,8 @@ async function generateImage(chat, prompt) {
 /* ------------------------------ video studio ------------------------------- */
 
 function inferVideoType(prompt, hasAudio) {
-  if (hasAudio) return 'song';
   const text = String(prompt || '').toLowerCase();
+  if (hasAudio || /\b(song|gaana|music\s*video|mp3|audio)\b/i.test(text)) return 'song';
   if (/meme|funny|comedy|joke|hassi|comedy/.test(text)) return 'meme';
   if (/cartoon|anime|comic|chibi/.test(text)) return 'cartoon';
   return 'story';
