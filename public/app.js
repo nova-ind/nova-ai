@@ -1963,7 +1963,8 @@ function findJobMessage(jobId) {
 
 function upsertJobMessage(chat, job) {
   let message = chat.messages.find((item) => item.kind === 'job' && item.job?.id === job.id);
-  if (!message) {
+  const isNew = !message;
+  if (isNew) {
     message = { role: 'assistant', kind: 'job', job, ts: Date.now() };
     chat.messages.push(message);
   } else {
@@ -1972,10 +1973,24 @@ function upsertJobMessage(chat, job) {
   chat.updatedAt = Date.now();
   saveChats();
   if (activeId === chat.id) {
-    renderMessages();
-    scrollToBottom();
+    if (!isNew && message.kind === 'job') {
+      // Progress updates aayein to poori chat rebuild mat karein — video card flicker/refresh rukta hai.
+      patchJobCard(job);
+    } else {
+      renderMessages();
+      scrollToBottom();
+    }
   }
   renderSidebar();
+}
+
+function patchJobCard(job) {
+  const found = findJobMessage(job.id);
+  if (!found || found.chat.id !== activeId) return;
+  const index = found.chat.messages.indexOf(found.message);
+  const node = els.messages.querySelector(`.msg.ai[data-index="${index}"] .job-card`);
+  if (!node) return;
+  node.replaceWith(jobCard(found.message));
 }
 
 function applyJobUpdate(job) {
@@ -2015,9 +2030,17 @@ function syncMediaJobs(list) {
     const found = findJobMessage(job.id);
     if (found) {
       found.message.job = job;
+      if (found.chat.id === activeId) patchJobCard(job);
     } else {
       const target = chats.find((item) => item.id === job.chatId) || activeChat() || ensureChat();
       upsertJobMessage(target, job);
+    }
+    const lastTouch = Number(job.updatedAt || job.createdAt || 0);
+    if (job.status === 'rendering' && Date.now() - lastTouch > 60_000) {
+      // Page/renderer refresh ke baad rendering status atak jata hai — dobara queue karein.
+      job.status = 'awaiting-render';
+      job.step = 'Render resume…';
+      updateJobStatus(job, 'awaiting-render', 'Render resume…', 75);
     }
     if (job.status === 'awaiting-render' && job.scenes?.length) queueMediaRender(job);
     if ((job.status === 'done' || job.status === 'error') && !notifiedJobs.has(job.id)) {
@@ -2026,7 +2049,6 @@ function syncMediaJobs(list) {
     }
   }
   saveChats();
-  if (activeChat()?.messages.some((item) => item.kind === 'job')) renderMessages();
 }
 
 async function loadMediaJobs() {
@@ -2496,8 +2518,9 @@ async function renderJobVideo(job) {
   if (!scenes.length) throw new Error('Video ke liye koi scene nahi mila.');
 
   const ratio = job.ratio === '9:16' ? '9:16' : '16:9';
-  const w = ratio === '9:16' ? 720 : 1280;
-  const h = ratio === '9:16' ? 1280 : 720;
+  // WebView2 me 1280x720 @24fps MediaRecorder kabhi-kabhi renderer ko crash karta tha.
+  const w = ratio === '9:16' ? 540 : 960;
+  const h = ratio === '9:16' ? 960 : 540;
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
@@ -2512,33 +2535,24 @@ async function renderJobVideo(job) {
   if (!images.some(Boolean)) throw new Error('Scene images load nahi hui — server ya files check karein.');
 
   let audio = null;
-  let audioCtx = null;
-  let audioSource = null;
   let mediaStream = null;
   if (job.audioPath) {
     audio = new Audio(`/workspace/${String(job.audioPath).replace(/\\/g, '/')}`);
     audio.preload = 'auto';
     const ready = await waitForAudio(audio);
     if (ready) {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      if (AudioContextClass) {
-        audioCtx = new AudioContextClass();
-        audioSource = audioCtx.createMediaElementSource(audio);
-        const destination = audioCtx.createMediaStreamDestination();
-        audioSource.connect(destination);
-        audioSource.connect(audioCtx.destination);
-        mediaStream = destination.stream;
-      }
+      // WebAudio graph ke jagah direct captureStream — WebView2 me zyada stable.
+      try { mediaStream = audio.captureStream ? audio.captureStream() : null; } catch { mediaStream = null; }
     } else {
       audio = null;
     }
   }
 
-  const stream = canvas.captureStream(24);
+  const stream = canvas.captureStream(15);
   mediaStream?.getAudioTracks().forEach((track) => stream.addTrack(track));
   const recorder = new MediaRecorder(stream, {
     mimeType: mime,
-    videoBitsPerSecond: ratio === '9:16' ? 3_200_000 : 4_500_000,
+    videoBitsPerSecond: ratio === '9:16' ? 1_800_000 : 2_400_000,
   });
   const chunks = [];
   const finished = new Promise((resolve, reject) => {
@@ -2551,21 +2565,22 @@ async function renderJobVideo(job) {
 
   const clipMs = Math.max(2000, Math.min(10000, Number(job.clipSeconds) || 4)) * 1000;
   const totalMs = scenes.length * clipMs;
-  const fps = 24;
+  const fps = 15;
   const started = performance.now();
   let lastReport = 0;
 
   await updateJobStatus(job, 'rendering', `Rendering · ${scenes.length} scenes · ${ratio}`, 78);
   recorder.start(500);
-  if (audioCtx) await audioCtx.resume().catch(() => {});
   if (audio) {
     audio.currentTime = 0;
     audio.play().catch(() => {});
   }
   clips.forEach((clip) => clip?.play().catch(() => {}));
 
+  const hardDeadline = totalMs + 60_000;
   const timer = setInterval(() => {
-    const elapsed = Math.min(totalMs, performance.now() - started);
+    const rawElapsed = performance.now() - started;
+    const elapsed = Math.min(totalMs, rawElapsed);
     const t = elapsed / 1000;
     const index = Math.min(scenes.length - 1, Math.floor(elapsed / clipMs));
     const local = Math.min(1, (elapsed - index * clipMs) / clipMs);
@@ -2576,7 +2591,11 @@ async function renderJobVideo(job) {
       const percent = 78 + Math.round((elapsed / totalMs) * 21);
       updateJobStatus(job, 'rendering', `Rendering scene ${index + 1}/${scenes.length} · ${ratio}`, percent);
     }
-    if (elapsed >= totalMs) {
+    if (rawElapsed >= hardDeadline) {
+      clearInterval(timer);
+      updateJobStatus(job, 'rendering', 'Render timeout — partial video save ho raha hai…', 98);
+      recorder.stop();
+    } else if (elapsed >= totalMs) {
       clearInterval(timer);
       recorder.stop();
     }
@@ -2585,8 +2604,7 @@ async function renderJobVideo(job) {
   await finished;
   audio?.pause();
   clips.forEach((clip) => clip?.pause());
-  audioSource?.disconnect();
-  await audioCtx?.close().catch(() => {});
+  mediaStream?.getTracks().forEach((track) => track.stop());
   stream.getTracks().forEach((track) => track.stop());
 
   const blob = new Blob(chunks, { type: mime.split(';')[0] || 'video/webm' });
