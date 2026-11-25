@@ -28,6 +28,7 @@ const ffmpegRunning = new Set();
 const ffmpegChildren = new Map();
 let ffmpegVersionCache = null;
 let ffmpegEncodersCache = null;
+const stockImageCache = new Map();
 
 const PORT = Number(process.env.PORT || 4173);
 const UPSTREAM_BASE = (process.env.UPSTREAM_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
@@ -58,6 +59,7 @@ const IMAGE_PROVIDERS = [
   { id: 'bing', label: 'Bing Image Creator', note: 'Free · best quality · Chrome required' },
   { id: 'cloudflare', label: 'Cloudflare Flux', note: 'Free 10k neurons/day · needs free token' },
   { id: 'huggingface', label: 'Hugging Face Flux', note: 'Free ZeroGPU Space · token optional (5 min/day)' },
+  { id: 'stock', label: 'Free stock images', note: 'Openverse CC0/PDM · copyright-free · no key' },
 ];
 const VIDEO_PROVIDERS = [
   { id: 'ltx', label: 'LTX-Video · GitHub/HF', note: 'Free open-source model · no card' },
@@ -722,6 +724,59 @@ async function updateMediaJob(job, patch) {
   await saveMediaJobs().catch(() => {});
 }
 
+function cleanStockQuery(prompt) {
+  return String(prompt || '')
+    .replace(/Scene\s+\d+\s*:/gi, ' ')
+    .replace(/style,?\s+high detail,?\s+cinematic composition\.?/gi, ' ')
+    .replace(/\b(?:hook|setup|build-up|twist|climax|reveal|payoff|takeaway)\s*:/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180) || 'cinematic';
+}
+
+async function generateStockImages(prompt, count = 1) {
+  const wanted = Math.min(20, Math.max(1, Number(count) || 1));
+  const query = cleanStockQuery(prompt);
+  const cacheKey = `${query}|${wanted}`;
+  const cached = stockImageCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < 10 * 60_000) return cached.images.slice(0, wanted);
+
+  const searchUrl = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}`
+    + `&license=cc0,pdm&page_size=${wanted}&mature=false`;
+  const response = await fetch(searchUrl, {
+    headers: { 'user-agent': 'Nova-AI/1.0 (copyright-free video images)' },
+    signal: AbortSignal.timeout(30_000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail ? `Free stock search failed: ${data.detail}` : `Free stock search failed (${response.status}).`);
+  }
+  const results = Array.isArray(data.results) ? data.results : [];
+  if (!results.length) throw new Error(`"${query}" ke liye koi CC0/public-domain image nahi mili.`);
+
+  const images = [];
+  for (const item of results) {
+    const imageUrl = item.url || item.thumbnail;
+    if (!imageUrl) continue;
+    try {
+      const imageResponse = await fetch(imageUrl, {
+        headers: { 'user-agent': 'Nova-AI/1.0 (copyright-free video images)' },
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (!imageResponse.ok) continue;
+      const bytes = Buffer.from(await imageResponse.arrayBuffer());
+      if (bytes.length < 2048 || bytes.length > 12 * 1024 * 1024) continue;
+      images.push(bytes);
+    } catch {
+      /* try next result */
+    }
+  }
+  if (!images.length) throw new Error('Free stock images download nahi hui.');
+  stockImageCache.set(cacheKey, { ts: Date.now(), images });
+  if (stockImageCache.size > 20) stockImageCache.delete(stockImageCache.keys().next().value);
+  return images.slice(0, wanted);
+}
+
 async function fetchImageResult(prompt, model, provider, ratio) {
   if (provider === 'bing') {
     if (!BING_SUPPORTED) {
@@ -736,6 +791,9 @@ async function fetchImageResult(prompt, model, provider, ratio) {
   }
   if (provider === 'huggingface') {
     return { images: [await generateHuggingFaceImage(prompt, model, ratio)], provider: 'huggingface' };
+  }
+  if (provider === 'stock') {
+    return { images: await generateStockImages(prompt, 1), provider: 'stock' };
   }
   if (provider === 'worker') {
     return { images: await generateImageViaWorker(prompt, ratio), provider: 'worker' };
@@ -765,6 +823,7 @@ function configuredImageProviders() {
     ...(BING_SUPPORTED ? ['bing'] : []),
     ...(cloudflareAccount && cloudflareToken ? ['cloudflare'] : []),
     ...(hfToken ? ['huggingface'] : []),
+    'stock',
   ];
 }
 
@@ -952,6 +1011,15 @@ async function runMediaJob(job) {
       return `${hooks[index % hooks.length]}: ${caption}`;
     });
 
+    let stockImages = [];
+    if (job.imageProvider === 'stock') {
+      await updateMediaJob(job, {
+        step: 'Copyright-free stock images dhoondh rahe hain (Openverse CC0/PDM)…',
+        progress: 9,
+      });
+      stockImages = await generateStockImages(job.prompt, job.sceneCount);
+    }
+
     const useMotion = job.useAiVideo && job.sceneCount <= 8 && !job.analysis;
     for (let index = 0; index < job.sceneCount; index += 1) {
       if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
@@ -963,7 +1031,9 @@ async function runMediaJob(job) {
           progress: 10 + Math.round(((index + 0.3) / job.sceneCount) * 60),
         });
         const scenePrompt = `${job.prompt}. Scene ${index + 1}: ${scene.caption}. ${job.style} style, high detail, cinematic composition.`;
-        const bytes = await fetchMediaBytesWithRetry(job, 'image', scenePrompt, job.imageModel, 5, job.imageProvider);
+        const bytes = stockImages.length
+          ? stockImages[index % stockImages.length]
+          : await fetchMediaBytesWithRetry(job, 'image', scenePrompt, job.imageModel, 5, job.imageProvider);
         const file = `scene-${String(index + 1).padStart(2, '0')}.jpg`;
         await writeFile(path.join(directory, file), bytes);
         scene.image = `media-jobs/${job.id}/${file}`;
@@ -2389,13 +2459,16 @@ function mediaProviderState() {
           ? Boolean(BING_SUPPORTED || bingCookie)
           : item.id === 'cloudflare'
             ? Boolean(cloudflareAccount && cloudflareToken)
-            : Boolean(hfToken),
+            : item.id === 'stock'
+              ? true
+              : Boolean(hfToken),
     })),
     video: VIDEO_PROVIDERS.map((item) => ({ ...item, configured: true })),
     credentials: {
       bing: Boolean(BING_SUPPORTED || bingCookie),
       cloudflare: Boolean(cloudflareAccount && cloudflareToken),
       huggingface: Boolean(hfToken),
+      stock: true,
       imageWorker: imageWorkerConnected(),
     },
     imageWorker: imageWorkerConnected(),
