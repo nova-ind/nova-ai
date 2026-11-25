@@ -134,9 +134,29 @@ function readBinaryBody(req, limit = 80 * 1024 * 1024) {
   });
 }
 
+const PROVIDER_ENV_KEYS = {
+  nvidia: 'NVIDIA_API_KEY',
+  groq: 'GROQ_API_KEY',
+  minimax: 'MINIMAX_API_KEY',
+  openrouter: 'OPENROUTER_API_KEY',
+  pollinations: 'POLLINATIONS_API_KEY',
+};
+
+function serverKeyState() {
+  return Object.fromEntries(
+    Object.entries(PROVIDER_ENV_KEYS).map(([id, envName]) => [id, Boolean((process.env[envName] || '').trim())]),
+  );
+}
+
 function apiKeyFrom(req) {
   const header = req.headers['x-api-key'];
   if (typeof header === 'string' && header.trim()) return header.trim();
+
+  const provider = String(req.headers['x-provider'] || '').trim().toLowerCase();
+  if (provider) {
+    const envName = PROVIDER_ENV_KEYS[provider];
+    return envName ? (process.env[envName] || '').trim() : '';
+  }
   return (process.env.NVIDIA_API_KEY || '').trim();
 }
 
@@ -2345,7 +2365,8 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && url.pathname === '/api/config') {
       return sendJson(res, 200, {
-        hasServerKey: Boolean((process.env.NVIDIA_API_KEY || '').trim()),
+        hasServerKey: Object.values(serverKeyState()).some(Boolean),
+        serverKeys: serverKeyState(),
         tiers: TIERS.map(({ id, label, hint, model }) => ({ id, label, hint, model })),
         defaultTier: 'auto',
         defaultModel: DEFAULT_MODEL,

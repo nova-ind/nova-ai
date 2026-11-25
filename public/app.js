@@ -1259,6 +1259,7 @@ async function runChat(chat) {
       headers: {
         'content-type': 'application/json',
         'x-api-key': token,
+        'x-provider': settings.provider || 'nvidia',
         'x-upstream-base': settings.baseUrl || PROVIDERS.nvidia.base,
       },
       body: JSON.stringify(body),
@@ -1388,6 +1389,7 @@ async function runAgent(chat) {
       headers: {
         'content-type': 'application/json',
         'x-api-key': settings.apiKey || '',
+        'x-provider': settings.provider || 'nvidia',
         'x-upstream-base': settings.baseUrl || PROVIDERS.nvidia.base,
       },
       body: JSON.stringify(body),
@@ -2635,7 +2637,7 @@ function closeSettings() {
 }
 
 async function refreshKeyStatus() {
-  const hasKey = Boolean(settings.apiKey) || (settings.provider === 'nvidia' && Boolean(serverConfig.hasServerKey));
+  const hasKey = Boolean(settings.apiKey) || Boolean(serverConfig.serverKeys?.[settings.provider]);
   const provider = String(settings.provider || 'nvidia').toUpperCase();
   els.statusDot.classList.toggle('ok', hasKey);
   els.statusDot.classList.toggle('bad', !hasKey);
@@ -2711,6 +2713,7 @@ async function loadModels() {
     const response = await fetch('/api/models', {
       headers: {
         'x-api-key': settings.apiKey || '',
+        'x-provider': settings.provider || 'nvidia',
         'x-upstream-base': settings.baseUrl || PROVIDERS.nvidia.base,
       },
       signal: AbortSignal.timeout(15000),
@@ -2749,6 +2752,7 @@ function apiHeaders() {
   return {
     'content-type': 'application/json',
     'x-api-key': settings.apiKey || '',
+    'x-provider': settings.provider || 'nvidia',
     'x-upstream-base': settings.baseUrl || PROVIDERS.nvidia.base,
   };
 }
@@ -3048,6 +3052,21 @@ async function loadConfig() {
     if (response.ok) serverConfig = await response.json();
   } catch {
     /* keep fallbacks */
+  }
+  // Render me sirf provider key env me hai, browser me nahi — to usi provider par switch karo.
+  const currentProvider = settings.provider || 'nvidia';
+  const browserKey = settings.apiKeys?.[currentProvider];
+  const serverKey = serverConfig.serverKeys?.[currentProvider];
+  if (!browserKey && !serverKey) {
+    const configured = Object.entries(serverConfig.serverKeys || {}).find(
+      ([id, ok]) => ok && PROVIDERS[id],
+    );
+    if (configured) {
+      settings.provider = configured[0];
+      settings.baseUrl = PROVIDERS[configured[0]].base;
+      syncActiveKey();
+      saveSettings();
+    }
   }
   await refreshKeyStatus();
   await loadModels();

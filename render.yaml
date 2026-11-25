@@ -16,6 +16,12 @@ services:
         value: ltx
       - key: NVIDIA_API_KEY
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: MINIMAX_API_KEY
+        sync: false
       - key: UPSTREAM_BASE_URL
         value: https://integrate.api.nvidia.com/v1
       - key: DEFAULT_MODEL

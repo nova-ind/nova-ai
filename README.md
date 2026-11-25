@@ -111,9 +111,9 @@ G:\Nova Bot
 
 ## 4. Notes
 
-- API key browser ke localStorage me rehti hai (server key `.env` me safe rehti hai). Permanent rakhne ke liye key ko `.env` me bhi daal do.
+- API key browser ke localStorage me rehti hai. Server env keys (`NVIDIA_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `MINIMAX_API_KEY`) bhi chalte hain — Render Dashboard me key daalte hi app us provider par auto-switch ho jata hai aur model list aa jati hai. Browser key na ho to env key use hoti hai.
 - Purane `meta/llama-3.3-70b-instruct` jaise IDs NVIDIA par EOL ho chuke hain (410). App ab current IDs use karta hai: `minimaxai/minimax-m3.1-flash`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `google/gemma-4-31b-it`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`.
-- Live model list `/api/models` se aati hai — key + base URL Settings me ho to list auto-refresh hoti hai.
+- Live model list `/api/models` se aati hai — browser key ya Render env key + base URL Settings me ho to list auto-refresh hoti hai.
 - Web search free Bing HTML + Wikipedia fallback use karta hai — kabhi kabhi provider block kar sakta hai.
 - **Imagine / image provider:** Default `auto` hai — local PC par pehle **Bing Image Creator** (free, best quality; Chrome/Edge + Microsoft sign-in recommended), phir **Cloudflare Flux**, phir **Hugging Face Flux**. Live site par auto seedhe browser se **HF Flux ZeroGPU Space** use karta hai (token browser localStorage se), fallback server providers par hai. Image ratio 16:9 / 1:1 / 9:16 Settings me chun sakte hain. **Pollinations kabhi use nahi hota**. Bing official API nahi hai; app existing CDP browser profile me Bing UI automate karta hai.
 - **Video provider:** Default **LTX-Video** hai — open-source model GitHub/Hugging Face Space par free chalta hai, koi key/card nahi. Optional free HF token queue badhata hai. Direct video mode aur Video Studio dono LTX use karte hain.
