@@ -2716,6 +2716,296 @@ async function runTool(name, args, root = WORKSPACE) {
   }
 }
 
+function escapeHtmlText(text) {
+  return String(text).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function offlineAppTitle(prompt) {
+  const cleaned = String(prompt || '')
+    .replace(/\b(banao|bnao|bno|banayein|banaye|create|make|build|please|ek|a|the|app|application|website|web site|site|project)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const words = cleaned.split(' ').filter(Boolean).slice(0, 6);
+  const title = words.join(' ') || 'Nova App';
+  return title.charAt(0).toUpperCase() + title.slice(1);
+}
+
+function offlineAppSlug(prompt) {
+  const slug = offlineAppTitle(prompt)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return slug || 'nova-app';
+}
+
+function offlineAppFiles(title) {
+  const safeTitle = escapeHtmlText(title);
+  const jsTitle = JSON.stringify(title);
+  return {
+    'index.html': `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${safeTitle}</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <p class="eyebrow">Built with Nova</p>
+        <h1>${safeTitle}</h1>
+      </div>
+      <button id="themeBtn" class="ghost" type="button">Theme</button>
+    </header>
+    <section class="composer">
+      <input id="itemInput" type="text" placeholder="Add an item..." maxlength="140" />
+      <button id="addBtn" type="button">Add</button>
+    </section>
+    <section class="tools">
+      <input id="searchInput" type="search" placeholder="Search..." />
+      <button id="exportBtn" class="ghost" type="button">Export JSON</button>
+    </section>
+    <ul id="list" class="list"></ul>
+    <p id="empty" class="empty">Nothing here yet. Add your first item.</p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
+`,
+    'styles.css': `:root {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --text: #16171a;
+  --muted: #6b7078;
+  --accent: #6c5ce7;
+  --line: #e4e6eb;
+}
+body.dark {
+  color-scheme: dark;
+  --bg: #0d0e11;
+  --card: #17191e;
+  --text: #f2f3f5;
+  --muted: #9aa0aa;
+  --line: #292c33;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.shell { width: min(720px, calc(100% - 32px)); margin: 48px auto; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+.eyebrow { margin: 0 0 4px; color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+h1 { margin: 0; font-size: clamp(26px, 5vw, 40px); }
+button, input {
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 14px;
+  background: var(--card);
+  color: var(--text);
+}
+button { cursor: pointer; font-weight: 650; }
+button:not(.ghost) { border-color: var(--accent); background: var(--accent); color: #fff; }
+.ghost { background: transparent; }
+.composer, .tools { display: flex; gap: 10px; margin-bottom: 12px; }
+.composer input, .tools input { flex: 1; min-width: 0; }
+.list { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 8px; }
+.list li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card);
+}
+.list li.done span { text-decoration: line-through; color: var(--muted); }
+.list span { flex: 1; overflow-wrap: anywhere; }
+.list button { padding: 6px 9px; border-radius: 8px; font-size: 12px; }
+.empty { color: var(--muted); text-align: center; padding: 24px; }
+`,
+    'app.js': `const APP_TITLE = ${jsTitle};
+const KEY = 'nova-starter-items';
+const items = JSON.parse(localStorage.getItem(KEY) || '[]');
+const list = document.getElementById('list');
+const input = document.getElementById('itemInput');
+const search = document.getElementById('searchInput');
+const empty = document.getElementById('empty');
+
+function save() {
+  localStorage.setItem(KEY, JSON.stringify(items));
+  render();
+}
+
+function render() {
+  const query = search.value.trim().toLowerCase();
+  const visible = items.filter((item) => item.text.toLowerCase().includes(query));
+  list.replaceChildren();
+  visible.forEach((item) => {
+    const li = document.createElement('li');
+    li.className = item.done ? 'done' : '';
+    const text = document.createElement('span');
+    text.textContent = item.text;
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.textContent = item.done ? 'Undo' : 'Done';
+    toggle.onclick = () => { item.done = !item.done; save(); };
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = 'Delete';
+    del.onclick = () => { items.splice(items.indexOf(item), 1); save(); };
+    li.append(text, toggle, del);
+    list.append(li);
+  });
+  empty.hidden = visible.length > 0;
+  document.title = APP_TITLE;
+}
+
+document.getElementById('addBtn').onclick = () => {
+  const text = input.value.trim();
+  if (!text) return;
+  items.unshift({ text, done: false, ts: Date.now() });
+  input.value = '';
+  save();
+};
+input.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') document.getElementById('addBtn').click();
+});
+search.addEventListener('input', render);
+document.getElementById('exportBtn').onclick = () => {
+  const blob = new Blob([JSON.stringify(items, null, 2)], { type: 'application/json' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = 'items.json';
+  link.click();
+  URL.revokeObjectURL(link.href);
+};
+document.getElementById('themeBtn').onclick = () => {
+  document.body.classList.toggle('dark');
+  localStorage.setItem('nova-starter-theme', document.body.classList.contains('dark') ? 'dark' : 'light');
+};
+if (localStorage.getItem('nova-starter-theme') === 'dark') document.body.classList.add('dark');
+render();
+`,
+    'server.js': `import http from 'node:http';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.dirname(fileURLToPath(import.meta.url));
+const port = Number(process.env.PORT || 5173);
+const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json' };
+
+http.createServer(async (req, res) => {
+  const name = decodeURIComponent((req.url || '/').split('?')[0]);
+  const file = path.join(root, name === '/' ? 'index.html' : name);
+  if (!file.startsWith(root)) {
+    res.writeHead(403).end('Forbidden');
+    return;
+  }
+  try {
+    const body = await readFile(file);
+    res.writeHead(200, { 'content-type': (types[path.extname(file)] || 'application/octet-stream') + '; charset=utf-8' });
+    res.end(body);
+  } catch {
+    res.writeHead(404).end('Not found');
+  }
+}).listen(port, () => console.log('App running at http://localhost:' + port));
+`,
+    'package.json': `{
+  "name": "nova-starter-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
+`,
+    'README.md': `# ${safeTitle}
+
+Nova ne ye starter app offline banaya hai — koi npm install zaroori nahi.
+
+## Chalane ke liye
+\`\`\`powershell
+cd "${safeTitle}"
+node server.js
+\`\`\`
+
+Phir browser me kholein: http://localhost:5173
+
+## Files
+- \`index.html\` — page structure
+- \`styles.css\` — light/dark styling
+- \`app.js\` — add/search/complete/delete/export/theme logic
+- \`server.js\` — zero-dependency static server
+`,
+  };
+}
+
+async function uniqueScaffoldPath(root, base) {
+  let candidate = safeWorkspacePath(base, root);
+  for (let index = 2; ; index += 1) {
+    try {
+      await stat(candidate);
+      candidate = safeWorkspacePath(`${base}-${index}`, root);
+    } catch {
+      return candidate;
+    }
+  }
+}
+
+async function scaffoldOfflineApp(root, prompt) {
+  const target = await uniqueScaffoldPath(root, offlineAppSlug(prompt));
+  await mkdir(target, { recursive: true });
+  const files = offlineAppFiles(offlineAppTitle(prompt));
+  for (const [relative, content] of Object.entries(files)) {
+    await writeFile(path.join(target, relative), content, 'utf8');
+  }
+  return target;
+}
+
+function codingRequest(text) {
+  const value = String(text || '');
+  const noun = /\b(code|coding|app|application|website|web\s*site|site|project|software|script|file|folder|bug|fix|debug|api|backend|frontend|component|function|database|db|html|css|javascript|python|node|react|flutter|server|page|ui)\b/i;
+  const verb = /\b(ban|bana|bna|bno|bnao|banao|banayein|banaye|likh|likho|create|build|develop|implement|fix|write|do|de)\b/i;
+  return noun.test(value) && verb.test(value);
+}
+
+function providerFailure(text, status) {
+  return /auth|unauthor|forbidden|invalid|key|quota|limit|rate|429|401|403|exhausted|no candidate/i.test(`${status || ''} ${text || ''}`);
+}
+
+async function streamOfflineScaffold(res, root, prompt, reason) {
+  const target = await scaffoldOfflineApp(root, prompt);
+  const files = await readdir(target);
+  sse(res, {
+    type: 'step',
+    label: 'Provider limit/auth fail — offline starter app bana diya…',
+  });
+  for (const file of files) {
+    const full = path.join(target, file);
+    sse(res, {
+      type: 'file',
+      path: path.relative(root, full).replace(/\\/g, '/'),
+      url: `/api/file?path=${encodeURIComponent(full)}`,
+    });
+  }
+  const message = `AI provider abhi available nahi hai (${String(reason || 'provider error').slice(0, 180)}). `
+    + 'Isliye maine selected coding folder me ek complete offline starter app bana diya hai — index.html, styles.css, app.js, server.js aur README. '
+    + 'Files neeche cards me hain; unhe open karke dekh sakte ho. Provider theek hone par dobara bolo to main usi folder me aapki details ke saath badal dunga.';
+  for (let index = 0; index < message.length; index += 36) {
+    sse(res, { type: 'delta', content: message.slice(index, index + 36) });
+  }
+  sse(res, { type: 'done' });
+  res.end();
+}
+
 function agentSystem(modes, customSystem = '', root = WORKSPACE) {
   const toolNames = AGENT_TOOLS.map((tool) => tool.function.name).join(', ');
   return [
@@ -2724,6 +3014,7 @@ function agentSystem(modes, customSystem = '', root = WORKSPACE) {
     `Allowed folder for all filesystem tools: ${root}. Never access paths outside it.`,
     `Current date: ${new Date().toISOString().slice(0, 10)}.`,
     'You are an AGENT. Complete the user\'s request end-to-end instead of only explaining how. Use tools whenever the task needs fresh information, files, code execution, or generated images, and keep using them until the task is actually done.',
+    'CODE RULE: For any request to create/fix an app, website, code file, script or project, ALWAYS call write_file (and create_folder when needed). Write real complete files into the allowed folder. If the folder is empty, scaffold the whole project. Never only describe or paste code in chat without saving it.',
     'IMAGE RULE: For any image request call generate_image. Prefer provider auto (Bing first, then Cloudflare Flux, then Hugging Face Flux). Never use Pollinations — the user disabled it because of poor quality.',
     'VIDEO RULE: If the user asks for any video — story, cartoon, cinematic, meme/funny, or a video from an MP3 song — call create_media_job, never just describe it. Infer style (cinematic/cartoon/meme/anime/realistic), fx and transitions from the request. Use ratio 9:16 for reels/stories/short-form and 16:9 for normal video. If the user attached an MP3, pass its workspace audioPath. Default video provider is ltx (free open-source); Pollinations is disabled.',
     `Available tools: ${toolNames}.`,
@@ -2822,8 +3113,13 @@ async function handleAgent(req, res, key) {
           nativeTools = false;
           continue;
         }
-        const message = providerErrorMessage(detail, response.status);
-        sse(res, { type: 'error', error: message || `Provider responded with ${response.status}` });
+        const message = providerErrorMessage(detail, response.status)
+          || `Provider responded with ${response.status}`;
+        const lastUser = [...messages].reverse().find((item) => item.role === 'user')?.content || '';
+        if (payload.rootDir && codingRequest(lastUser) && providerFailure(message, response.status)) {
+          return await streamOfflineScaffold(res, root, lastUser, message);
+        }
+        sse(res, { type: 'error', error: message });
         return res.end();
       }
 
@@ -2917,7 +3213,12 @@ async function handleAgent(req, res, key) {
     sse(res, { type: 'done' });
     res.end();
   } catch (err) {
-    sse(res, { type: 'error', error: err.message || 'Agent failed' });
+    const message = err.message || 'Agent failed';
+    const lastUser = [...messages].reverse().find((item) => item.role === 'user')?.content || '';
+    if (payload.rootDir && codingRequest(lastUser) && providerFailure(message, 0)) {
+      return await streamOfflineScaffold(res, root, lastUser, message);
+    }
+    sse(res, { type: 'error', error: message });
     res.end();
   }
 }

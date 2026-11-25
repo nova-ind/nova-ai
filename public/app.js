@@ -1369,8 +1369,8 @@ async function send(rawText) {
 
   // User prompt/idea/caption maang raha hai to media mode ignore karo — video mat banao.
   const asksForText = /\b(prompt|prompts|idea|ideas|caption|captions|script|likh|likho)\b/i.test(text || '');
-  const wantsVideo = !asksForText && /\b(video|reel|reels|shorts|clip|music\s*video)\b[\s\S]{0,80}\b(ban|bana|bna|bno|bnao|banayein|banao|create|make|generate|chahiye|do|de)\b/i.test(text || '')
-    || !asksForText && /\b(ban|bana|bna|bno|bnao|banayein|banao|create|make|generate)\b[\s\S]{0,80}\b(video|reel|reels|shorts|clip)\b/i.test(text || '');
+  const wantsVideo = wantsVideoRequest(text);
+  const wantsCoding = wantsCodingRequest(text) && !wantsVideo;
   if (asksForText && (settings.modes.video || settings.modes.imagine)) {
     settings.modes.video = false;
     settings.modes.imagine = false;
@@ -1381,6 +1381,17 @@ async function send(rawText) {
   // "Is song ki video bno" / "story video banao" — seedha pehle images, phir FFmpeg assembly.
   if (wantsVideo) {
     await startVideoJob(chat, text || 'A cinematic video', audio);
+    return;
+  }
+
+  // "App banao", "code likho", "bug fix karo" — coding folder me agent chalao, chahe imagine mode on ho.
+  if (wantsCoding) {
+    settings.modes.agent = true;
+    settings.modes.imagine = false;
+    settings.modes.video = false;
+    saveSettings();
+    renderModes();
+    await runAgent(chat);
     return;
   }
 
@@ -1397,6 +1408,22 @@ async function send(rawText) {
   } else {
     await runChat(chat);
   }
+}
+
+function wantsVideoRequest(text) {
+  const value = String(text || '');
+  if (/\b(prompt|prompts|idea|ideas|caption|captions|script|likh|likho)\b/i.test(value)) return false;
+  const noun = /\b(video|reel|reels|shorts|clip|music\s*video|song|aong|gaana|geet)\b/i;
+  const verb = /\b(ban|bana|bna|bno|bnao|banayein|banaye|banao|create|make|generate|chahiye|do|de)\b/i;
+  const reverseVerb = /\b(ban|bana|bna|bno|bnao|banayein|banaye|banao|create|make|generate)\b/i;
+  return (noun.test(value) && verb.test(value)) || (reverseVerb.test(value) && noun.test(value));
+}
+
+function wantsCodingRequest(text) {
+  const value = String(text || '');
+  const noun = /\b(code|coding|app|application|website|web\s*site|site|project|software|script|file|folder|bug|fix|debug|api|backend|frontend|component|function|database|db|html|css|javascript|python|node|react|flutter|server|page|ui)\b/i;
+  const verb = /\b(ban|bana|bna|bno|bnao|banayein|banaye|banao|likh|likho|create|build|develop|implement|fix|write|do|de)\b/i;
+  return noun.test(value) && verb.test(value);
 }
 
 async function runChat(chat) {
@@ -3352,13 +3379,17 @@ async function allowFolderPath(folderPath, options = {}) {
   allowedFolders = data.folders || allowedFolders;
   if (options.selectCoding) {
     settings.codingFolder = data.added || folderPath;
+    settings.modes.agent = true;
+    settings.modes.imagine = false;
+    settings.modes.video = false;
     saveSettings();
+    renderModes();
   }
   if (els.botFolderPath) els.botFolderPath.value = '';
   await loadFolders();
   if (data.added && els.botRoot) els.botRoot.value = data.added;
   if (!options.quiet) {
-    toast(options.selectCoding ? 'Coding folder set — ab yahan kaam hoga' : 'Folder allowed');
+    toast(options.selectCoding ? 'Coding folder set · Agent mode ON — ab code yahin save hoga' : 'Folder allowed');
   }
   return data.added || folderPath;
 }
