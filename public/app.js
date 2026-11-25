@@ -1557,7 +1557,7 @@ function puterIsSignedIn() {
 async function generatePuterBrowserImage(prompt, ratio = '16:9') {
   const puter = await loadPuter();
   if (!puterIsSignedIn()) {
-    throw new Error('Puter AI ke liye pehle Settings → “Sign in to Puter” dabayein (free account).');
+    throw new Error('Puter AI ke liye pehle Settings → “Enable free images” dabayein (one-click free account).');
   }
   const result = await puter.ai.txt2img(String(prompt || '').slice(0, 2048), {
     model: 'openai/gpt-image-2.6-flare',
@@ -3466,16 +3466,16 @@ els.puterLoginBtn?.addEventListener('click', async () => {
   button.textContent = 'Opening Puter…';
   try {
     await loadPuter();
-    await window.puter.auth.signIn();
-    button.textContent = 'Signed in ✓';
-    toast('Puter sign-in ho gaya. Ab live par images banengi.');
+    await window.puter.auth.signIn({ attempt_temp_user_creation: true });
+    button.textContent = 'Enabled ✓';
+    toast('Free Puter account ready. Ab live par images banengi.');
   } catch (err) {
     toast(err.message || 'Puter sign-in nahi hua.');
     button.textContent = original;
   } finally {
     button.disabled = false;
-    if (puterIsSignedIn()) button.textContent = 'Signed in ✓';
-    else if (button.textContent !== 'Signed in ✓') button.textContent = original;
+    if (puterIsSignedIn()) button.textContent = 'Enabled ✓';
+    else if (button.textContent !== 'Enabled ✓') button.textContent = original;
   }
 });
 
