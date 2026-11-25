@@ -2388,6 +2388,36 @@ async function handleMediaProviders(req, res) {
   return sendJson(res, 200, mediaProviderState());
 }
 
+async function testCloudflareCredentials() {
+  if (!cloudflareAccount || !cloudflareToken) {
+    return {
+      ok: false,
+      error: 'Account ID ya token server tak nahi pahuncha. Settings open karke fields dobara type karein ya Save settings dabayein.',
+    };
+  }
+  try {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cloudflareAccount)}/ai/models/search?limit=1`,
+      {
+        headers: { authorization: `Bearer ${cloudflareToken}` },
+        signal: AbortSignal.timeout(20_000),
+      },
+    );
+    const data = await response.json().catch(() => ({}));
+    const detail = (data.errors || []).map((item) => item.message).filter(Boolean).join('; ');
+    if (!response.ok || data.success === false) {
+      return { ok: false, error: detail || `Cloudflare API responded ${response.status}.` };
+    }
+    return {
+      ok: true,
+      account: cloudflareAccount,
+      message: 'Cloudflare token + Account ID sahi hain. Workers AI access available hai.',
+    };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err).slice(0, 300) };
+  }
+}
+
 async function handleMediaCredentials(req, res) {
   let body = {};
   try {
@@ -3602,6 +3632,10 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/media-key') {
       return await handleMediaKey(req, res);
+    }
+
+    if (url.pathname === '/api/media/test/cloudflare' && req.method === 'POST') {
+      return sendJson(res, 200, await testCloudflareCredentials());
     }
 
     if (url.pathname === '/api/media-credentials') {

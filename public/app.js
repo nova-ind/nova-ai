@@ -101,6 +101,8 @@ const els = {
   videoProviderSelect: $('videoProviderSelect'),
   cfAccountInput: $('cfAccountInput'),
   cfTokenInput: $('cfTokenInput'),
+  testCloudflareBtn: $('testCloudflareBtn'),
+  cloudflareTestResult: $('cloudflareTestResult'),
   hfTokenInput: $('hfTokenInput'),
   imageModelSelect: $('imageModelSelect'),
   videoModelSelect: $('videoModelSelect'),
@@ -3926,6 +3928,35 @@ for (const [input, field] of [
     mediaCredentialsTimer = setTimeout(() => syncMediaCredentials(), 400);
   });
 }
+
+els.testCloudflareBtn.addEventListener('click', async () => {
+  const button = els.testCloudflareBtn;
+  const result = els.cloudflareTestResult;
+  button.disabled = true;
+  button.textContent = 'Testing…';
+  result.textContent = '';
+  try {
+    await fetch('/api/media-credentials', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        cloudflareAccount: els.cfAccountInput.value.trim(),
+        cloudflareToken: els.cfTokenInput.value.trim(),
+      }),
+    });
+    const response = await fetch('/api/media/test/cloudflare', { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    result.textContent = data.ok ? '✓ Token sahi hai' : `✗ ${data.error || 'Test fail'}`;
+    result.style.color = data.ok ? 'var(--ok, #4ade80)' : 'var(--danger, #f87171)';
+    if (!data.ok) toast(data.error || 'Cloudflare test fail');
+  } catch (err) {
+    result.textContent = `✗ ${err.message || 'Test fail'}`;
+    result.style.color = 'var(--danger, #f87171)';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Test Cloudflare token';
+  }
+});
 
 els.imageModelSelect.addEventListener('change', () => {
   settings.mediaModels.image = els.imageModelSelect.value;
