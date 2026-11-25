@@ -1,5 +1,8 @@
 const CHATS_KEY = 'nova.chats.v2';
 const SETTINGS_KEY = 'nova.settings.v2';
+const DELETED_JOBS_KEY = 'nova.deletedJobs.v1';
+const DELETED_CHATS_KEY = 'nova.deletedChats.v1';
+const deletedChatIds = new Set(readJson(DELETED_CHATS_KEY, []).map(String));
 
 const $ = (id) => document.getElementById(id);
 
@@ -104,6 +107,7 @@ const els = {
   testCloudflareBtn: $('testCloudflareBtn'),
   cloudflareTestResult: $('cloudflareTestResult'),
   hfTokenInput: $('hfTokenInput'),
+  geminiTokenInput: $('geminiTokenInput'),
   imageModelSelect: $('imageModelSelect'),
   videoModelSelect: $('videoModelSelect'),
   videoRatioSelect: $('videoRatioSelect'),
@@ -114,6 +118,7 @@ const els = {
   chooseSongBtn: $('chooseSongBtn'),
   lyricsInput: $('lyricsInput'),
   voiceInput: $('voiceInput'),
+  voicePreset: $('voicePreset'),
   narrationToggle: $('narrationToggle'),
   autoModeToggle: $('autoModeToggle'),
   soundToggle: $('soundToggle'),
@@ -185,7 +190,7 @@ const DEFAULT_SETTINGS = {
   apiKeys: {},
   providerModels: {},
   mediaModels: { image: 'flux', video: 'kwaivgi/kling-v4.0-flash' },
-  mediaCredentials: { cloudflareAccount: '', cloudflareToken: '', hfToken: '' },
+  mediaCredentials: { cloudflareAccount: '', cloudflareToken: '', hfToken: '', geminiToken: '' },
   imageProvider: 'auto',
   imageRatio: '16:9',
   videoProvider: 'auto',
@@ -201,7 +206,7 @@ const DEFAULT_SETTINGS = {
   videoSceneCount: 'auto',
   songPath: '',
   lyrics: '',
-  voice: 'Microsoft Hazel Desktop',
+  voice: 'auto',
   narration: true,
   autoMode: true,
   soundEnabled: true,
@@ -209,7 +214,7 @@ const DEFAULT_SETTINGS = {
   modes: { agent: true, think: false, search: false, imagine: false, video: false, fun: false },
 };
 
-let chats = readJson(CHATS_KEY, []);
+let chats = readJson(CHATS_KEY, []).filter((chat) => !deletedChatIds.has(String(chat?.id)));
 const storedSettings = readJson(SETTINGS_KEY, {});
 let settings = { ...DEFAULT_SETTINGS, ...storedSettings };
 settings.modes = { ...DEFAULT_SETTINGS.modes, ...(storedSettings.modes || {}) };
@@ -220,6 +225,8 @@ settings.apiKeys = { ...DEFAULT_SETTINGS.apiKeys, ...(storedSettings.apiKeys || 
 settings.providerModels = { ...DEFAULT_SETTINGS.providerModels, ...(storedSettings.providerModels || {}) };
 settings.mediaModels = { ...DEFAULT_SETTINGS.mediaModels, ...(storedSettings.mediaModels || {}) };
 settings.mediaCredentials = { ...DEFAULT_SETTINGS.mediaCredentials, ...(storedSettings.mediaCredentials || {}) };
+// Purana default SAPI voice tha — naya default natural AI narration hai.
+if (!settings.voice || settings.voice === 'Microsoft Hazel Desktop') settings.voice = 'auto';
 
 // Migrate older/incorrect model IDs and stale toggles from previous versions.
 let needsSettingsSave = false;
@@ -296,6 +303,20 @@ function writeJson(key, value) {
   } catch {
     toast('Storage is full — oldest attachments were not saved');
   }
+}
+
+for (const id of readJson(DELETED_JOBS_KEY, [])) cancelledJobs.add(String(id));
+
+function rememberDeletedJob(jobId) {
+  if (!jobId) return;
+  cancelledJobs.add(String(jobId));
+  writeJson(DELETED_JOBS_KEY, [...cancelledJobs].slice(-500));
+}
+
+function rememberDeletedChat(chatId) {
+  if (!chatId) return;
+  deletedChatIds.add(String(chatId));
+  writeJson(DELETED_CHATS_KEY, [...deletedChatIds].slice(-500));
 }
 
 const saveChats = () => writeJson(CHATS_KEY, chats);
@@ -1326,10 +1347,54 @@ function selectChat(id) {
   closeMobileSidebar();
 }
 
+async function removeMediaJobsForChat(chat) {
+  if (!chat) return;
+  const ids = new Set();
+  for (const message of chat.messages || []) {
+    const id = message.job?.id || message.jobId;
+    if (id) ids.add(id);
+  }
+  for (const job of mediaJobs) {
+    if (job.chatId === chat.id) ids.add(job.id);
+  }
+  // Server me maujud lekin chat se hataaye gaye jobs bhi pakdein — warna poll se wapas aa jate hain.
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch('/api/media-jobs', { signal: controller.signal });
+      const data = await response.json();
+      for (const job of data.jobs || []) {
+        if (job.chatId === chat.id) ids.add(job.id);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    /* local cleanup still continues */
+  }
+  for (const id of ids) {
+    rememberDeletedJob(id);
+    mediaJobs = mediaJobs.filter((job) => job.id !== id);
+    mediaRendering.delete(id);
+    notifiedJobs.delete(id);
+    for (let queueIndex = renderQueue.length - 1; queueIndex >= 0; queueIndex -= 1) {
+      if (renderQueue[queueIndex].id === id) renderQueue.splice(queueIndex, 1);
+    }
+    fetch(`/api/media-jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+  }
+  chats = chats.filter((item) => !deletedChatIds.has(String(item.id)));
+  saveChats();
+  renderAll();
+}
+
 function deleteChat(id) {
   const index = chats.findIndex((c) => c.id === id);
   if (index === -1) return;
+  const chat = chats[index];
   if (stream?.chatId === id) stopStream();
+  rememberDeletedChat(id);
+  void removeMediaJobsForChat(chat);
   chats.splice(index, 1);
   if (activeId === id) activeId = null;
   saveChats();
@@ -1350,7 +1415,7 @@ function deleteMessageAt(index) {
     mediaJobs = mediaJobs.filter((job) => job.id !== jobId);
     mediaRendering.delete(jobId);
     notifiedJobs.delete(jobId);
-    cancelledJobs.add(jobId);
+    rememberDeletedJob(jobId);
     for (let queueIndex = renderQueue.length - 1; queueIndex >= 0; queueIndex -= 1) {
       if (renderQueue[queueIndex].id === jobId) renderQueue.splice(queueIndex, 1);
     }
@@ -2223,16 +2288,16 @@ function applyJobUpdate(job) {
 
 function syncMediaJobs(list) {
   if (!Array.isArray(list)) return;
-  // Delete ki hui video server poll se dobara chat me na aaye.
-  const visibleList = list.filter((job) => !cancelledJobs.has(job.id));
-  if (visibleList.length !== list.length) {
-    for (const chat of chats) {
-      chat.messages = chat.messages.filter((message) => {
-        const id = message.job?.id || message.jobId;
-        return !id || !cancelledJobs.has(id);
-      });
-    }
+  // Delete ki hui video/chat server poll se dobara na aaye.
+  const visibleList = list.filter((job) =>
+    !cancelledJobs.has(job.id) && !deletedChatIds.has(String(job.chatId || '')));
+  for (const chat of chats) {
+    chat.messages = chat.messages.filter((message) => {
+      const id = message.job?.id || message.jobId;
+      return !id || !cancelledJobs.has(id);
+    });
   }
+  chats = chats.filter((chat) => !deletedChatIds.has(String(chat.id)));
   mediaJobs = visibleList;
   for (const job of visibleList) {
     const found = findJobMessage(job.id);
@@ -2285,6 +2350,7 @@ async function updateJobStatus(job, status, step, progress) {
 
 async function cancelMediaJob(jobId) {
   if (!jobId) return;
+  rememberDeletedJob(jobId);
   mediaJobs = mediaJobs.filter((item) => item.id !== jobId);
   for (let i = renderQueue.length - 1; i >= 0; i -= 1) {
     if (renderQueue[i].id === jobId) renderQueue.splice(i, 1);
@@ -2412,6 +2478,7 @@ async function syncMediaCredentials() {
         cloudflareAccount: String(creds.cloudflareAccount || ''),
         cloudflareToken: String(creds.cloudflareToken || ''),
         hfToken: String(creds.hfToken || ''),
+        geminiToken: String(creds.geminiToken || ''),
       }),
     });
     const data = await response.json().catch(() => ({}));
@@ -2812,7 +2879,12 @@ async function renderJobVideo(job) {
       const percent = 78 + Math.round((elapsed / totalMs) * 21);
       updateJobStatus(job, 'rendering', `Rendering scene ${index + 1}/${scenes.length} · ${ratio}`, percent);
     }
-    if (rawElapsed >= hardDeadline) {
+    if (cancelledJobs.has(job.id)) {
+      clearInterval(timer);
+      audio?.pause();
+      clips.forEach((clip) => clip?.pause());
+      recorder.stop();
+    } else if (rawElapsed >= hardDeadline) {
       clearInterval(timer);
       updateJobStatus(job, 'rendering', 'Render timeout — partial video save ho raha hai…', 98);
       recorder.stop();
@@ -2823,6 +2895,13 @@ async function renderJobVideo(job) {
   }, 1000 / fps);
 
   await finished;
+  if (cancelledJobs.has(job.id)) {
+    audio?.pause();
+    clips.forEach((clip) => clip?.pause());
+    mediaStream?.getTracks().forEach((track) => track.stop());
+    stream.getTracks().forEach((track) => track.stop());
+    return;
+  }
   audio?.pause();
   clips.forEach((clip) => clip?.pause());
   mediaStream?.getTracks().forEach((track) => track.stop());
@@ -3119,6 +3198,7 @@ function openSettings() {
   els.cfAccountInput.value = settings.mediaCredentials?.cloudflareAccount || '';
   els.cfTokenInput.value = settings.mediaCredentials?.cloudflareToken || '';
   els.hfTokenInput.value = settings.mediaCredentials?.hfToken || '';
+  if (els.geminiTokenInput) els.geminiTokenInput.value = settings.mediaCredentials?.geminiToken || '';
   fillMediaSelect(els.imageModelSelect, mediaCatalog.image, settings.mediaModels.image, MEDIA_FALLBACK.image);
   fillMediaSelect(els.videoModelSelect, mediaCatalog.video, settings.mediaModels.video, MEDIA_FALLBACK.video);
   els.videoRatioSelect.value = settings.videoRatio || '16:9';
@@ -3127,7 +3207,16 @@ function openSettings() {
   els.sceneCountSelect.value = settings.videoSceneCount || 'auto';
   els.songPath.value = settings.songPath || '';
   els.lyricsInput.value = settings.lyrics || '';
-  els.voiceInput.value = settings.voice || 'Microsoft Hazel Desktop';
+  const voiceValue = settings.voice || 'auto';
+  const voicePresetMap = {
+    'gemini:Kore': 'female', 'gemini:Charon': 'male', 'gemini:Puck': 'child',
+    'openai:nova': 'female', 'openai:onyx': 'male', 'openai:alloy': 'auto',
+  };
+  const presetValue = ['auto', 'male', 'female', 'child'].includes(voiceValue)
+    ? voiceValue
+    : voicePresetMap[voiceValue] || 'custom';
+  if (els.voicePreset) els.voicePreset.value = presetValue;
+  els.voiceInput.value = presetValue === 'custom' ? voiceValue : '';
   els.narrationToggle.checked = settings.narration !== false;
   if (els.autoModeToggle) els.autoModeToggle.checked = settings.autoMode !== false;
   if (els.soundToggle) els.soundToggle.checked = settings.soundEnabled !== false;
@@ -4105,6 +4194,7 @@ for (const [input, field] of [
   [els.cfAccountInput, 'cloudflareAccount'],
   [els.cfTokenInput, 'cloudflareToken'],
   [els.hfTokenInput, 'hfToken'],
+  [els.geminiTokenInput, 'geminiToken'],
 ]) {
   input.addEventListener('input', () => {
     settings.mediaCredentials[field] = input.value.trim();
@@ -4243,6 +4333,7 @@ els.saveSettings.addEventListener('click', async () => {
     cloudflareAccount: els.cfAccountInput.value.trim(),
     cloudflareToken: els.cfTokenInput.value.trim(),
     hfToken: els.hfTokenInput.value.trim(),
+    geminiToken: els.geminiTokenInput?.value.trim() || '',
   };
   syncActiveKey();
   settings.mediaModels.image = els.imageModelSelect.value || DEFAULT_SETTINGS.mediaModels.image;
@@ -4253,7 +4344,10 @@ els.saveSettings.addEventListener('click', async () => {
   settings.videoSceneCount = els.sceneCountSelect.value || 'auto';
   settings.songPath = els.songPath.value.trim();
   settings.lyrics = els.lyricsInput.value.trim();
-  settings.voice = els.voiceInput.value.trim() || 'Microsoft Hazel Desktop';
+  const selectedPreset = els.voicePreset?.value || 'auto';
+  settings.voice = selectedPreset === 'custom'
+    ? (els.voiceInput.value.trim() || 'Microsoft Hazel Desktop')
+    : selectedPreset;
   settings.narration = els.narrationToggle.checked;
   settings.autoMode = els.autoModeToggle ? els.autoModeToggle.checked : settings.autoMode !== false;
   settings.soundEnabled = els.soundToggle ? els.soundToggle.checked : settings.soundEnabled !== false;
@@ -4279,6 +4373,10 @@ els.clearAllBtn.addEventListener('click', () => {
   if (!chats.length) return;
   if (!confirm('Delete all chats? This cannot be undone.')) return;
   if (busy()) stopStream();
+  for (const chat of chats) {
+    rememberDeletedChat(chat.id);
+    void removeMediaJobsForChat(chat);
+  }
   chats = [];
   activeId = null;
   saveChats();

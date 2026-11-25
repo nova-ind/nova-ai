@@ -504,6 +504,12 @@
         </div>
 
         <div class="field">
+          <label for="geminiTokenInput">Gemini API key <span class="value">Optional · natural TTS voice</span></label>
+          <input id="geminiTokenInput" type="password" placeholder="Google AI Studio key" spellcheck="false" />
+          <p class="help">Optional: Google Gemini TTS (sabse natural) tabhi chalega jab yahan free Google AI Studio key doge. Bina key ke bhi story video Microsoft Edge neural Hindi voice (male/female/child) ke saath banegi. Key sirf is PC ke browser me rehti hai aur chat me kabhi nahi dikhti. <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Free key</a></p>
+        </div>
+
+        <div class="field">
           <label for="modelFilter">Available models <span class="value" id="modelCount">Loading…</span></label>
           <input id="modelFilter" type="search" placeholder="Filter models by name…" autocomplete="off" />
           <div class="model-list" id="modelList"><p class="help">Add a key to load your provider's model list.</p></div>
@@ -560,7 +566,17 @@
             </select>
           </div>
           <div class="field">
-            <label for="voiceInput">Voice-over voice</label>
+            <label for="voicePreset">Voice-over style</label>
+            <select id="voicePreset">
+              <option value="auto">Auto · natural narrator (Hindi)</option>
+              <option value="male">Male · Madhur neural</option>
+              <option value="female">Female · Swara neural</option>
+              <option value="child">Child · bright neural</option>
+              <option value="custom">Custom Windows voice</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="voiceInput">Custom voice name <span class="value">Sirf “Custom” par</span></label>
             <input id="voiceInput" type="text" spellcheck="false" placeholder="Microsoft Hazel Desktop" />
           </div>
         </div>

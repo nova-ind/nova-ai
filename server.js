@@ -1,6 +1,7 @@
 import http from 'node:http';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import tls from 'node:tls';
 import { openSync, closeSync } from 'node:fs';
 import { readFile, readdir, writeFile, mkdir, stat, rm, copyFile, rename, access } from 'node:fs/promises';
 import path from 'node:path';
@@ -42,6 +43,7 @@ let mediaKey = (process.env.POLLINATIONS_API_KEY || '').trim();
 let cloudflareAccount = (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
 let cloudflareToken = (process.env.CLOUDFLARE_API_TOKEN || '').trim();
 let hfToken = (process.env.HF_TOKEN || '').trim();
+let geminiToken = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
 const HF_IMAGE_MODELS = [
   'black-forest-labs/FLUX.1-schnell',
 ];
@@ -696,6 +698,87 @@ function inferTransitions(prompt) {
   return list.length ? list : ['fade', 'zoom'];
 }
 
+function cleanStoryCell(value) {
+  return String(value || '')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/\*+/g, '')
+    .replace(/[“”"]/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseStoryboard(prompt) {
+  const text = String(prompt || '');
+  const result = {
+    durationSeconds: 0,
+    sceneCount: 0,
+    narrationLines: [],
+    imagePrompts: [],
+    titles: [],
+    sceneStarts: [],
+    sceneEnds: [],
+  };
+  const minutes = /(\d+(?:\.\d+)?)\s*(?:min|mins|minute|minutes|मिनट|मिंट|मिनटों)/i.exec(text)
+    || /(\d+(?:\.\d+)?)\s*[-\u2011\u2013\u2014\s]*(?:मिनट|मिंट|मिनटों)/i.exec(text);
+  const seconds = /(\d{2,4})\s*(?:sec|secs|second|seconds|सेकंड|सेंकड)/i.exec(text);
+  if (minutes) result.durationSeconds = Math.round(Number(minutes[1]) * 60);
+  if (seconds) result.durationSeconds = Math.max(result.durationSeconds, Number(seconds[1]));
+
+  const rows = text.split(/\r?\n/).filter((line) => /^\s*\|/.test(line));
+  const scenes = [];
+  for (const row of rows) {
+    const cells = row.split('|').slice(1, -1).map((cell) => cell.trim());
+    if (cells.length < 4 || !/^\d+$/.test(cells[0])) continue;
+    const time = cells[1] || '';
+    const range = /(\d+(?:\.\d+)?)\s*(?:-|‑|–|—|to)\s*(\d+(?:\.\d+)?)/i.exec(time);
+    const single = /(\d+(?:\.\d+)?)/.exec(time);
+    scenes.push({
+      time,
+      start: range ? Number(range[1]) : (single ? Number(single[1]) : null),
+      end: range ? Number(range[2]) : null,
+      title: cleanStoryCell(cells[2]),
+      summary: cleanStoryCell(cells[3]),
+      dialogue: cells.length >= 6 ? cleanStoryCell(cells[4]) : '',
+      image: cleanStoryCell(cells[cells.length - 1]),
+    });
+  }
+  if (scenes.length >= 2) {
+    result.sceneCount = scenes.length;
+    result.titles = scenes.map((item) => item.title).filter(Boolean);
+    result.narrationLines = scenes.map((item) => {
+      const speech = item.dialogue.replace(/[^.।!?\n]{1,24}:\s*/g, '').trim();
+      // Hindi image description bhi story me shamil karo taaki har scene ki awaaz poori 30s bhare.
+      const visual = /[\u0900-\u097F]/.test(item.image) ? item.image : '';
+      return [item.summary, speech, visual].filter(Boolean).join('. ').replace(/\s+/g, ' ').trim();
+    });
+    result.imagePrompts = scenes.map((item) => item.image || item.summary || item.title).filter(Boolean);
+    let maxEnd = 0;
+    for (const item of scenes) {
+      if (item.end !== null) maxEnd = Math.max(maxEnd, item.end);
+      else if (item.start !== null) maxEnd = Math.max(maxEnd, item.start);
+    }
+    if (maxEnd > 0) result.durationSeconds = Math.max(result.durationSeconds, Math.round(maxEnd));
+    const fallbackStep = (result.durationSeconds || scenes.length * 30) / scenes.length;
+    result.sceneStarts = scenes.map((item, index) => Number.isFinite(item.start) ? item.start : index * fallbackStep);
+    result.sceneEnds = scenes.map((item, index) => Number.isFinite(item.end)
+      ? item.end
+      : ((result.sceneStarts[index + 1] ?? result.durationSeconds) || (index + 1) * fallbackStep));
+  }
+
+  const numbered = [...text.matchAll(/^\s*\d+[.)]\s*\*\*[^*]+\*\*\s*(?:[–‑—-]|:)\s*[“"]?([^”"\n]+)[”"]?/gm)]
+    .map((match) => cleanStoryCell(match[1]))
+    .filter(Boolean);
+  if (numbered.length >= 2 && numbered.length >= result.imagePrompts.length) {
+    // “इमेज-प्रॉम्प्ट – उपयोग के लिये” list AI image generation ke liye best hai.
+    result.imagePrompts = numbered;
+    result.sceneCount = Math.max(result.sceneCount, numbered.length);
+  }
+  const explicitScenes = /(\d+)\s*(?:scenes|scene|दृश्य|दृश्यों)/i.exec(text);
+  if (explicitScenes && !result.sceneCount) result.sceneCount = Number(explicitScenes[1]);
+  return result;
+}
+
 function splitCaptions(prompt, count) {
   const text = String(prompt || '').trim();
   const parts = text.split(/[.!?।]+\s*|\n+/).map((item) => item.trim()).filter(Boolean);
@@ -707,6 +790,68 @@ function splitCaptions(prompt, count) {
     parts[index % (parts.length || 1)] ||
     `Scene ${index + 1}`,
   ).slice(0, count);
+}
+
+async function generateStoryScriptWithModel(job, creds, baseCaptions) {
+  const key = String(creds?.key || '').trim();
+  if (!key) throw new Error('Story model key unavailable.');
+  const base = String(creds?.baseUrl || UPSTREAM_BASE).replace(/\/+$/, '');
+  const count = Math.max(1, Number(job.sceneCount) || 6);
+  const prompt = String(job.prompt || '').trim();
+  const duration = Math.max(10, Number(job.durationSeconds) || 60);
+  const model = String(process.env.STORY_MODEL || DEFAULT_MODEL || '').trim();
+  const system = [
+    'You are a master short-film screenwriter and narrator.',
+    `Write an original cinematic story for a ${duration}-second video, split into exactly ${count} scenes.`,
+    'Return ONLY a JSON array of exactly N strings, one spoken narration line per scene.',
+    'Each line: 8-24 words, vivid, natural to speak, emotionally engaging, with hook, buildup, turn and payoff.',
+    'Write in the same language/style as the user idea. Never copy the prompt word-for-word and never add headings, numbers or stage directions.',
+  ].join('\n');
+  const response = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model,
+      stream: false,
+      temperature: 0.9,
+      max_tokens: Math.min(2400, Math.max(600, count * 60)),
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `User idea: ${prompt}\n\nGenerate the ${count} narration lines now.` },
+      ],
+    }),
+    signal: AbortSignal.timeout(180_000),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Story model failed (${response.status}): ${detail.slice(0, 180)}`);
+  }
+  const payload = await response.json();
+  const content = payload?.choices?.[0]?.message?.content;
+  const raw = typeof content === 'string' ? content : JSON.stringify(content || '');
+  let lines = [];
+  const start = raw.indexOf('[');
+  const end = raw.lastIndexOf(']');
+  if (start !== -1 && end > start) {
+    try {
+      const parsed = JSON.parse(raw.slice(start, end + 1));
+      if (Array.isArray(parsed)) {
+        lines = parsed.map((item) => String(typeof item === 'string' ? item : item?.text || item?.line || '').trim()).filter(Boolean);
+      }
+    } catch { /* try plain lines below */ }
+  }
+  if (!lines.length) {
+    lines = raw.split(/\n+/).map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').replace(/^["']|["']$/g, '').trim()).filter(Boolean);
+  }
+  lines = lines.slice(0, count).map((line) => String(line).replace(/\s+/g, ' ').trim());
+  while (lines.length < count) {
+    lines.push(String(baseCaptions[lines.length] || prompt || `Scene ${lines.length + 1}`).replace(/\s+/g, ' ').trim());
+  }
+  if (!lines.some(Boolean)) throw new Error('Story model ne koi script nahi di.');
+  return lines.map((line, index) => line || baseCaptions[index] || `Scene ${index + 1}`);
 }
 
 function buildStoryScript(job, baseCaptions) {
@@ -754,57 +899,92 @@ async function updateMediaJob(job, patch) {
   await saveMediaJobs().catch(() => {});
 }
 
-function cleanStockQuery(prompt) {
-  return String(prompt || '')
-    .replace(/Scene\s+\d+\s*:/gi, ' ')
-    .replace(/style,?\s+high detail,?\s+cinematic composition\.?/gi, ' ')
-    .replace(/\b(?:hook|setup|build-up|twist|climax|reveal|payoff|takeaway)\s*:/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 180) || 'cinematic';
+function cleanStockQuery(prompt, maxWords = 4) {
+  const stop = new Set([
+    'cartoon', 'style', 'illustration', 'single', 'coherent', 'scene', 'one', 'no', 'collage',
+    'panels', 'text', 'high', 'detail', 'cinematic', 'composition', 'bright', 'colorful',
+    'vibrant', 'background', 'with', 'and', 'the', 'for', 'from', 'into', 'that',
+    'this', 'small', 'tiny', 'large', 'young', 'age', 'holding', 'standing', 'walking',
+    'smiling', 'looking', 'warm', 'soft', 'glowing', 'magic', 'magical', 'effect', 'softly',
+    'friendly', 'animated', 'all', '4k', 'hook', 'setup', 'twist', 'climax', 'reveal',
+    'payoff', 'takeaway',
+  ]);
+  const words = String(prompt || '')
+    .toLowerCase()
+    .replace(/scene\s+\d+\s*:/gi, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length > 2 && !stop.has(word));
+  const unique = [];
+  for (const word of words) {
+    if (!unique.includes(word)) unique.push(word);
+  }
+  return unique.slice(0, Math.max(1, Math.min(6, maxWords))).join(' ') || 'cartoon';
+}
+
+function pickStockImages(images, wanted, prompt) {
+  if (!images.length) return [];
+  const span = Math.max(1, images.length - wanted + 1);
+  const hash = createHash('sha1').update(String(prompt || '')).digest();
+  const offset = hash.readUInt32LE(0) % span;
+  return images.slice(offset, offset + wanted);
 }
 
 async function generateStockImages(prompt, count = 1) {
   const wanted = Math.min(20, Math.max(1, Number(count) || 1));
-  const query = cleanStockQuery(prompt);
-  const cacheKey = `${query}|${wanted}`;
-  const cached = stockImageCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < 10 * 60_000) return cached.images.slice(0, wanted);
+  const queries = [...new Set([4, 2, 1].map((size) => cleanStockQuery(prompt, size)))];
+  let lastError = null;
+  for (const query of queries) {
+    const cacheKey = `${query}|${wanted}`;
+    const cached = stockImageCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 10 * 60_000) return pickStockImages(cached.images, wanted, prompt);
 
-  const searchUrl = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}`
-    + `&license=cc0,pdm&page_size=${wanted}&mature=false`;
-  const response = await fetch(searchUrl, {
-    headers: { 'user-agent': 'Nova-AI/1.0 (copyright-free video images)' },
-    signal: AbortSignal.timeout(30_000),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.detail ? `Free stock search failed: ${data.detail}` : `Free stock search failed (${response.status}).`);
-  }
-  const results = Array.isArray(data.results) ? data.results : [];
-  if (!results.length) throw new Error(`"${query}" ke liye koi CC0/public-domain image nahi mili.`);
-
-  const images = [];
-  for (const item of results) {
-    const imageUrl = item.url || item.thumbnail;
-    if (!imageUrl) continue;
+    const searchUrl = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}`
+      + `&license=cc0,pdm&page_size=${Math.max(4, wanted)}&mature=false`;
     try {
-      const imageResponse = await fetch(imageUrl, {
+      const response = await fetch(searchUrl, {
         headers: { 'user-agent': 'Nova-AI/1.0 (copyright-free video images)' },
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(30_000),
       });
-      if (!imageResponse.ok) continue;
-      const bytes = Buffer.from(await imageResponse.arrayBuffer());
-      if (bytes.length < 2048 || bytes.length > 12 * 1024 * 1024) continue;
-      images.push(bytes);
-    } catch {
-      /* try next result */
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        lastError = new Error(data.detail ? `Free stock search failed: ${data.detail}` : `Free stock search failed (${response.status}).`);
+        continue;
+      }
+      const results = Array.isArray(data.results) ? data.results : [];
+      if (!results.length) {
+        lastError = new Error(`"${query}" ke liye koi CC0/public-domain image nahi mili.`);
+        continue;
+      }
+      const images = [];
+      for (const item of results) {
+        const imageUrl = item.url || item.thumbnail;
+        if (!imageUrl) continue;
+        try {
+          const imageResponse = await fetch(imageUrl, {
+            headers: { 'user-agent': 'Nova-AI/1.0 (copyright-free video images)' },
+            signal: AbortSignal.timeout(60_000),
+          });
+          if (!imageResponse.ok) continue;
+          const bytes = Buffer.from(await imageResponse.arrayBuffer());
+          if (bytes.length < 2048 || bytes.length > 12 * 1024 * 1024) continue;
+          images.push(bytes);
+        } catch {
+          /* try next result */
+        }
+      }
+      if (!images.length) {
+        lastError = new Error('Free stock images download nahi hui.');
+        continue;
+      }
+      stockImageCache.set(cacheKey, { ts: Date.now(), images });
+      if (stockImageCache.size > 20) stockImageCache.delete(stockImageCache.keys().next().value);
+      return pickStockImages(images, wanted, prompt);
+    } catch (error) {
+      lastError = error;
     }
   }
-  if (!images.length) throw new Error('Free stock images download nahi hui.');
-  stockImageCache.set(cacheKey, { ts: Date.now(), images });
-  if (stockImageCache.size > 20) stockImageCache.delete(stockImageCache.keys().next().value);
-  return images.slice(0, wanted);
+  throw lastError || new Error('Free stock images unavailable.');
 }
 
 async function fetchImageResult(prompt, model, provider, ratio) {
@@ -930,27 +1110,51 @@ function validImageBytes(bytes) {
 
 async function collectJobImages(job, captions) {
   const provider = job.imageProvider || DEFAULT_IMAGE_PROVIDER;
-  const batchSize = provider === 'bing' || provider === 'auto' ? 4 : 1;
+  const prompts = Array.isArray(job.imagePrompts) && job.imagePrompts.length ? job.imagePrompts : captions;
   const pool = [];
-  for (let index = 0; index < job.sceneCount; index += batchSize) {
-    const parts = captions.slice(index, index + batchSize);
-    const batchPrompt = `${job.prompt}. ${parts.map((line, offset) =>
-      `Scene ${index + offset + 1}: ${line}`).join(' | ')}. ${job.style} style, high detail, cinematic composition.`;
-    try {
-      const result = provider === 'auto'
-        ? await generateImageSmart(batchPrompt, {
-          model: job.imageModel,
-          ratio: job.ratio,
-        })
-        : await fetchImageResult(batchPrompt, job.imageModel, provider, job.ratio);
-      for (const bytes of result.images || []) {
-        if (validImageBytes(bytes)) pool.push(bytes);
-      }
-    } catch {
-      /* next batch still gets a chance */
+  const usedHashes = new Set();
+  const pickUnique = (images) => {
+    for (const bytes of images || []) {
+      if (!validImageBytes(bytes)) continue;
+      const hash = createHash('sha1').update(bytes).digest('hex');
+      if (usedHashes.has(hash)) continue;
+      usedHashes.add(hash);
+      return bytes;
     }
+    return null;
+  };
+  const requestUnique = async (text) => {
+    const result = provider === 'auto'
+      ? await generateImageSmart(text, { model: job.imageModel, ratio: job.ratio })
+      : await fetchImageResult(text, job.imageModel, provider, job.ratio);
+    return pickUnique(result.images || []);
+  };
+  // Har scene ka apna prompt — ek image me multiple scenes/collage nahi banne dete.
+  for (let index = 0; index < job.sceneCount; index += 1) {
+    const scenePrompt = String(prompts[index] || captions[index] || job.prompt || `Scene ${index + 1}`).trim();
+    const fullPrompt = `${scenePrompt}. ${job.style ? `${job.style} style, ` : ''}single coherent scene, one illustration, no collage, no panels, no text.`;
+    let chosen = null;
+    try {
+      chosen = await requestUnique(fullPrompt);
+    } catch {
+      // Detailed query fail ho to same scene ki chhoti, cohesive description se dobara try karein.
+      try {
+        const firstSentence = scenePrompt.split(/(?<=[.!?।])\s+/)[0] || scenePrompt;
+        const retryText = provider === 'stock'
+          ? cleanStockQuery(scenePrompt, 1)
+          : `${firstSentence.slice(0, 160)}. single coherent scene, one illustration, no collage, no panels, no text.`;
+        chosen = await requestUnique(retryText);
+      } catch {
+        chosen = null;
+      }
+    }
+    pool.push(chosen || null);
+    await updateMediaJob(job, {
+      step: `${job.imageProvider === 'stock' ? 'Stock' : 'Bing'} se scene ${index + 1}/${job.sceneCount} ki image check ho gayi…`,
+      progress: 10 + Math.round(((index + 1) / Math.max(1, job.sceneCount)) * 55),
+    });
   }
-  return pool;
+  return pool.filter(Boolean);
 }
 
 async function generateVideoSmart(prompt, options = {}) {
@@ -996,10 +1200,11 @@ async function fetchMediaBytesWithRetry(job, kind, prompt, model, duration, prov
 
 async function createMediaJob(payload = {}) {
   const id = `mj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const prompt = String(payload.prompt || '').trim().slice(0, 1200);
-  if (!prompt) throw new Error('Prompt is required.');
-
+  const fullPrompt = String(payload.prompt || '').trim();
   const type = ['story', 'song', 'meme', 'cartoon'].includes(payload.type) ? payload.type : 'story';
+  // Storyboard (table + per-scene image prompts) 1200 chars me nahi aata — use 20k for stories.
+  const prompt = fullPrompt.slice(0, type === 'story' ? 20_000 : 1200);
+  if (!prompt) throw new Error('Prompt is required.');
   const ratio = payload.ratio === '9:16' ? '9:16' : '16:9';
   const style = String(payload.style || inferMediaStyle(prompt, type)).slice(0, 60);
   const fx = (Array.isArray(payload.fx) ? payload.fx : String(payload.fx || '').split(','))
@@ -1020,17 +1225,21 @@ async function createMediaJob(payload = {}) {
   }
 
   const audioDuration = audioPath ? await probeAudioDuration(audioPath) : 0;
+  const storyboard = type === 'story' ? parseStoryboard(prompt) : null;
   const requestedDuration = Number(payload.durationSeconds) || 0;
-  // Song upload hone par video ki length MP3 ki actual length ho — user 3 ya 5 min bole to wahi banega.
+  // Storyboard me likha time/scene count user ka asli instruction hai — settings ko override karta hai.
   const durationSeconds = Math.min(900, Math.max(15,
-    audioDuration > 0 ? Math.round(audioDuration) : requestedDuration || 60,
+    audioDuration > 0
+      ? Math.round(audioDuration)
+      : storyboard?.durationSeconds || requestedDuration || 60,
   ));
   const rawRequestedScenes = Number(payload.sceneCount) || 0;
   // Purane settings me 6 scenes saved ho to 3/5 min ke video me ignore karo — auto count lagao.
-  const requestedScenes = rawRequestedScenes > 0 && rawRequestedScenes < 20
+  let requestedScenes = rawRequestedScenes > 0 && rawRequestedScenes < 20
     && (audioPath || durationSeconds >= 120 || type === 'song')
     ? 0
     : rawRequestedScenes;
+  if (storyboard?.sceneCount > 0) requestedScenes = storyboard.sceneCount;
   const sceneCount = sceneCountForDuration(durationSeconds, 0, requestedScenes);
 
   const job = {
@@ -1047,6 +1256,11 @@ async function createMediaJob(payload = {}) {
     clipSeconds: Math.min(10, Math.max(2, Number(payload.clipSeconds) || 5)),
     audioPath,
     lyrics: String(payload.lyrics || '').slice(0, 12_000),
+    imagePrompts: storyboard?.imagePrompts || [],
+    storyboardLines: storyboard?.narrationLines || [],
+    storyboardTitles: storyboard?.titles || [],
+    storyboardStarts: storyboard?.sceneStarts || [],
+    storyboardEnds: storyboard?.sceneEnds || [],
     narration: payload.narration !== false,
     voice: String(payload.voice || '').slice(0, 120),
     analysis: null,
@@ -1110,34 +1324,49 @@ async function runMediaJob(job) {
       }
     }
 
+    const creds = mediaTtsCredentials.get(job.id) || {};
     await updateMediaJob(job, {
       step: 'Story script likhi ja rahi hai — pehle kahani, phir usi ki audio…',
       progress: 10,
     });
-    const captions = buildStoryScript(job, splitCaptions(job.prompt, job.sceneCount));
+    let captions = splitCaptions(job.prompt, job.sceneCount);
+    if (job.type === 'story') {
+      if (Array.isArray(job.storyboardLines) && job.storyboardLines.length >= 2) {
+        captions = job.storyboardLines.slice(0, job.sceneCount);
+        await updateMediaJob(job, { step: `Storyboard ke ${captions.length} scenes mil gaye — unhi par voice aur images…`, progress: 66 });
+      } else {
+        try {
+          captions = await generateStoryScriptWithModel(job, creds, captions);
+          await updateMediaJob(job, { step: 'Asli story likhi gayi — ab usi par natural voice…', progress: 66 });
+        } catch (err) {
+          captions = buildStoryScript(job, captions);
+          await updateMediaJob(job, { step: `Story model unavailable (${String(err.message || err).slice(0, 90)}) — local script use kar rahe hain…`, progress: 66 });
+        }
+      }
+    } else {
+      captions = buildStoryScript(job, captions);
+    }
+    const narrationText = captions.map((line) => String(line).trim().replace(/[.!?।]+$/, '')).filter(Boolean).join('. ') + '.';
     const storyFile = path.join(directory, 'story.txt');
     await writeFile(storyFile, captions.map((line, index) => `${index + 1}. ${line}`).join('\n'), 'utf8');
     await updateMediaJob(job, {
       storyFile: `media-jobs/${job.id}/story.txt`,
+      storyText: captions.join('\n'),
       step: `Story ready — ${captions.length} scenes. Ab audio model se voice ban raha hai…`,
       progress: 68,
     });
 
-    let imagePool = [];
-    if (job.imageProvider === 'stock') {
-      await updateMediaJob(job, {
-        step: 'Copyright-free stock images dhoondh rahe hain (Openverse CC0/PDM)…',
-        progress: 9,
-      });
-      const stockImages = await generateStockImages(job.prompt, job.sceneCount);
-      imagePool = stockImages.filter(validImageBytes);
-    } else {
-      await updateMediaJob(job, {
-        step: 'Bing batch se 4-4 images ready kar rahe hain — har image check ho rahi hai…',
-        progress: 9,
-      });
-      imagePool = await collectJobImages(job, captions);
-    }
+    const sceneImagePrompts = Array.isArray(job.imagePrompts) && job.imagePrompts.length
+      ? job.imagePrompts
+      : captions;
+    await updateMediaJob(job, {
+      step: job.imageProvider === 'stock'
+        ? 'Har scene ke liye alag copyright-free stock image dhoondh rahe hain (Openverse CC0/PDM)…'
+        : 'Bing se har scene ki alag image ready kar rahe hain — har image check ho rahi hai…',
+      progress: 9,
+    });
+    // Ek image me multiple scenes/collage nahi: har scene ka apna prompt aur apni image.
+    const imagePool = await collectJobImages(job, sceneImagePrompts);
     if (!imagePool.length) throw new Error('Video ke liye koi valid image nahi mili. Provider change karke dobara try karein.');
     await updateMediaJob(job, {
       imagePoolCount: imagePool.length,
@@ -1150,6 +1379,7 @@ async function runMediaJob(job) {
       if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
       const scene = job.scenes[index] || { index: index + 1, caption: captions[index] || `Scene ${index + 1}` };
       scene.caption = captions[index] || scene.caption;
+      if (job.imagePrompts?.[index]) scene.imagePrompt = job.imagePrompts[index];
       if (!scene.image) {
         await updateMediaJob(job, {
           step: `Scene ${index + 1}/${job.sceneCount}: ${job.style} image ban rahi hai…`,
@@ -1192,28 +1422,29 @@ async function runMediaJob(job) {
     if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
     let narrationPath = null;
     let ambientPath = null;
-    const creds = mediaTtsCredentials.get(job.id) || {};
     if (job.narration && !audioPath) {
-      await updateMediaJob(job, { step: 'AI audio model se narration ban raha hai…', progress: 72 });
+      await updateMediaJob(job, { step: 'Natural AI voice se har scene ki story line uske time par boli ja rahi hai…', progress: 72 });
       try {
-        narrationPath = await synthesizeAiNarration(
-          captions.join('. '),
+        narrationPath = await buildTimedNarration(
+          captions,
+          job.storyboardStarts,
+          job.storyboardEnds,
+          job.durationSeconds,
           job.voice,
-          path.join(directory, 'narration.wav'),
-          creds.key,
-          creds.baseUrl,
+          creds,
+          directory,
         );
-        await updateMediaJob(job, { step: 'Pro AI voice ready — ab composition…', progress: 73 });
-      } catch {
-        await updateMediaJob(job, { step: 'AI voice unavailable — local film voice se banana…', progress: 72 });
+        await updateMediaJob(job, { step: 'Pro natural voice ready — story scene ke saath sync hai…', progress: 73 });
+      } catch (err) {
+        await updateMediaJob(job, { step: `AI voice unavailable (${String(err.message || err).slice(0, 90)}) — local film voice se banana…`, progress: 72 });
         try {
           narrationPath = await synthesizeNarration(
-            captions.join('. '),
-            job.voice,
+            narrationText,
+            localVoiceName(job.voice),
             path.join(directory, 'narration.wav'),
           );
-        } catch (err) {
-          await updateMediaJob(job, { step: `Voice skip: ${String(err.message || err).slice(0, 120)}` });
+        } catch (voiceErr) {
+          await updateMediaJob(job, { step: `Voice skip: ${String(voiceErr.message || voiceErr).slice(0, 120)}` });
         }
       }
     }
@@ -1222,6 +1453,7 @@ async function runMediaJob(job) {
         ambientPath = await generateAmbientBed(
           path.join(directory, 'ambient.wav'),
           job.durationSeconds,
+          { boundaries: captions.length || job.sceneCount || 1 },
         );
       } catch (err) {
         await updateMediaJob(job, { step: `Ambient skip: ${String(err.message || err).slice(0, 100)}` });
@@ -2441,7 +2673,7 @@ async function ensureCookieBrowser() {
     [
       '--headless=new',
       `--remote-debugging-port=${COOKIE_CDP_PORT}`,
-      `--user-data-dir="${BROWSER_PROFILE}"`,
+      `--user-data-dir=${BROWSER_PROFILE}`,
       '--no-first-run',
       '--no-default-browser-check',
       'about:blank',
@@ -3422,6 +3654,7 @@ function mediaProviderState() {
       bing: Boolean(BING_SUPPORTED || bingCookie),
       cloudflare: Boolean(cloudflareAccount && cloudflareToken),
       huggingface: Boolean(hfToken),
+      geminiTts: Boolean(geminiToken),
       stock: true,
       imageWorker: imageWorkerConnected(),
     },
@@ -3489,6 +3722,7 @@ async function handleMediaCredentials(req, res) {
     }
     if (!kind || kind === 'pollinations') mediaKey = '';
     if (!kind || kind === 'huggingface') hfToken = '';
+    if (!kind || kind === 'gemini') geminiToken = '';
     if (!kind || kind === 'bing') {
       bingCookie = '';
       await rm(BING_COOKIE_FILE, { force: true }).catch(() => {});
@@ -3501,6 +3735,7 @@ async function handleMediaCredentials(req, res) {
   if (body.cloudflareAccount) cloudflareAccount = String(body.cloudflareAccount).trim().slice(0, 120);
   if (body.cloudflareToken) cloudflareToken = String(body.cloudflareToken).trim().slice(0, 300);
   if (body.hfToken) hfToken = String(body.hfToken).trim().slice(0, 300);
+  if (body.geminiToken) geminiToken = String(body.geminiToken).trim().slice(0, 300);
   if (body.key) mediaKey = String(body.key).trim().slice(0, 300);
   return sendJson(res, 200, { ok: true, ...mediaProviderState() });
 }
@@ -4870,49 +5105,584 @@ async function analyzeSongAudio(inputPath) {
   }
 }
 
-async function synthesizeAiNarration(text, voice, outPath, key, baseUrl) {
-  if (!key || !baseUrl) throw new Error('AI voice key unavailable.');
-  const model = process.env.TTS_MODEL || 'tts-1';
-  const response = await fetch(`${baseUrl}/audio/speech`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${key}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      voice: voice || 'alloy',
-      input: String(text).slice(0, 4096),
-      response_format: 'wav',
-    }),
-    signal: AbortSignal.timeout(180_000),
-  });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(`AI voice failed (${response.status}): ${detail.slice(0, 200)}`);
+const VOICE_PRESETS = {
+  auto: { gemini: 'Kore', openai: 'alloy', sapi: 'Microsoft Hazel Desktop' },
+  male: { gemini: 'Charon', openai: 'onyx', sapi: 'Microsoft David Desktop' },
+  deep: { gemini: 'Charon', openai: 'onyx', sapi: 'Microsoft David Desktop' },
+  female: { gemini: 'Kore', openai: 'nova', sapi: 'Microsoft Hazel Desktop' },
+  warm: { gemini: 'Aoede', openai: 'shimmer', sapi: 'Microsoft Hazel Desktop' },
+  child: { gemini: 'Puck', openai: 'alloy', sapi: 'Microsoft Zira Desktop' },
+  bright: { gemini: 'Galaxy', openai: 'alloy', sapi: 'Microsoft Zira Desktop' },
+};
+
+function resolveVoicePreset(rawVoice) {
+  const value = String(rawVoice || '').trim();
+  const match = /^(gemini|openai|sapi):(.+)$/i.exec(value);
+  if (match) {
+    const provider = match[1].toLowerCase();
+    const name = match[2].trim();
+    return {
+      provider,
+      name,
+      gemini: provider === 'gemini' ? name : VOICE_PRESETS.auto.gemini,
+      openai: provider === 'openai' ? name : VOICE_PRESETS.auto.openai,
+      sapi: provider === 'sapi' ? name : VOICE_PRESETS.auto.sapi,
+    };
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length < 1000) throw new Error('AI voice audio khaali hai.');
-  await writeFile(outPath, bytes);
+  const key = value.toLowerCase();
+  if (/child|kid|bacha|bachcha/.test(key)) return { provider: 'auto', ...VOICE_PRESETS.child };
+  if (/deep|dark|heavy/.test(key)) return { provider: 'auto', ...VOICE_PRESETS.deep };
+  if (/male|mard|husband/.test(key)) return { provider: 'auto', ...VOICE_PRESETS.male };
+  if (/warm|soft|calm/.test(key)) return { provider: 'auto', ...VOICE_PRESETS.warm };
+  if (/female|women|woman|girl/.test(key)) return { provider: 'auto', ...VOICE_PRESETS.female };
+  if (VOICE_PRESETS[key]) return { provider: 'auto', ...VOICE_PRESETS[key] };
+  return { provider: 'auto', ...VOICE_PRESETS.auto, sapi: value || VOICE_PRESETS.auto.sapi };
+}
+
+function localVoiceName(rawVoice) {
+  return resolveVoicePreset(rawVoice).sapi;
+}
+
+/* Microsoft Edge neural TTS — free, no API key, natural male/female voices.
+   Science: signed Sec-MS-GEC v2 token + raw TLS WebSocket read-aloud protocol. */
+const EDGE_TTS_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
+const EDGE_TTS_HOST = 'speech.platform.bing.com';
+const EDGE_TTS_PATH = '/consumer/speech/synthesize/readaloud/edge/v1';
+const EDGE_CHROMIUM_VERSION = '143.0.3650.75';
+const EDGE_OUTPUT_FORMAT = 'audio-24khz-48kbitrate-mono-mp3';
+const EDGE_TOKEN_PREFIX = 'Copyright (C) Microsoft Corporation. All rights reserved.';
+const EDGE_WINDOWS_EPOCH_S = 11644473600n;
+
+function edgeRol16(value) {
+  return ((value << 16) | (value >>> 16)) >>> 0;
+}
+
+function edgeSwapTerm(word, key, [a, b, c]) {
+  const sum = Math.imul(word, key) + Math.imul(edgeRol16(word), a);
+  const product = Math.imul(edgeRol16(sum), b) >>> 0;
+  return (Math.imul(edgeRol16(product), c) + product) >>> 0;
+}
+
+function edgeMixTerm(value, multipliers) {
+  let result = value;
+  for (const multiplier of multipliers) result = Math.imul(edgeRol16(result), multiplier) >>> 0;
+  return result;
+}
+
+function edgeChecksum(message, digest) {
+  const firstKey = (digest.readUInt32LE(0) | 1) >>> 0;
+  const secondKey = (digest.readUInt32LE(4) | 1) >>> 0;
+  const padded = Buffer.alloc(Math.ceil(message.length / 8) * 8);
+  padded.set(message);
+  let swapSum = 0;
+  let lastSwap = 0;
+  let mix = 0;
+  let mixSum = 0;
+  for (let offset = 0; offset < padded.length; offset += 8) {
+    const word1 = padded.readUInt32LE(offset);
+    const word2 = padded.readUInt32LE(offset + 4);
+    const swap = edgeSwapTerm(word1, firstKey, [0xef0569fb, 0x76f50f34, 0xc3efea97]);
+    lastSwap = edgeSwapTerm(word2, secondKey, [0xc31713db, 0x1881ce3c, 0x35bd1ec9]);
+    swapSum = (swapSum + swap + lastSwap) >>> 0;
+    mix = edgeMixTerm(Math.imul(mix + word1, firstKey), [0xcf98b111, 0x87085b9f, 0x12ceb96d, 0x257e1d83]);
+    mixSum = (mixSum + mix) >>> 0;
+    mix = edgeMixTerm(Math.imul(mix + word2, secondKey), [0xa27416f5, 0xd38396ff, 0x7c932b89, 0xbfa49f69]);
+    mixSum = (mixSum + mix) >>> 0;
+  }
+  const out = Buffer.alloc(8);
+  out.writeUInt32LE((lastSwap ^ mix) >>> 0, 0);
+  out.writeUInt32LE((swapSum ^ mixSum) >>> 0, 4);
+  return out;
+}
+
+function edgeSecMsGec(now = new Date()) {
+  const seconds = BigInt(Math.floor(now.getTime() / 1000)) + EDGE_WINDOWS_EPOCH_S;
+  const ticks = (seconds - (seconds % 300n)) * 10_000_000n;
+  const message = Buffer.from(`${EDGE_TOKEN_PREFIX}${ticks}${EDGE_TTS_TOKEN}`, 'ascii');
+  const digest = createHash('sha256').update(message).digest();
+  return `${edgeChecksum(message, digest).toString('hex')}-${digest.toString('hex')}`.toUpperCase();
+}
+
+function edgeFrame(headers, body) {
+  const lines = Object.entries({ 'X-Timestamp': new Date().toISOString(), ...headers })
+    .map(([key, value]) => `${key}:${value}`);
+  return `${lines.join('\r\n')}\r\n\r\n${body}`;
+}
+
+function edgeEscapeXml(text) {
+  return String(text).replace(/[<>&'"]/g, (char) => ({
+    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;',
+  })[char]);
+}
+
+function edgeClientFrame(opcode, payload) {
+  const data = Buffer.from(payload);
+  const mask = randomBytes(4);
+  const length = data.length;
+  let head;
+  if (length < 126) {
+    head = Buffer.alloc(2);
+    head[1] = 0x80 | length;
+  } else if (length < 65536) {
+    head = Buffer.alloc(4);
+    head[1] = 0x80 | 126;
+    head.writeUInt16BE(length, 2);
+  } else {
+    head = Buffer.alloc(10);
+    head[1] = 0x80 | 127;
+    head.writeBigUInt64BE(BigInt(length), 2);
+  }
+  head[0] = 0x80 | opcode;
+  const masked = Buffer.alloc(length);
+  for (let index = 0; index < length; index += 1) masked[index] = data[index] ^ mask[index % 4];
+  return Buffer.concat([head, mask, masked]);
+}
+
+function edgeParseFrames(buffer) {
+  const frames = [];
+  let offset = 0;
+  while (offset + 2 <= buffer.length) {
+    const opcode = buffer[offset] & 0x0f;
+    const fin = Boolean(buffer[offset] & 0x80);
+    const masked = Boolean(buffer[offset + 1] & 0x80);
+    let length = buffer[offset + 1] & 0x7f;
+    let cursor = offset + 2;
+    if (length === 126) {
+      if (cursor + 2 > buffer.length) break;
+      length = buffer.readUInt16BE(cursor);
+      cursor += 2;
+    } else if (length === 127) {
+      if (cursor + 8 > buffer.length) break;
+      length = Number(buffer.readBigUInt64BE(cursor));
+      cursor += 8;
+    }
+    let mask = null;
+    if (masked) {
+      if (cursor + 4 > buffer.length) break;
+      mask = buffer.subarray(cursor, cursor + 4);
+      cursor += 4;
+    }
+    if (cursor + length > buffer.length) break;
+    const payload = Buffer.from(buffer.subarray(cursor, cursor + length));
+    if (mask) {
+      for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4];
+    }
+    frames.push({ opcode, fin, payload });
+    offset = cursor + length;
+  }
+  return { frames, rest: buffer.subarray(offset) };
+}
+
+function edgeVoiceFor(rawVoice, text) {
+  const preset = resolveVoicePreset(rawVoice);
+  const voiceName = String(preset.gemini || '').toLowerCase();
+  const devanagari = (String(text).match(/[\u0900-\u097F]/g) || []).length;
+  const hindi = devanagari >= 8;
+  const child = /puck|galaxy|child|bright/.test(voiceName);
+  const male = /charon|deep|male/.test(voiceName);
+  if (hindi) {
+    return {
+      name: male ? 'hi-IN-MadhurNeural' : 'hi-IN-SwaraNeural',
+      pitch: child ? '+28Hz' : '+0Hz',
+      rate: child ? '+5%' : '+2%',
+      volume: '+8%',
+      language: 'hi-IN',
+    };
+  }
+  return {
+    name: male ? 'en-US-GuyNeural' : (child ? 'en-US-JennyNeural' : 'en-US-AriaNeural'),
+    pitch: child ? '+24Hz' : '+0Hz',
+    rate: child ? '+5%' : '+1%',
+    volume: '+6%',
+    language: 'en-US',
+  };
+}
+
+function edgeTextChunks(text, maxLength = 1200) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+  const sentences = clean.split(/(?<=[.!?।])\s+/);
+  const grouped = [];
+  let current = '';
+  for (const sentence of sentences) {
+    const candidate = current ? `${current} ${sentence}` : sentence;
+    if (current && candidate.length > maxLength) {
+      grouped.push(current);
+      current = sentence;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) grouped.push(current);
+  const chunks = [];
+  for (const group of grouped) {
+    if (group.length <= maxLength) {
+      chunks.push(group);
+      continue;
+    }
+    for (let index = 0; index < group.length; index += maxLength) {
+      chunks.push(group.slice(index, index + maxLength));
+    }
+  }
+  return chunks;
+}
+
+async function edgeSpeakChunk(text, style) {
+  const connectionId = randomUUID().replace(/-/g, '');
+  const query = new URLSearchParams({
+    TrustedClientToken: EDGE_TTS_TOKEN,
+    ConnectionId: connectionId,
+    'Sec-MS-GEC': edgeSecMsGec(),
+    'Sec-MS-GEC-Version': `2-${EDGE_CHROMIUM_VERSION}`,
+  });
+  const key = randomBytes(16).toString('base64');
+  const major = EDGE_CHROMIUM_VERSION.split('.')[0];
+  const requestHeaders = [
+    `GET ${EDGE_TTS_PATH}?${query} HTTP/1.1`,
+    `Host: ${EDGE_TTS_HOST}`,
+    'Upgrade: websocket',
+    'Connection: Upgrade',
+    `Sec-WebSocket-Key: ${key}`,
+    'Sec-WebSocket-Version: 13',
+    'Pragma: no-cache',
+    'Cache-Control: no-cache',
+    'Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
+    `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36 Edg/${major}.0.0.0`,
+    'Accept-Encoding: gzip, deflate, br, zstd',
+    'Accept-Language: en-US,en;q=0.9',
+    '', '',
+  ];
+  const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${style.language}'>`
+    + `<voice name='${style.name}'><prosody pitch='${style.pitch}' rate='${style.rate}' volume='${style.volume}'>`
+    + `${edgeEscapeXml(text)}</prosody></voice></speak>`;
+
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({ host: EDGE_TTS_HOST, port: 443, servername: EDGE_TTS_HOST }, () => {
+      socket.write(requestHeaders.join('\r\n'));
+      socket.write(edgeClientFrame(1, edgeFrame(
+        { 'Content-Type': 'application/json; charset=utf-8', Path: 'speech.config' },
+        JSON.stringify({
+          context: {
+            synthesis: {
+              audio: {
+                metadataoptions: { sentenceBoundaryEnabled: false, wordBoundaryEnabled: false },
+                outputFormat: EDGE_OUTPUT_FORMAT,
+              },
+            },
+          },
+        }),
+      )));
+      socket.write(edgeClientFrame(1, edgeFrame(
+        { 'X-RequestId': connectionId, 'Content-Type': 'application/ssml+xml', Path: 'ssml' },
+        ssml,
+      )));
+    });
+    let headerDone = false;
+    let buffer = Buffer.alloc(0);
+    const chunks = [];
+    let settled = false;
+    const finish = (error, data) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error);
+      else if (!chunks.length) reject(new Error('Edge neural voice ne audio nahi diya.'));
+      else resolve(Buffer.concat(chunks));
+    };
+    const timer = setTimeout(() => finish(new Error('Edge neural voice timeout.')), 120_000);
+    socket.on('error', (error) => finish(error));
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (!headerDone) {
+        const marker = buffer.indexOf('\r\n\r\n');
+        if (marker === -1) return;
+        const head = buffer.subarray(0, marker).toString();
+        const status = Number(/HTTP\/1\.[01]\s+(\d+)/.exec(head)?.[1] || 0);
+        if (status !== 101) {
+          finish(new Error(`Edge neural voice handshake failed (${status}).`));
+          return;
+        }
+        buffer = buffer.subarray(marker + 4);
+        headerDone = true;
+      }
+      const parsed = edgeParseFrames(buffer);
+      buffer = parsed.rest;
+      for (const frame of parsed.frames) {
+        if (frame.opcode === 1) {
+          if (frame.payload.toString().includes('Path:turn.end')) finish(null, null);
+        } else if (frame.opcode === 2 && frame.payload.length >= 4) {
+          const headerLength = frame.payload.readUInt16BE(0);
+          const headerText = frame.payload.subarray(2, 2 + headerLength).toString();
+          if (headerText.includes('Path:audio')) chunks.push(frame.payload.subarray(2 + headerLength));
+        }
+      }
+    });
+  });
+}
+
+async function synthesizeEdgeNarration(text, rawVoice, outPath) {
+  const chunks = edgeTextChunks(text);
+  if (!chunks.length) throw new Error('Narration text khaali hai.');
+  const style = edgeVoiceFor(rawVoice, text);
+  const pieces = [];
+  for (const chunk of chunks) pieces.push(await edgeSpeakChunk(chunk, style));
+  const audio = Buffer.concat(pieces);
+  if (audio.length < 2000) throw new Error('Edge neural voice audio khaali hai.');
+  await writeFile(outPath, audio);
   return outPath;
 }
 
-async function generateAmbientBed(outPath, durationSeconds) {
+function writePcmWav(outPath, pcm, sampleRate) {
+  const rate = Math.min(96000, Math.max(8000, Number(sampleRate) || 24000));
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(rate, 24);
+  header.writeUInt32LE(rate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return writeFile(outPath, Buffer.concat([header, pcm]));
+}
+
+async function synthesizeGeminiNarration(text, voice, outPath, key) {
+  if (!key) throw new Error('Gemini TTS key unavailable.');
+  const model = process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts';
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: String(text).slice(0, 14_000) }] }],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || 'Kore' } },
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(180_000),
+    },
+  );
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Gemini TTS failed (${response.status}): ${detail.slice(0, 200)}`);
+  }
+  const payload = await response.json();
+  const parts = payload?.candidates?.[0]?.content?.parts || [];
+  const part = parts.find((item) => item?.inlineData?.data || item?.audio?.data);
+  const base64 = part?.inlineData?.data || part?.audio?.data;
+  if (!base64) throw new Error('Gemini TTS ne audio return nahi ki.');
+  const pcm = Buffer.from(base64, 'base64');
+  if (pcm.length < 1000) throw new Error('Gemini TTS audio khaali hai.');
+  const mime = String(part?.inlineData?.mimeType || part?.audio?.mimeType || 'audio/pcm;rate=24000');
+  const rate = Number(/rate=(\d+)/i.exec(mime)?.[1]) || 24000;
+  await writePcmWav(outPath, pcm, rate);
+  return outPath;
+}
+
+async function synthesizeAiNarration(text, voice, outPath, key, baseUrl) {
+  if (!key || !baseUrl) throw new Error('AI voice key unavailable.');
+  const base = String(baseUrl).replace(/\/+$/, '');
+  const configured = String(process.env.TTS_MODEL || '').trim();
+  const models = configured ? [configured] : ['gpt-4o-mini-tts', 'tts-1'];
+  let lastError = null;
+  for (const model of models) {
+    try {
+      const body = {
+        model,
+        voice: voice || 'alloy',
+        input: String(text).slice(0, 4096),
+        response_format: 'wav',
+      };
+      if (/gpt-4o|mini-tts/i.test(model)) {
+        body.instructions = 'Speak naturally like a warm documentary narrator: clear pacing, gentle emotion, no robotic tone.';
+      }
+      const response = await fetch(`${base}/audio/speech`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${key}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(180_000),
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        lastError = new Error(`AI voice failed (${response.status}): ${detail.slice(0, 200)}`);
+        continue;
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length < 1000) {
+        lastError = new Error('AI voice audio khaali hai.');
+        continue;
+      }
+      await writeFile(outPath, bytes);
+      return outPath;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('AI voice unavailable.');
+}
+
+async function synthesizeNaturalNarration(text, voice, outPath, creds) {
+  const preset = resolveVoicePreset(voice);
+  // 1) Google Gemini TTS (jab user ne free key di ho) — sabse natural.
+  if (geminiToken) {
+    try {
+      return await synthesizeGeminiNarration(text, preset.gemini, outPath, geminiToken);
+    } catch {
+      // Key invalid ya model unavailable — niche wale free neural voice par chalein.
+    }
+  }
+  // 2) Microsoft Edge neural voice — bina key ke, male/female/child, Hindi support.
+  try {
+    return await synthesizeEdgeNarration(text, voice, outPath);
+  } catch {
+    // Network block ho to OpenAI-compatible / SAPI fallback.
+  }
+  return synthesizeAiNarration(text, preset.openai, outPath, creds?.key, creds?.baseUrl);
+}
+
+// FFmpeg atempo 0.5–2.0 support karta hai; chhoti line ko poorre scene me slow karne ke liye chain.
+function tempoChain(factor) {
+  const target = Math.max(0.2, Math.min(4, Number(factor) || 1));
+  const parts = [];
+  let remaining = target;
+  while (remaining < 0.5) {
+    parts.push(0.5);
+    remaining /= 0.5;
+  }
+  while (remaining > 2) {
+    parts.push(2);
+    remaining /= 2;
+  }
+  parts.push(remaining);
+  return `${parts.map((value) => `atempo=${value.toFixed(4)}`).join(',')},`;
+}
+
+// Storyboard ke har scene ki line us scene ke time par boli jaye — prompt nahi, aur 5 min me poori story.
+async function buildTimedNarration(lines, starts, ends, durationSeconds, voice, creds, directory) {
   const bin = await ffmpegExecutable('ffmpeg');
   if (!bin) throw new Error('FFmpeg unavailable.');
-  const target = Math.min(900, Math.max(5, durationSeconds || 30));
-  const fadeOut = Math.max(0, target - 2);
+  const target = Math.min(900, Math.max(5, Math.round(durationSeconds || 30)));
+  const inputs = [];
+  const filters = [];
+  const labels = [];
+  const list = Array.isArray(lines) ? lines.map((line) => String(line || '').trim()).filter(Boolean) : [];
+  if (!list.length) throw new Error('Narration ke liye story lines nahi mili.');
+  for (let index = 0; index < list.length; index += 1) {
+    const rawStart = Number(starts?.[index]);
+    const start = Number.isFinite(rawStart) ? rawStart : (index * target) / list.length;
+    const at = Math.max(0, Math.min(target - 1, start + 0.5));
+    const rawEnd = Number(ends?.[index]);
+    const fallbackEnd = ((index + 1) * target) / list.length;
+    const end = Number.isFinite(rawEnd) && rawEnd > at ? rawEnd : fallbackEnd;
+    const available = Math.max(3, Math.min(target - at, end - at - 0.8));
+    const lineFile = path.join(directory, `voice-line-${String(index + 1).padStart(2, '0')}.mp3`);
+    try {
+      await synthesizeNaturalNarration(list[index], voice, lineFile, creds);
+      // Line chhoti ho to scene ke andar hi slowly stretch karo; lambi ho to thoda speed up.
+      const spoken = await probeAudioDuration(lineFile);
+      let tempo = '';
+      if (spoken > 0 && available > 0) {
+        const factor = Math.max(0.2, Math.min(4, spoken / available));
+        if (Math.abs(factor - 1) > 0.02) tempo = tempoChain(factor);
+      }
+      const delay = Math.round(at * 1000);
+      const label = `line${index}`;
+      inputs.push('-i', lineFile);
+      filters.push(`[${index}:a]${tempo}adelay=${delay},volume=1.05[${label}]`);
+      labels.push(`[${label}]`);
+    } catch {
+      // Ek line fail ho to baaki story chalti rehe.
+    }
+  }
+  if (!labels.length) throw new Error('Koi bhi story line voice me nahi bani.');
+  const outPath = path.join(directory, 'narration.wav');
+  const mix = labels.length === 1
+    ? `[${labels[0].slice(1, -1)}]apad,atrim=0:${target.toFixed(3)}[aout]`
+    : `${labels.join('')}amix=inputs=${labels.length}:duration=longest:dropout_transition=0:normalize=0,`
+      + `apad,atrim=0:${target.toFixed(3)}[aout]`;
   await runCommand(bin, [
     '-y',
-    '-f', 'lavfi', '-i', `sine=frequency=110:duration=${target.toFixed(2)}`,
-    '-f', 'lavfi', '-i', `sine=frequency=164.81:duration=${target.toFixed(2)}`,
-    '-filter_complex',
-    `[0:a]volume=0.5,lowpass=f=500[a];[1:a]volume=0.32,lowpass=f=650[b];`
-    + `[a][b]amix=inputs=2:normalize=0,afade=t=in:st=0:d=2,afade=t=out:st=${fadeOut.toFixed(2)}:d=2[out]`,
-    '-map', '[out]',
+    ...inputs,
+    '-filter_complex', `${filters.join(';')};${mix}`,
+    '-map', '[aout]',
     '-c:a', 'pcm_s16le',
+    '-ar', '24000',
+    '-ac', '1',
     outPath,
-  ], 180_000);
+  ], 300_000);
+  return outPath;
+}
+
+async function generateAmbientBed(outPath, durationSeconds, options = {}) {
+  // Simple sine drone nahi — soft chord pad + arpeggio + shaker + scene-change sparkle FX.
+  const rate = 24000;
+  const target = Math.min(900, Math.max(5, Math.round(durationSeconds || 30)));
+  const boundaries = Math.max(2, Number(options.boundaries) || Math.max(2, Math.round(target / 30)));
+  const boundarySeconds = target / boundaries;
+  const samples = target * rate;
+  const pcm = Buffer.alloc(samples * 2);
+  const chords = [
+    [261.63, 329.63, 392.00, 493.88], // Cmaj7
+    [220.00, 261.63, 329.63, 392.00], // Am7
+    [174.61, 220.00, 261.63, 329.63], // Fmaj7
+    [196.00, 246.94, 293.66, 392.00], // G6
+  ];
+  const chordSeconds = 4;
+  const arpSeconds = 0.5;
+  let seed = 0x2f6e2b1;
+  const random = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  for (let index = 0; index < samples; index += 1) {
+    const time = index / rate;
+    const chordIndex = Math.floor(time / chordSeconds) % chords.length;
+    const chord = chords[chordIndex];
+    const chordPhase = time % chordSeconds;
+    const padEnvelope = Math.min(1, chordPhase / 1.2) * Math.min(1, (chordSeconds - chordPhase) / 0.8);
+    let pad = 0;
+    for (const frequency of chord) {
+      pad += Math.sin(2 * Math.PI * frequency * time) * 0.7;
+      pad += Math.sin(2 * Math.PI * frequency * 2 * time) * 0.08;
+    }
+    pad *= padEnvelope * 0.16;
+
+    const arpIndex = Math.floor(chordPhase / arpSeconds) % chord.length;
+    const arpPhase = (chordPhase % arpSeconds) / arpSeconds;
+    const arpEnvelope = Math.exp(-arpPhase * 5) * Math.min(1, arpPhase * 40);
+    const arp = Math.sin(2 * Math.PI * chord[arpIndex] * 2 * time) * arpEnvelope * 0.09;
+
+    const shakerPhase = time % arpSeconds;
+    const shaker = shakerPhase < 0.07
+      ? (random() * 2 - 1) * Math.exp(-shakerPhase * 45) * 0.028
+      : 0;
+
+    const scenePhase = time % boundarySeconds;
+    let sparkle = 0;
+    if (scenePhase < 1.1) {
+      const envelope = Math.exp(-scenePhase * 3.2) * Math.min(1, scenePhase * 50);
+      sparkle = (Math.sin(2 * Math.PI * 1046.5 * scenePhase)
+        + 0.45 * Math.sin(2 * Math.PI * 1567.98 * scenePhase)) * envelope * 0.065;
+    }
+
+    const fade = Math.min(1, time / 2) * Math.min(1, (target - time) / 2);
+    const value = (pad + arp + shaker + sparkle) * fade;
+    pcm.writeInt16LE(Math.max(-32767, Math.min(32767, Math.round(value * 32767))), index * 2);
+  }
+  await writePcmWav(outPath, pcm, rate);
   const info = await stat(outPath);
   if (info.size < 1000) throw new Error('Ambient audio nahi bana.');
   return outPath;
@@ -5016,10 +5786,15 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
     audioStreams.push(`[${songIndex}:a]volume=0.62,apad=pad_dur=${target.toFixed(3)}[song]`);
   }
   if (voiceIndex !== null) {
-    audioStreams.push(`[${voiceIndex}:a]volume=1.15,apad=pad_dur=${target.toFixed(3)}[voice]`);
+    audioStreams.push(
+      `[${voiceIndex}:a]highpass=f=90,acompressor=threshold=-18dB:ratio=3:attack=10:release=120,`
+      + `volume=1.18,apad=pad_dur=${target.toFixed(3)}[voice]`,
+    );
   }
   if (ambientIndex !== null) {
-    audioStreams.push(`[${ambientIndex}:a]volume=0.22,apad=pad_dur=${target.toFixed(3)}[ambient]`);
+    audioStreams.push(
+      `[${ambientIndex}:a]lowpass=f=5000,volume=0.18,apad=pad_dur=${target.toFixed(3)}[ambient]`,
+    );
   }
   if (silenceIndex !== null) {
     audioStreams.push(`[${silenceIndex}:a]atrim=0:${target.toFixed(3)}[silence]`);
@@ -5033,7 +5808,8 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   if (audioLabels.length > 1) {
     filters.push(
       `${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=first:`
-      + `dropout_transition=1:normalize=0,atrim=0:${target.toFixed(3)}[aout]`,
+      + `dropout_transition=1:normalize=0,acompressor=threshold=-14dB:ratio=2:attack=20:release=250,`
+      + `atrim=0:${target.toFixed(3)}[aout]`,
     );
   } else if (audioLabels.length === 1) {
     filters.push(`${audioLabels[0]}atrim=0:${target.toFixed(3)}[aout]`);
