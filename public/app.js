@@ -1124,8 +1124,8 @@ function renderModes() {
     : settings.modes.imagine
       ? 'Describe the image you want to create'
       : settings.modes.search
-        ? 'Ask anything — Nova will search the web'
-        : 'Ask Nova anything';
+        ? 'Ask anything — web search on'
+        : 'Ask anything';
 }
 
 function renderAttachments() {

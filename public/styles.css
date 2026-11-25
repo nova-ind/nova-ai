@@ -1502,8 +1502,18 @@ svg {
 }
 
 .mode svg {
-  width: 13px;
-  height: 13px;
+  width: 15px;
+  height: 15px;
+}
+
+/* Chat composer stays icon-only; titles/tooltips keep the labels accessible. */
+.mode span {
+  display: none;
+}
+
+.mode {
+  gap: 0;
+  padding: 6px 9px;
 }
 
 .mode:hover {
