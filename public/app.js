@@ -96,6 +96,7 @@ const els = {
   browserLoginBtn: $('browserLoginBtn'),
   bingSyncBtn: $('bingSyncBtn'),
   bingSyncField: $('bingSyncField'),
+  puterLoginBtn: $('puterLoginBtn'),
   toast: $('toast'),
 };
 
@@ -1528,6 +1529,46 @@ async function runAgent(chat) {
   }
 }
 
+let puterLoadPromise = null;
+function loadPuter() {
+  if (window.puter?.ai?.txt2img) return Promise.resolve(window.puter);
+  if (!puterLoadPromise) {
+    puterLoadPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://js.puter.com/v2/';
+      script.async = true;
+      script.onload = () =>
+        window.puter ? resolve(window.puter) : reject(new Error('Puter script load nahi hua.'));
+      script.onerror = () => reject(new Error('Puter script load nahi hua.'));
+      document.head.appendChild(script);
+    });
+  }
+  return puterLoadPromise;
+}
+
+function puterIsSignedIn() {
+  try {
+    return Boolean(window.puter?.auth?.isSignedIn?.());
+  } catch {
+    return false;
+  }
+}
+
+async function generatePuterBrowserImage(prompt, ratio = '16:9') {
+  const puter = await loadPuter();
+  if (!puterIsSignedIn()) {
+    throw new Error('Puter AI ke liye pehle Settings → “Sign in to Puter” dabayein (free account).');
+  }
+  const result = await puter.ai.txt2img(String(prompt || '').slice(0, 2048), {
+    model: 'openai/gpt-image-2.6-flare',
+    quality: 'low',
+    aspect_ratio: ratio === '1:1' || ratio === '9:16' ? ratio : '16:9',
+  });
+  const src = String(result?.src || result || '');
+  if (!/^(blob:|data:|https?:\/\/)/i.test(src)) throw new Error('Puter ne image URL nahi diya.');
+  return src;
+}
+
 const HF_BROWSER_SPACES = [
   'https://black-forest-labs-flux-1-schnell.hf.space',
   'https://evalstate-flux1-schnell.hf.space',
@@ -1662,27 +1703,36 @@ async function generateImage(chat, prompt) {
     `&model=${encodeURIComponent(settings.mediaModels.image || 'flux')}` +
     `&provider=${encodeURIComponent(p)}`;
 
-  // Live site par Bing login sync ho to pehle Bing chalao — HF quota ka intezaar nahi.
-  let bingReady = Boolean(
-    serverConfig.mediaProviders?.image?.some?.((item) => item.id === 'bing' && item.configured),
-  );
-  if (provider === 'auto' && !isLocal && !bingReady) {
+  if (provider === 'puter') {
     try {
-      const response = await fetch('/api/media-providers', { signal: AbortSignal.timeout(5000) });
-      if (response.ok) {
-        const data = await response.json();
-        serverConfig.mediaProviders = data;
-        bingReady = Boolean(data.image?.some((item) => item.id === 'bing' && item.configured));
-      }
-    } catch {
-      /* ignore */
+      assistant.url = await generatePuterBrowserImage(prompt, settings.imageRatio || '16:9');
+      assistant.provider = 'puter';
+      touch(chat);
+      renderMessages();
+      return;
+    } catch (err) {
+      assistant.status = 'error';
+      assistant.error = err.message;
+      touch(chat);
+      renderMessages();
+      return;
     }
   }
-  if (provider === 'auto' && !isLocal && bingReady) {
-    assistant.url = imagineUrl('bing');
-    touch(chat);
-    renderMessages();
-    return;
+
+  // Live site par Puter signed-in ho to pehle wahi chalao — HF quota/Bing captcha se bachat.
+  if (provider === 'auto' && !isLocal) {
+    try {
+      await loadPuter();
+      if (puterIsSignedIn()) {
+        assistant.url = await generatePuterBrowserImage(prompt, settings.imageRatio || '16:9');
+        assistant.provider = 'puter';
+        touch(chat);
+        renderMessages();
+        return;
+      }
+    } catch {
+      /* signed-out ya load fail — HF fallback */
+    }
   }
 
   const tryBrowserHf = provider === 'huggingface' || (provider === 'auto' && !isLocal);
@@ -3409,6 +3459,26 @@ els.bingSyncBtn?.addEventListener('click', async () => {
   }
 });
 
+els.puterLoginBtn?.addEventListener('click', async () => {
+  const button = els.puterLoginBtn;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = 'Opening Puter…';
+  try {
+    await loadPuter();
+    await window.puter.auth.signIn();
+    button.textContent = 'Signed in ✓';
+    toast('Puter sign-in ho gaya. Ab live par images banengi.');
+  } catch (err) {
+    toast(err.message || 'Puter sign-in nahi hua.');
+    button.textContent = original;
+  } finally {
+    button.disabled = false;
+    if (puterIsSignedIn()) button.textContent = 'Signed in ✓';
+    else if (button.textContent !== 'Signed in ✓') button.textContent = original;
+  }
+});
+
 els.saveSettings.addEventListener('click', async () => {
   settings.provider = els.providerSelect.value;
   settings.apiKeys[settings.provider] = els.apiKeyInput.value.trim();
@@ -3499,6 +3569,7 @@ window.addEventListener('resize', () => {
 
 function boot() {
   settings = { ...DEFAULT_SETTINGS, ...settings };
+  loadPuter().catch(() => {});
   renderAll();
   autoGrow();
   els.input.focus();

@@ -350,6 +350,7 @@
               <option value="bing">Bing Image Creator · free</option>
               <option value="cloudflare">Cloudflare Flux · free</option>
               <option value="huggingface">Hugging Face Flux · free</option>
+              <option value="puter">Puter AI · free (browser login)</option>
             </select>
           </div>
           <div class="field">
@@ -454,7 +455,13 @@
         <div class="field" id="bingSyncField">
           <label for="bingSyncBtn">Live site par Bing <span class="value">localhost se ek baar sync</span></label>
           <button class="ghost-btn" id="bingSyncBtn" type="button">Sync Bing login to live site</button>
-          <p class="help">Local Chrome me Microsoft login ho jane ke baad ye button usi login ko live site par bhej deta hai. Iske baad live site bhi Bing se images banayegi — Hugging Face quota ka intezaar nahi karna padega.</p>
+          <p class="help">Local Chrome me Microsoft login ho jane ke baad ye button usi login ko live site par bhej deta hai. Render datacenter IP par Bing captcha dikha sakta hai — tab Puter/HF fallback use karein.</p>
+        </div>
+
+        <div class="field" id="puterLoginField">
+          <label for="puterLoginBtn">Puter AI <span class="value">free browser account · live fallback</span></label>
+          <button class="ghost-btn" id="puterLoginBtn" type="button">Sign in to Puter</button>
+          <p class="help">Live site par HF quota khatam ho to Puter se image ban sakti hai. Ek baar free Puter account se sign-in karein; key copy karne ki zarurat nahi.</p>
         </div>
 
         <div class="modal-actions">
