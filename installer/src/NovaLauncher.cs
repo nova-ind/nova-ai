@@ -285,7 +285,7 @@ namespace NovaDesktop
             statusLabel.Text = restart ? "Restarting local service…" : "Starting local service…";
             loadingOverlay.Visible = true;
             loadingLabel.Text = restart ? "Service restart ho raha hai…" : "Shuru ho raha hai…";
-            forceNavigate = restart;
+            // Restart par page reload mat karein — video job chalte hue refresh loop ban jata tha.
             if (restart)
             {
                 suppressRestart = true;

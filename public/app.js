@@ -691,6 +691,15 @@ function jobCard(message) {
   status.textContent = job.error || job.step || 'Waiting…';
   card.append(status);
 
+  if (['queued', 'assets', 'awaiting-render', 'rendering'].includes(job.status)) {
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'ghost-btn';
+    cancel.textContent = 'Cancel video';
+    cancel.addEventListener('click', () => cancelMediaJob(job.id));
+    card.append(cancel);
+  }
+
   if (job.status === 'done' && job.output) {
     const url = `/workspace/${String(job.output).replace(/\\/g, '/')}`;
     const video = document.createElement('video');
@@ -1239,6 +1248,12 @@ function deleteMessageAt(index) {
 
 function newChat() {
   if (busy()) stopStream();
+  cancelActiveMediaJobs();
+  if (settings.modes.video) {
+    settings.modes.video = false;
+    saveSettings();
+    renderModes();
+  }
   activeId = null;
   renderAll();
   els.input.focus();
@@ -1309,6 +1324,10 @@ async function send(rawText) {
 
   if (settings.modes.video) {
     await startVideoJob(chat, text || 'A cinematic music video from the uploaded song', audio);
+    // Video mode one-shot hai — agla prompt chat maange to dobara video na ban jaye.
+    settings.modes.video = false;
+    saveSettings();
+    renderModes();
   } else if (settings.modes.imagine) {
     await generateImage(chat, text || 'A creative interpretation of the attached image');
   } else if (settings.modes.agent) {
@@ -2022,6 +2041,34 @@ async function updateJobStatus(job, status, step, progress) {
   } catch {
     /* the next poll will still show local progress */
   }
+}
+
+async function cancelMediaJob(jobId) {
+  if (!jobId) return;
+  mediaJobs = mediaJobs.filter((item) => item.id !== jobId);
+  for (let i = renderQueue.length - 1; i >= 0; i -= 1) {
+    if (renderQueue[i].id === jobId) renderQueue.splice(i, 1);
+  }
+  for (const chat of chats) {
+    chat.messages = chat.messages.filter((item) => item.job?.id !== jobId);
+    chat.updatedAt = Date.now();
+  }
+  saveChats();
+  renderAll();
+  try {
+    await fetch(`/api/media-jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+  } catch {
+    /* local card already removed */
+  }
+}
+
+function cancelActiveMediaJobs() {
+  const active = mediaJobs.filter((job) =>
+    ['queued', 'assets', 'awaiting-render', 'rendering'].includes(job.status),
+  );
+  for (const job of active) cancelMediaJob(job.id);
+  if (active.length) toast('Stuck video job(s) cancel ho gaye');
+  return active.length;
 }
 
 async function uploadAudioBlob(blob, name) {

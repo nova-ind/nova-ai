@@ -18,6 +18,7 @@ let allowedFolders = [];
 let mediaJobs = [];
 const runningJobs = new Set();
 const mediaRunning = new Set();
+const cancelledJobs = new Set();
 
 const PORT = Number(process.env.PORT || 4173);
 const UPSTREAM_BASE = (process.env.UPSTREAM_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
@@ -895,12 +896,14 @@ async function runMediaJob(job) {
   if (mediaRunning.has(job.id)) return;
   mediaRunning.add(job.id);
   try {
+    if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
     await updateMediaJob(job, { status: 'assets', step: 'Scene assets prepare ho rahe hain…', progress: 5 });
     const directory = path.join(WORKSPACE, 'media-jobs', job.id);
     await mkdir(directory, { recursive: true });
     const captions = splitCaptions(job.prompt, job.sceneCount);
 
     for (let index = 0; index < job.sceneCount; index += 1) {
+      if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
       const scene = job.scenes[index] || { index: index + 1, caption: captions[index] || `Scene ${index + 1}` };
       if (!scene.image) {
         await updateMediaJob(job, {
@@ -942,6 +945,7 @@ async function runMediaJob(job) {
       await updateMediaJob(job, { progress: 10 + Math.round(((index + 1) / job.sceneCount) * 60) });
     }
 
+    if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
     await updateMediaJob(job, {
       status: 'awaiting-render',
       progress: 75,
@@ -960,6 +964,15 @@ async function runMediaJob(job) {
 
 async function resumeMediaJobs() {
   for (const job of mediaJobs) {
+    const lastTouch = Number(job.updatedAt || job.createdAt || 0);
+    if (!['done', 'error'].includes(job.status) && Date.now() - lastTouch > 30 * 60_000) {
+      await updateMediaJob(job, {
+        status: 'error',
+        error: 'Video job timeout — dobara try karein.',
+        step: 'Error',
+      });
+      continue;
+    }
     if (job.status === 'queued' || job.status === 'assets') {
       runMediaJob(job).catch(() => {});
     } else if (job.status === 'rendering') {
@@ -3165,8 +3178,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (req.method === 'DELETE') {
+        cancelledJobs.add(job.id);
         mediaJobs = mediaJobs.filter((item) => item.id !== job.id);
         await saveMediaJobs();
+        setTimeout(() => cancelledJobs.delete(job.id), 60_000).unref?.();
         return sendJson(res, 200, { ok: true });
       }
 
