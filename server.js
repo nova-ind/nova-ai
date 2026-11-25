@@ -5507,7 +5507,11 @@ const server = http.createServer(async (req, res) => {
         cancelledJobs.add(job.id);
         ffmpegChildren.get(job.id)?.kill('SIGKILL');
         mediaJobs = mediaJobs.filter((item) => item.id !== job.id);
+        mediaTtsCredentials.delete(job.id);
         await saveMediaJobs();
+        try {
+          await rm(path.join(WORKSPACE, 'media-jobs', job.id), { recursive: true, force: true });
+        } catch { /* ignore cleanup errors */ }
         setTimeout(() => cancelledJobs.delete(job.id), 60_000).unref?.();
         return sendJson(res, 200, { ok: true });
       }

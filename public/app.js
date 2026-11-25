@@ -116,6 +116,7 @@ const els = {
   voiceInput: $('voiceInput'),
   narrationToggle: $('narrationToggle'),
   autoModeToggle: $('autoModeToggle'),
+  soundToggle: $('soundToggle'),
   modelInput: $('modelInput'),
   modelOptions: $('modelOptions'),
   modelFilter: $('modelFilter'),
@@ -203,6 +204,7 @@ const DEFAULT_SETTINGS = {
   voice: 'Microsoft Hazel Desktop',
   narration: true,
   autoMode: true,
+  soundEnabled: true,
   codingFolder: '',
   modes: { agent: true, think: false, search: false, imagine: false, video: false, fun: false },
 };
@@ -264,9 +266,13 @@ const nativeRequests = new Map();
 let nativeRequestSeq = 0;
 const mediaRendering = new Set();
 const notifiedJobs = new Set();
+const cancelledJobs = new Set();
 const renderQueue = [];
 let renderingQueue = false;
 let stream = null;
+let audioContext = null;
+let notifiedFfmpegJobs = new Set();
+let ffmpegNotifyReady = false;
 let attachments = [];
 let paintQueued = false;
 let modelLoadTimer = null;
@@ -304,6 +310,44 @@ const uid = () => `c_${Date.now().toString(36)}_${Math.random().toString(36).sli
 const appIsLocal = /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
 const activeChat = () => chats.find((c) => c.id === activeId) || null;
 const busy = () => Boolean(stream);
+
+function unlockAudio() {
+  if (settings.soundEnabled === false) return;
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    if (!audioContext) audioContext = new AudioCtx();
+    if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+  } catch {
+    /* audio optional */
+  }
+}
+
+function playCompletionSound(kind = 'done') {
+  if (settings.soundEnabled === false) return;
+  try {
+    unlockAudio();
+    if (!audioContext) return;
+    const now = audioContext.currentTime;
+    const notes = kind === 'error' ? [392, 311] : [523.25, 659.25, 783.99];
+    notes.forEach((frequency, index) => {
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      const start = now + index * 0.13;
+      oscillator.type = 'sine';
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(kind === 'error' ? 0.12 : 0.16, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.3);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.32);
+    });
+  } catch {
+    /* notifications are optional */
+  }
+}
 
 function shortModel(id = '') {
   const name = id.split('/').pop() || id;
@@ -1297,8 +1341,24 @@ function deleteMessageAt(index) {
   if (!chat || !Number.isInteger(index) || !chat.messages[index]) return;
   // Stream chal raha ho to pehle rokein, warna aborted likhna dobara aa jata hai.
   if (busy() && index >= chat.messages.length - 2) stopStream();
-  chat.messages.splice(index, 1);
+  const targetId = chat.messages[index].job?.id || chat.messages[index].jobId || '';
+  const doomed = chat.messages.filter((message, messageIndex) =>
+    messageIndex === index || (targetId && (message.job?.id || message.jobId) === targetId));
+  for (const message of doomed) {
+    const jobId = message.job?.id || message.jobId;
+    if (!jobId) continue;
+    mediaJobs = mediaJobs.filter((job) => job.id !== jobId);
+    mediaRendering.delete(jobId);
+    notifiedJobs.delete(jobId);
+    cancelledJobs.add(jobId);
+    for (let queueIndex = renderQueue.length - 1; queueIndex >= 0; queueIndex -= 1) {
+      if (renderQueue[queueIndex].id === jobId) renderQueue.splice(queueIndex, 1);
+    }
+    fetch(`/api/media-jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' }).catch(() => {});
+  }
+  chat.messages = chat.messages.filter((message) => !doomed.includes(message));
   touch(chat);
+  saveChats();
   renderAll();
 }
 
@@ -1350,6 +1410,7 @@ const queuedTurns = [];
 async function send(rawText) {
   const text = String(rawText || '').trim();
   if (!text && !attachments.length) return;
+  unlockAudio();
 
   const chat = ensureChat();
   const images = attachments.filter((a) => a.kind === 'image').map((a) => a.dataUrl);
@@ -1634,6 +1695,7 @@ async function runAgent(chat) {
     body.model = PROVIDERS[settings.provider].model;
   }
 
+  let aborted = false;
   try {
     const response = await fetch('/api/agent', {
       method: 'POST',
@@ -1757,6 +1819,7 @@ async function runAgent(chat) {
     }
   } catch (err) {
     if (err.name === 'AbortError') {
+      aborted = true;
       if (!assistant.content && !assistant.reasoning && !assistant.tools.length) {
         assistant.error = 'Stopped before any output.';
       }
@@ -1765,6 +1828,7 @@ async function runAgent(chat) {
       if (/api key|401|unauthor/i.test(assistant.error)) refreshKeyStatus();
     }
   } finally {
+    if (!aborted) playCompletionSound(assistant.error ? 'error' : 'done');
     assistant.pending = false;
     assistant.streaming = false;
     stream = null;
@@ -2127,6 +2191,7 @@ function patchJobCard(job) {
 
 function applyJobUpdate(job) {
   if (!job?.id) return;
+  if (cancelledJobs.has(job.id)) return;
   const index = mediaJobs.findIndex((item) => item.id === job.id);
   if (index === -1) mediaJobs.unshift(job);
   else mediaJobs[index] = job;
@@ -2140,6 +2205,7 @@ function applyJobUpdate(job) {
 
   if ((job.status === 'done' || job.status === 'error') && !notifiedJobs.has(job.id)) {
     notifiedJobs.add(job.id);
+    playCompletionSound(job.status === 'done' ? 'done' : 'error');
     toast(job.status === 'done' ? 'Video ready — chat me check karein' : `Video failed: ${job.error || 'render error'}`);
     if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       try {
@@ -2157,8 +2223,18 @@ function applyJobUpdate(job) {
 
 function syncMediaJobs(list) {
   if (!Array.isArray(list)) return;
-  mediaJobs = list;
-  for (const job of list) {
+  // Delete ki hui video server poll se dobara chat me na aaye.
+  const visibleList = list.filter((job) => !cancelledJobs.has(job.id));
+  if (visibleList.length !== list.length) {
+    for (const chat of chats) {
+      chat.messages = chat.messages.filter((message) => {
+        const id = message.job?.id || message.jobId;
+        return !id || !cancelledJobs.has(id);
+      });
+    }
+  }
+  mediaJobs = visibleList;
+  for (const job of visibleList) {
     const found = findJobMessage(job.id);
     if (found) {
       found.message.job = job;
@@ -2177,6 +2253,7 @@ function syncMediaJobs(list) {
     if (job.status === 'awaiting-render' && job.scenes?.length) queueMediaRender(job);
     if ((job.status === 'done' || job.status === 'error') && !notifiedJobs.has(job.id)) {
       notifiedJobs.add(job.id);
+      playCompletionSound(job.status === 'done' ? 'done' : 'error');
       toast(job.status === 'done' ? 'Video ready — chat me check karein' : `Video failed: ${job.error || 'render error'}`);
     }
   }
@@ -3053,6 +3130,7 @@ function openSettings() {
   els.voiceInput.value = settings.voice || 'Microsoft Hazel Desktop';
   els.narrationToggle.checked = settings.narration !== false;
   if (els.autoModeToggle) els.autoModeToggle.checked = settings.autoMode !== false;
+  if (els.soundToggle) els.soundToggle.checked = settings.soundEnabled !== false;
   updateFolderButton();
   els.modelInput.value = settings.customModel || '';
   els.tempInput.value = String(settings.temperature ?? 0.7);
@@ -3568,6 +3646,18 @@ async function loadFfmpegJobs() {
     const response = await fetch('/api/ffmpeg/jobs');
     const data = await response.json();
     ffmpegJobs = data.jobs || [];
+    for (const job of ffmpegJobs) {
+      if (['done', 'error'].includes(job.status)) {
+        if (ffmpegNotifyReady && !notifiedFfmpegJobs.has(job.id)) {
+          notifiedFfmpegJobs.add(job.id);
+          playCompletionSound(job.status === 'done' ? 'done' : 'error');
+          toast(job.status === 'done' ? 'FFmpeg edit ready' : `FFmpeg edit failed: ${job.error || 'error'}`);
+        } else {
+          notifiedFfmpegJobs.add(job.id);
+        }
+      }
+    }
+    ffmpegNotifyReady = true;
     renderFfmpegJobs();
   } catch {
     /* keep local list */
@@ -4166,6 +4256,8 @@ els.saveSettings.addEventListener('click', async () => {
   settings.voice = els.voiceInput.value.trim() || 'Microsoft Hazel Desktop';
   settings.narration = els.narrationToggle.checked;
   settings.autoMode = els.autoModeToggle ? els.autoModeToggle.checked : settings.autoMode !== false;
+  settings.soundEnabled = els.soundToggle ? els.soundToggle.checked : settings.soundEnabled !== false;
+  if (settings.soundEnabled) unlockAudio();
   settings.baseUrl = els.baseUrlInput.value.trim() || PROVIDERS[settings.provider]?.base || PROVIDERS.nvidia.base;
   settings.customModel = els.modelInput.value.trim();
   syncActiveModel();
@@ -4254,7 +4346,7 @@ function boot() {
   });
   setInterval(() => {
     if (document.visibilityState !== 'hidden') loadMediaJobs();
-    if (!els.ffmpegModal.hidden) loadFfmpegJobs();
+    loadFfmpegJobs();
   }, 3000);
   setInterval(() => {
     if (document.visibilityState !== 'hidden') syncMediaCredentials();
