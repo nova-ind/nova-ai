@@ -93,6 +93,7 @@ const els = {
   systemInput: $('systemInput'),
   saveSettings: $('saveSettings'),
   clearAllBtn: $('clearAllBtn'),
+  browserLoginBtn: $('browserLoginBtn'),
   toast: $('toast'),
 };
 
@@ -3311,6 +3312,24 @@ els.videoDurationSelect.addEventListener('change', () => {
 
 els.tempInput.addEventListener('input', () => {
   els.tempValue.textContent = Number(els.tempInput.value).toFixed(1);
+});
+
+els.browserLoginBtn?.addEventListener('click', async () => {
+  const button = els.browserLoginBtn;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = 'Opening Chrome…';
+  try {
+    const response = await fetch('/api/browser-login', { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Chrome login tab nahi khul paaya.');
+    toast('Chrome me login tabs khul gaye. Ek baar sign-in kar lo — baad me dobara nahi mangega.');
+  } catch (err) {
+    toast(err.message || 'Chrome login tab nahi khul paaya.');
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
 });
 
 els.saveSettings.addEventListener('click', async () => {

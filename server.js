@@ -1190,6 +1190,12 @@ async function ensureBrowser() {
   const executable = await findBrowserExecutable();
   if (!executable) throw new Error('Chrome or Edge was not found on this PC.');
 
+  // Purana browser sudden close hone par singleton locks bache rehte hain —
+  // unke karan naya Chrome same profile ke saath start nahi hota aur login dobara mangta hai.
+  for (const lock of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    await rm(path.join(BROWSER_PROFILE, lock), { force: true }).catch(() => {});
+  }
+
   const child = spawn(
     executable,
     [
@@ -1197,6 +1203,8 @@ async function ensureBrowser() {
       `--user-data-dir=${BROWSER_PROFILE}`,
       '--no-first-run',
       '--no-default-browser-check',
+      '--disable-session-crashed-bubble',
+      '--hide-crash-restore-bubble',
       'about:blank',
     ],
     { detached: true, stdio: 'ignore', windowsHide: false },
@@ -1208,6 +1216,25 @@ async function ensureBrowser() {
     if (await cdpAvailable()) return;
   }
   throw new Error('The browser started but the debugging port did not open.');
+}
+
+async function openBrowserLogin() {
+  const urls = [
+    'https://www.bing.com/images/create',
+    'https://login.live.com/',
+    'https://accounts.google.com/',
+  ];
+  const opened = [];
+  for (const target of urls) {
+    try {
+      await browserTarget(target);
+      opened.push(target);
+    } catch {
+      /* one tab fail hone se baaki tabs kholo */
+    }
+  }
+  if (!opened.length) throw new Error('Chrome login tabs nahi khul paaye.');
+  return opened;
 }
 
 async function cdpCommand(wsUrl, method, params = {}) {
@@ -2383,6 +2410,18 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/media-credentials') {
       return await handleMediaCredentials(req, res);
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/browser-login') {
+      if (!BING_SUPPORTED) {
+        return sendJson(res, 400, { error: 'Browser login sirf local Windows PC par chalega.' });
+      }
+      try {
+        const opened = await openBrowserLogin();
+        return sendJson(res, 200, { ok: true, opened, profile: BROWSER_PROFILE });
+      } catch (err) {
+        return sendJson(res, 502, { error: err.message || 'Chrome login tab nahi khul paaya.' });
+      }
     }
 
     if (req.method === 'GET' && url.pathname === '/api/media-providers') {
