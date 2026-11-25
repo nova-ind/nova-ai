@@ -1508,8 +1508,11 @@ async function generateBingImageHttp(prompt) {
 
   let response = await post(4);
   let body = await response.text();
-  if (/0 coins available|out of creations|you.?ve reached|creation limit|captcha|unusual traffic/i.test(body)) {
-    throw new Error('Bing free limit ya captcha — Microsoft account check karein.');
+  const blocked = /0 coins available|out of creations|you.?ve reached|creation limit|captcha|unusual traffic/i.exec(body);
+  if (blocked) {
+    throw new Error(
+      `Bing ne ${blocked[0]} dikhaaya. ${body.replace(/\s+/g, ' ').slice(Math.max(0, blocked.index - 40), blocked.index + 90)}`,
+    );
   }
   let location = response.headers.get('location') || '';
   if (response.status !== 302 || !location) {
