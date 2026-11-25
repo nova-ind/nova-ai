@@ -31,6 +31,8 @@ Ek hi EXE me Nova app, zero-dependency Node runtime aur **wahi logo** (white rou
 - WebView2 runtime offline installer ke andar hai; purane PC par missing ho to setup khud silently install kar deta hai.
 - Title bar ka **“Bing Login”** button ek baar Microsoft sign-in tab kholta hai. Login cookies `%LOCALAPPDATA%\Nova AI\workspace\.browser-profile` me persist hote hain, isliye baar baar login nahi karna padta.
 - Port 4173 busy ho to launcher apne aap free port pick kar leta hai.
+- Sidebar ke niche **folder icon** se coding folder chuno — native Windows folder dialog khulta hai. Chat/Agent usi folder me code likh sakta hai (Bots panel se multiple folders allow kar sakte hain).
+- Composer me **scissors icon** se free FFmpeg editor khulta hai: trim, merge, compress, mute, add audio, extract MP3, resize, convert. FFmpeg/ffprobe installer ke andar offline bundled hain.
 - Data/log: `%LOCALAPPDATA%\Nova AI\workspace\desktop-launcher.log`.
 - Chat API ke liye internet + API key chahiye; image tools ke liye Chrome/Edge recommended hain.
 
@@ -84,6 +86,17 @@ PORT=4173
 OpenRouter / Groq / Ollama bhi chalega — bas `UPSTREAM_BASE_URL` badal do
 (misaal: `http://localhost:11434/v1` Ollama ke liye).
 
+### Cloudflare Workers AI API token kaise banayein (free image generation ke liye)
+
+1. https://dash.cloudflare.com par login karein.
+2. Left menu me **AI → Workers AI** kholein, phir **Use REST API** chunein.
+3. **Create a Workers AI API Token** par click karein → pre-filled details check karein → **Create API Token** → token copy karein. (Agar custom token bana rahe hain to usme `Account → Workers AI → Read` aur `Edit` dono permissions honi chahiye.)
+4. Ussi page par **Account ID** (32-character string) copy karein. Account ID dashboard ke right sidebar me bhi milta hai.
+5. Nova app me **Settings → Cloudflare Account ID** aur **Cloudflare API token** me dono paste karein → **Save settings**.
+6. Image provider `Cloudflare Flux` ya `Auto` chunein. Free plan roz 10,000 neurons deta hai — Flux images ke liye kaafi.
+
+> Global API key (`X-Auth-Key`) mat use karein. Nova ko sirf Workers AI API token + Account ID chahiye. Token sirf ek baar dikhayi deta hai — usako kahin safe save karein.
+
 ---
 
 ## 2. Features (Grok jaise)
@@ -97,13 +110,14 @@ OpenRouter / Groq / Ollama bhi chalega — bas `UPSTREAM_BASE_URL` badal do
 | **Top free model switch** | Composer ke model dropdown me “Top free models” list — click karte hi model change |
 | **Schedule work** | 📅 button — master prompt + date/time; YouTube template pehle publish date/time puchta hai, metadata package + OAuth upload script banata hai |
 | **Multiple bots** | 🤖 button — kai bots banao, har ka apna master prompt + allowed folder; “Run all bots” ek click me sab chalata hai |
-| **Allowed folders** | Bots panel me absolute path allow karo; bot sirf unhi folders me file operations karega |
+| **Allowed folders / coding folder** | Sidebar folder button ya Bots panel se native picker se folder chuno; bot aur chat agent sirf unhi folders me file operations karte hain |
+| **Free FFmpeg editor** | Trim/cut, merge, compress, mute, add/replace audio, extract MP3, resize aur convert — sab local, offline, bina kisi paid service ke |
 | **Agent tools** | `web_search`, `list_files`, `read_file`, `write_file`, `create_folder`, `delete_file`, `copy_file`, `move_file`, `run_code`, `generate_image`, `open_webpage`, `browser_open`, `browser_wait`, `browser_click`, `browser_type`, `browser_text`, `browser_screenshot` |
 | **Workspace files** | Agent ne banayi files `G:\Nova Bot\workspace` me save hoti hain aur chat se `/workspace/...` link se khulti hain |
 | **Think** | Extended reasoning toggle; reasoning models par live "Thinking" panel |
 | **Search (DeepSearch)** | Real web search + neeche numbered sources |
 | **Imagine** | In-chat image generation — Bing Image Creator (best free), Cloudflare Flux, Hugging Face Flux. Pollinations disabled |
-| **Video Studio** | Story/cartoon/meme/song videos: 16:9 ya 9:16, style/FX/transitions auto-infer, MP3 upload, scene images + AI motion clips, browser me final render |
+| **Video Studio (next level)** | 15 minute tak long-form video, 20/30/50/60 scenes, zoom/pan FX + xfade transitions, song BPM/energy-zone analysis, lyrics-aligned captions, offline SAPI voice-over aur FFmpeg final assembly. Chhote videos me optional LTX AI motion clips. |
 | **Free video model** | LTX-Video (open-source, GitHub/Hugging Face Space) — bina card/key ke short clips |
 | **Fun** | Grok jaisa witty/sarcastic personality |
 | Chat history | Sidebar me Today / Yesterday / Previous 7 days, search box ke saath (sidebar collapse hone par bhi search/toggle topbar me reachable) |
