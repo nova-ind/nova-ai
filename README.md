@@ -20,6 +20,26 @@ Phir browser me kholo: **http://localhost:4173**
 
 > Node 20.6+ chahiye (aapke system par v26 hai).
 
+### Windows desktop installer (offline EXE)
+
+Professional per-user installer ready hai: **`dist/Nova-AI-Setup-v1.0.0.exe`**.
+Ek hi EXE me Nova app, zero-dependency Node runtime aur **wahi logo** (white rounded square + black N) hai jo website par hai. Install ke time kuch download nahi hota.
+
+- Default install location: `%LOCALAPPDATA%\Nova AI` (admin/UAC nahi chahiye).
+- Start menu + optional desktop shortcut, tray icon, Open / Restart / Exit controls.
+- Launcher apne andar local server start karta hai aur poori Nova UI **embedded WebView2 app window** me dikhata hai — Chrome alag se nahi khulta. “Browser” button se kabhi bhi system browser me khol sakte hain.
+- WebView2 runtime offline installer ke andar hai; purane PC par missing ho to setup khud silently install kar deta hai.
+- Title bar ka **“Bing Login”** button ek baar Microsoft sign-in tab kholta hai. Login cookies `%LOCALAPPDATA%\Nova AI\workspace\.browser-profile` me persist hote hain, isliye baar baar login nahi karna padta.
+- Port 4173 busy ho to launcher apne aap free port pick kar leta hai.
+- Data/log: `%LOCALAPPDATA%\Nova AI\workspace\desktop-launcher.log`.
+- Chat API ke liye internet + API key chahiye; image tools ke liye Chrome/Edge recommended hain.
+
+Installer dobara banane ke liye:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "G:\Nova Bot\installer\build.ps1"
+```
+
 ### Live app: Render (free) + auto crawler
 
 GitHub Pages sirf static landing page dikhata hai; **poori Nova app wahan nahi chal sakti** kyunki usko `server.js` aur `/api/*` chahiye.
