@@ -1322,6 +1322,15 @@ async function send(rawText) {
   syncComposer();
   scrollToBottom(true);
 
+  // User prompt/idea/caption maang raha hai to media mode ignore karo — video mat banao.
+  const asksForText = /\b(prompt|prompts|idea|ideas|caption|captions|script|likh|likho)\b/i.test(text || '');
+  if (asksForText && (settings.modes.video || settings.modes.imagine)) {
+    settings.modes.video = false;
+    settings.modes.imagine = false;
+    saveSettings();
+    renderModes();
+  }
+
   if (settings.modes.video) {
     await startVideoJob(chat, text || 'A cinematic music video from the uploaded song', audio);
     // Video mode one-shot hai — agla prompt chat maange to dobara video na ban jaye.
