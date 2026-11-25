@@ -502,7 +502,12 @@ function renderSidebar() {
 function metaRow(message, isLast) {
   const meta = document.createElement('div');
   meta.className = 'msg-meta';
-  meta.innerHTML = '<strong>Nova</strong>';
+  meta.innerHTML =
+    '<span class="nova-mark" aria-label="Nova" title="Nova">' +
+    '<svg viewBox="0 0 32 32" aria-hidden="true">' +
+    '<rect width="32" height="32" rx="9" fill="currentColor" />' +
+    '<path d="M10 23V9l12 14V9" stroke="#0b0b0c" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round" />' +
+    '</svg></span><strong class="brand-name">Nova</strong>';
 
   if (message.model) {
     const badge = document.createElement('span');

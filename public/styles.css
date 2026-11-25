@@ -1506,14 +1506,30 @@ svg {
   height: 15px;
 }
 
-/* Chat composer stays icon-only; titles/tooltips keep the labels accessible. */
-.mode span {
+/* Chat UI stays icon-only; titles/aria-labels keep names accessible. */
+.mode span,
+.brand > span:not(.brand-mark),
+.msg-meta .brand-name {
   display: none;
 }
 
 .mode {
   gap: 0;
   padding: 6px 9px;
+}
+
+.msg-meta .nova-mark {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  color: var(--accent);
+  flex: none;
+}
+
+.msg-meta .nova-mark svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 .mode:hover {

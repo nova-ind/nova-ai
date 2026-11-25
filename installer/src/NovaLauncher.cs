@@ -103,7 +103,7 @@ namespace NovaDesktop
             loadingLabel.ForeColor = Color.FromArgb(200, 204, 210);
             loadingLabel.Font = new Font("Segoe UI", 14F, FontStyle.Regular, GraphicsUnit.Point);
             loadingLabel.TextAlign = ContentAlignment.MiddleCenter;
-            loadingLabel.Text = "Nova shuru ho raha hai…";
+            loadingLabel.Text = "Shuru ho raha hai…";
             loadingOverlay.Controls.Add(loadingLabel);
             Controls.Add(loadingOverlay);
 
@@ -131,15 +131,12 @@ namespace NovaDesktop
             }
 
             titleLabel = new Label();
-            titleLabel.Text = "Nova AI";
-            titleLabel.Location = new Point(56, 10);
-            titleLabel.Size = new Size(220, 26);
-            titleLabel.Font = new Font("Segoe UI", 15F, FontStyle.Bold, GraphicsUnit.Point);
-            titleLabel.ForeColor = Color.White;
+            titleLabel.Text = string.Empty;
+            titleLabel.Visible = false;
 
             statusLabel = new Label();
             statusLabel.Text = "Starting local service…";
-            statusLabel.Location = new Point(56, 34);
+            statusLabel.Location = new Point(56, 22);
             statusLabel.Size = new Size(420, 20);
             statusLabel.ForeColor = Color.FromArgb(150, 156, 164);
 
@@ -238,7 +235,7 @@ namespace NovaDesktop
             if (e.IsSuccess)
             {
                 loadingOverlay.Visible = false;
-                statusLabel.Text = "Nova ready";
+                statusLabel.Text = "Ready";
             }
         }
 
@@ -275,7 +272,7 @@ namespace NovaDesktop
             }
 
             loadingOverlay.Visible = false;
-            statusLabel.Text = "Nova ready";
+            statusLabel.Text = "Ready";
         }
 
         private void StartWorker(bool restart)
@@ -287,7 +284,7 @@ namespace NovaDesktop
 
             statusLabel.Text = restart ? "Restarting local service…" : "Starting local service…";
             loadingOverlay.Visible = true;
-            loadingLabel.Text = restart ? "Service restart ho raha hai…" : "Nova shuru ho raha hai…";
+            loadingLabel.Text = restart ? "Service restart ho raha hai…" : "Shuru ho raha hai…";
             forceNavigate = restart;
             if (restart)
             {
@@ -363,7 +360,7 @@ namespace NovaDesktop
             suppressRestart = false;
             crashCount = 0;
             TryNavigate();
-            trayIcon.ShowBalloonTip(3000, "Nova AI", "Nova is ready.", ToolTipIcon.Info);
+            trayIcon.ShowBalloonTip(3000, "Nova AI", "Ready.", ToolTipIcon.Info);
         }
 
         private void StartServer(int selectedPort)
