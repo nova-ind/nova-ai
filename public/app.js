@@ -3066,7 +3066,10 @@ async function loadConfig() {
       settings.baseUrl = PROVIDERS[configured[0]].base;
       syncActiveKey();
       saveSettings();
-      renderSettings();
+      els.providerSelect.value = settings.provider;
+      els.baseUrlInput.value = settings.baseUrl;
+      els.apiKeyProvider.textContent = String(settings.provider).toUpperCase();
+      els.apiKeyInput.value = '';
     }
   }
   await refreshKeyStatus();
