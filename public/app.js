@@ -2212,9 +2212,9 @@ async function startVideoJob(chat, prompt, audioAttachment) {
   if (!audioPath && settings.songPath) audioPath = settings.songPath;
   const type = inferVideoType(prompt, Boolean(audioPath));
   const videoProvider = settings.videoProvider || DEFAULT_SETTINGS.videoProvider;
-  const requestedScenes = Number(settings.videoSceneCount) || 0;
-  const autoScenes = Math.round((Number(settings.videoLengthSeconds) || 60) / 12);
-  const sceneCount = type === 'meme' ? 8 : (requestedScenes || autoScenes);
+  const requestedScenes = settings.videoSceneCount === 'auto' ? 0 : (Number(settings.videoSceneCount) || 0);
+  // Auto scenes server par duration/BPM se decide hote hain — yahan fixed 6 nahi bhejte.
+  const sceneCount = type === 'meme' && !requestedScenes ? 8 : requestedScenes;
   const payload = {
     prompt,
     chatId: chat.id,
@@ -2226,7 +2226,8 @@ async function startVideoJob(chat, prompt, audioAttachment) {
     audioPath,
     sceneCount,
     clipSeconds: Number(settings.videoDuration) || 5,
-    durationSeconds: Number(settings.videoLengthSeconds) || 60,
+    // Song upload ho to actual MP3 length server ffprobe se lega — 3 min ka song = 3 min video.
+    durationSeconds: audioPath ? 0 : Number(settings.videoLengthSeconds) || 60,
     lyrics: settings.lyrics || '',
     narration: settings.narration !== false,
     voice: settings.voice || 'Microsoft Hazel Desktop',

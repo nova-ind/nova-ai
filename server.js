@@ -29,6 +29,7 @@ const ffmpegChildren = new Map();
 let ffmpegVersionCache = null;
 let ffmpegEncodersCache = null;
 const stockImageCache = new Map();
+const mediaTtsCredentials = new Map();
 
 const PORT = Number(process.env.PORT || 4173);
 const UPSTREAM_BASE = (process.env.UPSTREAM_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
@@ -706,6 +707,33 @@ function splitCaptions(prompt, count) {
   ).slice(0, count);
 }
 
+function buildStoryScript(job, baseCaptions) {
+  const count = job.sceneCount;
+  const prompt = String(job.prompt || '').trim();
+  const beats = [
+    'Hook', 'Setup', 'Build-up', 'First turn', 'Rising tension',
+    'Twist', 'Climax', 'Reveal', 'Payoff', 'Resolution',
+  ];
+  const themes = prompt.split(/[.!?।]+\s*|\n+/).map((item) => item.trim()).filter(Boolean);
+  const motif = (themes[0] || prompt || 'the story').replace(/^(a|an|the)\s+/i, '');
+  const zones = job.analysis?.zones || [];
+  return Array.from({ length: count }, (_, index) => {
+    const beat = beats[index % beats.length];
+    const detail = String(baseCaptions[index] || motif).trim();
+    const zone = zones.length
+      ? zones[Math.min(zones.length - 1, Math.floor((index / count) * zones.length))]?.label
+      : '';
+    const tail = zone ? `, ${String(zone).toLowerCase()}` : '';
+    const lines = [
+      `${beat}: ${detail} comes alive${tail}.`,
+      `The camera moves closer as ${detail} takes shape${tail}.`,
+      `Every beat pushes the story forward — ${detail}${tail}.`,
+      `Then the mood shifts${tail}: ${detail}.`,
+    ];
+    return lines[index % lines.length];
+  });
+}
+
 async function loadMediaJobs() {
   try {
     const parsed = JSON.parse(await readFile(MEDIA_JOBS_FILE, 'utf8'));
@@ -857,6 +885,72 @@ async function generateImageSmart(prompt, options = {}) {
   throw lastError || new Error('Koi image provider available nahi hai.');
 }
 
+function validImageBytes(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 8000) return false;
+  const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
+  const isPng = bytes.length > 24
+    && bytes[0] === 0x89 && bytes.toString('ascii', 1, 4) === 'PNG';
+  const isWebp = bytes.length > 16
+    && bytes.toString('ascii', 0, 4) === 'RIFF'
+    && bytes.toString('ascii', 8, 12) === 'WEBP';
+  if (!isJpeg && !isPng && !isWebp) return false;
+
+  let width = 0;
+  let height = 0;
+  if (isPng) {
+    width = bytes.readUInt32BE(16);
+    height = bytes.readUInt32BE(20);
+  } else if (isWebp) {
+    const chunk = bytes.toString('ascii', 12, 16);
+    if (chunk === 'VP8X') {
+      width = 1 + bytes.readUIntLE(24, 3);
+      height = 1 + bytes.readUIntLE(27, 3);
+    } else if (chunk === 'VP8 ') {
+      width = bytes.readUInt16LE(26) & 0x3fff;
+      height = bytes.readUInt16LE(28) & 0x3fff;
+    }
+  } else {
+    for (let offset = 2; offset + 9 < bytes.length;) {
+      if (bytes[offset] !== 0xff) { offset += 1; continue; }
+      const marker = bytes[offset + 1];
+      if (marker === 0xd8 || marker === 0xd9) { offset += 2; continue; }
+      const size = bytes.readUInt16BE(offset + 2);
+      if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+        height = bytes.readUInt16BE(offset + 5);
+        width = bytes.readUInt16BE(offset + 7);
+        break;
+      }
+      offset += 2 + size;
+    }
+  }
+  return width >= 256 && height >= 256;
+}
+
+async function collectJobImages(job, captions) {
+  const provider = job.imageProvider || DEFAULT_IMAGE_PROVIDER;
+  const batchSize = provider === 'bing' || provider === 'auto' ? 4 : 1;
+  const pool = [];
+  for (let index = 0; index < job.sceneCount; index += batchSize) {
+    const parts = captions.slice(index, index + batchSize);
+    const batchPrompt = `${job.prompt}. ${parts.map((line, offset) =>
+      `Scene ${index + offset + 1}: ${line}`).join(' | ')}. ${job.style} style, high detail, cinematic composition.`;
+    try {
+      const result = provider === 'auto'
+        ? await generateImageSmart(batchPrompt, {
+          model: job.imageModel,
+          ratio: job.ratio,
+        })
+        : await fetchImageResult(batchPrompt, job.imageModel, provider, job.ratio);
+      for (const bytes of result.images || []) {
+        if (validImageBytes(bytes)) pool.push(bytes);
+      }
+    } catch {
+      /* next batch still gets a chance */
+    }
+  }
+  return pool;
+}
+
 async function generateVideoSmart(prompt, options = {}) {
   const requested = options.provider || DEFAULT_VIDEO_PROVIDER;
   const order = requested === 'auto' ? ['ltx'] : [requested];
@@ -923,11 +1017,14 @@ async function createMediaJob(payload = {}) {
     }
   }
 
-  const durationSeconds = Math.min(900, Math.max(15, Number(payload.durationSeconds) || 60));
-  const requestedScenes = Number(payload.sceneCount) || 0;
-  const sceneCount = Math.min(60, Math.max(6,
-    requestedScenes > 0 ? requestedScenes : Math.round(durationSeconds / 12),
+  const audioDuration = audioPath ? await probeAudioDuration(audioPath) : 0;
+  const requestedDuration = Number(payload.durationSeconds) || 0;
+  // Song upload hone par video ki length MP3 ki actual length ho — user 3 ya 5 min bole to wahi banega.
+  const durationSeconds = Math.min(900, Math.max(15,
+    audioDuration > 0 ? Math.round(audioDuration) : requestedDuration || 60,
   ));
+  const requestedScenes = Number(payload.sceneCount) || 0;
+  const sceneCount = sceneCountForDuration(durationSeconds, 0, requestedScenes);
 
   const job = {
     id,
@@ -938,6 +1035,7 @@ async function createMediaJob(payload = {}) {
     fx: fx.length ? fx : inferMediaFx(prompt),
     transitions: transitions.length ? transitions : inferTransitions(prompt),
     sceneCount,
+    manualSceneCount: requestedScenes > 0,
     durationSeconds,
     clipSeconds: Math.min(10, Math.max(2, Number(payload.clipSeconds) || 5)),
     audioPath,
@@ -979,7 +1077,6 @@ async function runMediaJob(job) {
     const directory = path.join(WORKSPACE, 'media-jobs', job.id);
     await mkdir(directory, { recursive: true });
     const audioPath = resolveJobAudioPath(job.audioPath);
-    let captions = splitCaptions(job.prompt, job.sceneCount);
 
     if (audioPath && (job.type === 'song' || job.lyrics)) {
       await updateMediaJob(job, {
@@ -993,32 +1090,53 @@ async function runMediaJob(job) {
           step: `Song ${analysis.bpm} BPM · ${analysis.zones.length} zones mil gaye`,
           progress: 8,
         });
+        if (!job.manualSceneCount) {
+          const beatScenes = sceneCountForDuration(job.durationSeconds, analysis.bpm, 0);
+          if (beatScenes !== job.sceneCount) {
+            await updateMediaJob(job, {
+              sceneCount: beatScenes,
+              step: `Beat/story ke hisaab se ${beatScenes} scenes set — images ab banenge…`,
+              progress: 9,
+            });
+          }
+        }
       }
     }
 
-    const lyricsLines = String(job.lyrics || '')
-      .split(/\n+/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const hooks = ['Hook', 'Setup', 'Build-up', 'Twist', 'Climax', 'Reveal', 'Payoff', 'Takeaway'];
-    const zones = job.analysis?.zones || [];
-    captions = captions.map((caption, index) => {
-      const zone = zones.length ? zones[Math.floor((index / job.sceneCount) * zones.length)] : null;
-      if (lyricsLines.length) {
-        return `${lyricsLines[index % lyricsLines.length]}${zone ? ` · ${zone.label}` : ''}`;
-      }
-      if (zone) return `${zone.label} · ${caption}`;
-      return `${hooks[index % hooks.length]}: ${caption}`;
+    await updateMediaJob(job, {
+      step: 'Story script likhi ja rahi hai — pehle kahani, phir usi ki audio…',
+      progress: 10,
+    });
+    const captions = buildStoryScript(job, splitCaptions(job.prompt, job.sceneCount));
+    const storyFile = path.join(directory, 'story.txt');
+    await writeFile(storyFile, captions.map((line, index) => `${index + 1}. ${line}`).join('\n'), 'utf8');
+    await updateMediaJob(job, {
+      storyFile: `media-jobs/${job.id}/story.txt`,
+      step: `Story ready — ${captions.length} scenes. Ab audio model se voice ban raha hai…`,
+      progress: 68,
     });
 
-    let stockImages = [];
+    let imagePool = [];
     if (job.imageProvider === 'stock') {
       await updateMediaJob(job, {
         step: 'Copyright-free stock images dhoondh rahe hain (Openverse CC0/PDM)…',
         progress: 9,
       });
-      stockImages = await generateStockImages(job.prompt, job.sceneCount);
+      const stockImages = await generateStockImages(job.prompt, job.sceneCount);
+      imagePool = stockImages.filter(validImageBytes);
+    } else {
+      await updateMediaJob(job, {
+        step: 'Bing batch se 4-4 images ready kar rahe hain — har image check ho rahi hai…',
+        progress: 9,
+      });
+      imagePool = await collectJobImages(job, captions);
     }
+    if (!imagePool.length) throw new Error('Video ke liye koi valid image nahi mili. Provider change karke dobara try karein.');
+    await updateMediaJob(job, {
+      imagePoolCount: imagePool.length,
+      step: `${imagePool.length} valid images mil gayi — alag-alag scenes me laga rahe hain…`,
+      progress: 12,
+    });
 
     const useMotion = job.useAiVideo && job.sceneCount <= 8 && !job.analysis;
     for (let index = 0; index < job.sceneCount; index += 1) {
@@ -1030,10 +1148,7 @@ async function runMediaJob(job) {
           step: `Scene ${index + 1}/${job.sceneCount}: ${job.style} image ban rahi hai…`,
           progress: 10 + Math.round(((index + 0.3) / job.sceneCount) * 60),
         });
-        const scenePrompt = `${job.prompt}. Scene ${index + 1}: ${scene.caption}. ${job.style} style, high detail, cinematic composition.`;
-        const bytes = stockImages.length
-          ? stockImages[index % stockImages.length]
-          : await fetchMediaBytesWithRetry(job, 'image', scenePrompt, job.imageModel, 5, job.imageProvider);
+        const bytes = imagePool[index % imagePool.length];
         const file = `scene-${String(index + 1).padStart(2, '0')}.jpg`;
         await writeFile(path.join(directory, file), bytes);
         scene.image = `media-jobs/${job.id}/${file}`;
@@ -1069,16 +1184,40 @@ async function runMediaJob(job) {
 
     if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
     let narrationPath = null;
+    let ambientPath = null;
+    const creds = mediaTtsCredentials.get(job.id) || {};
     if (job.narration && !audioPath) {
-      await updateMediaJob(job, { step: 'Voice-over ban raha hai…', progress: 73 });
+      await updateMediaJob(job, { step: 'AI audio model se narration ban raha hai…', progress: 72 });
       try {
-        narrationPath = await synthesizeNarration(
+        narrationPath = await synthesizeAiNarration(
           captions.join('. '),
           job.voice,
           path.join(directory, 'narration.wav'),
+          creds.key,
+          creds.baseUrl,
+        );
+        await updateMediaJob(job, { step: 'Pro AI voice ready — ab composition…', progress: 73 });
+      } catch {
+        await updateMediaJob(job, { step: 'AI voice unavailable — local film voice se banana…', progress: 72 });
+        try {
+          narrationPath = await synthesizeNarration(
+            captions.join('. '),
+            job.voice,
+            path.join(directory, 'narration.wav'),
+          );
+        } catch (err) {
+          await updateMediaJob(job, { step: `Voice skip: ${String(err.message || err).slice(0, 120)}` });
+        }
+      }
+    }
+    if (!audioPath) {
+      try {
+        ambientPath = await generateAmbientBed(
+          path.join(directory, 'ambient.wav'),
+          job.durationSeconds,
         );
       } catch (err) {
-        await updateMediaJob(job, { step: `Voice optional chhod diya: ${String(err.message || err).slice(0, 120)}` });
+        await updateMediaJob(job, { step: `Ambient skip: ${String(err.message || err).slice(0, 100)}` });
       }
     }
 
@@ -1090,7 +1229,7 @@ async function runMediaJob(job) {
         step: 'Final video browser me render hona baaki hai…',
       });
     } else {
-      await assembleVideoWithFfmpeg(job, directory, { narration: narrationPath });
+      await assembleVideoWithFfmpeg(job, directory, { narration: narrationPath, ambient: ambientPath });
     }
   } catch (err) {
     await updateMediaJob(job, {
@@ -1100,6 +1239,7 @@ async function runMediaJob(job) {
     });
   } finally {
     mediaRunning.delete(job.id);
+    mediaTtsCredentials.delete(job.id);
   }
 }
 
@@ -3532,6 +3672,27 @@ function resolveJobAudioPath(audioPath) {
   return pathInAllowedFolders(abs) ? abs : null;
 }
 
+async function probeAudioDuration(inputPath) {
+  const bin = await ffmpegExecutable('ffprobe');
+  if (!bin || !inputPath) return 0;
+  const result = await runCommand(bin, [
+    '-v', 'error',
+    '-show_entries', 'format=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1',
+    inputPath,
+  ], 30_000);
+  const value = Number.parseFloat(String(result.out || '').trim().split(/\r?\n/)[0]);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function sceneCountForDuration(durationSeconds, bpm = 0, manual = 0) {
+  if (manual > 0) return Math.min(60, Math.max(6, Math.round(manual)));
+  const secondsPerScene = bpm > 0
+    ? Math.max(5, Math.min(9, (60 / bpm) * 4))
+    : Math.max(5, Math.min(10, durationSeconds / 24));
+  return Math.min(60, Math.max(12, Math.ceil(durationSeconds / secondsPerScene)));
+}
+
 async function analyzeSongAudio(inputPath) {
   const bin = await ffmpegExecutable('ffmpeg');
   if (!bin) return { available: false, reason: 'FFmpeg unavailable.' };
@@ -3648,6 +3809,54 @@ async function analyzeSongAudio(inputPath) {
   }
 }
 
+async function synthesizeAiNarration(text, voice, outPath, key, baseUrl) {
+  if (!key || !baseUrl) throw new Error('AI voice key unavailable.');
+  const model = process.env.TTS_MODEL || 'tts-1';
+  const response = await fetch(`${baseUrl}/audio/speech`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${key}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      voice: voice || 'alloy',
+      input: String(text).slice(0, 4096),
+      response_format: 'wav',
+    }),
+    signal: AbortSignal.timeout(180_000),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`AI voice failed (${response.status}): ${detail.slice(0, 200)}`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length < 1000) throw new Error('AI voice audio khaali hai.');
+  await writeFile(outPath, bytes);
+  return outPath;
+}
+
+async function generateAmbientBed(outPath, durationSeconds) {
+  const bin = await ffmpegExecutable('ffmpeg');
+  if (!bin) throw new Error('FFmpeg unavailable.');
+  const target = Math.min(900, Math.max(5, durationSeconds || 30));
+  const fadeOut = Math.max(0, target - 2);
+  await runCommand(bin, [
+    '-y',
+    '-f', 'lavfi', '-i', `sine=frequency=110:duration=${target.toFixed(2)}`,
+    '-f', 'lavfi', '-i', `sine=frequency=164.81:duration=${target.toFixed(2)}`,
+    '-filter_complex',
+    `[0:a]volume=0.5,lowpass=f=500[a];[1:a]volume=0.32,lowpass=f=650[b];`
+    + `[a][b]amix=inputs=2:normalize=0,afade=t=in:st=0:d=2,afade=t=out:st=${fadeOut.toFixed(2)}:d=2[out]`,
+    '-map', '[out]',
+    '-c:a', 'pcm_s16le',
+    outPath,
+  ], 180_000);
+  const info = await stat(outPath);
+  if (info.size < 1000) throw new Error('Ambient audio nahi bana.');
+  return outPath;
+}
+
 async function synthesizeNarration(text, voice, outPath) {
   const scriptPath = path.join(WORKSPACE, `tts-${Date.now()}-${randomBytes(3).toString('hex')}.ps1`);
   const b64 = (value) => Buffer.from(String(value || ''), 'utf8').toString('base64');
@@ -3658,8 +3867,12 @@ async function synthesizeNarration(text, voice, outPath) {
     'Add-Type -AssemblyName System.Speech',
     '$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer',
     'if ($Voice) { try { $synth.SelectVoice($Voice) } catch {} }',
+    '$synth.Rate = -2',
+    '$synth.Volume = 100',
+    '$safe = [System.Security.SecurityElement]::Escape($Text)',
+    '$ssml = "<speak version=""1.0"" xmlns=""http://www.w3.org/2001/10/Synthesis"" xml:lang=""en-US""><prosody rate=""-8%"">$safe</prosody></speak>"',
     '$synth.SetOutputToWaveFile($Out)',
-    '$synth.Speak($Text)',
+    '$synth.SpeakSsml($ssml)',
     '$synth.Dispose()',
   ].join('\n');
   try {
@@ -3710,9 +3923,12 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   const songIndex = audioPath ? count : null;
   if (audioPath) args.push('-i', audioPath);
   const narrationPath = options.narration || null;
-  const voiceIndex = narrationPath ? (songIndex === null ? count : count + 1) : null;
+  const voiceIndex = narrationPath ? count + (songIndex === null ? 0 : 1) : null;
   if (narrationPath) args.push('-i', narrationPath);
-  const silenceIndex = songIndex === null && voiceIndex === null ? count : null;
+  const ambientPath = options.ambient || null;
+  const ambientIndex = ambientPath ? count + (songIndex === null ? 0 : 1) + (voiceIndex === null ? 0 : 1) : null;
+  if (ambientPath) args.push('-i', ambientPath);
+  const silenceIndex = songIndex === null && voiceIndex === null && ambientIndex === null ? count : null;
   if (silenceIndex !== null) args.push('-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo');
 
   const filters = [];
@@ -3734,24 +3950,32 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   }
   filters.push(`[${current}]fade=t=in:st=0:d=0.5,fade=t=out:st=${(target - 0.6).toFixed(3)}:d=0.6[vout]`);
 
-  if (songIndex !== null && voiceIndex !== null) {
+  const audioStreams = [];
+  if (songIndex !== null) {
+    audioStreams.push(`[${songIndex}:a]volume=0.62,apad=pad_dur=${target.toFixed(3)}[song]`);
+  }
+  if (voiceIndex !== null) {
+    audioStreams.push(`[${voiceIndex}:a]volume=1.15,apad=pad_dur=${target.toFixed(3)}[voice]`);
+  }
+  if (ambientIndex !== null) {
+    audioStreams.push(`[${ambientIndex}:a]volume=0.22,apad=pad_dur=${target.toFixed(3)}[ambient]`);
+  }
+  if (silenceIndex !== null) {
+    audioStreams.push(`[${silenceIndex}:a]atrim=0:${target.toFixed(3)}[silence]`);
+  }
+  const audioLabels = [];
+  if (songIndex !== null) audioLabels.push('[song]');
+  if (voiceIndex !== null) audioLabels.push('[voice]');
+  if (ambientIndex !== null) audioLabels.push('[ambient]');
+  if (silenceIndex !== null) audioLabels.push('[silence]');
+  filters.push(audioStreams.join(';'));
+  if (audioLabels.length > 1) {
     filters.push(
-      `[${songIndex}:a]volume=0.62,apad=pad_dur=${target.toFixed(3)}[song];`
-      + `[${voiceIndex}:a]volume=1.1,apad=pad_dur=${target.toFixed(3)}[voice];`
-      + `[song][voice]amix=inputs=2:duration=first:dropout_transition=1:normalize=0,`
-      + `atrim=0:${target.toFixed(3)}[aout]`,
+      `${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=first:`
+      + `dropout_transition=1:normalize=0,atrim=0:${target.toFixed(3)}[aout]`,
     );
-  } else if (songIndex !== null) {
-    filters.push(
-      `[${songIndex}:a]volume=0.85,apad=pad_dur=${target.toFixed(3)},`
-      + `atrim=0:${target.toFixed(3)}[aout]`,
-    );
-  } else {
-    const index = voiceIndex === null ? silenceIndex : voiceIndex;
-    filters.push(
-      `[${index}:a]volume=1.1,apad=pad_dur=${target.toFixed(3)},`
-      + `atrim=0:${target.toFixed(3)}[aout]`,
-    );
+  } else if (audioLabels.length === 1) {
+    filters.push(`${audioLabels[0]}atrim=0:${target.toFixed(3)}[aout]`);
   }
 
   args.push(
@@ -4170,6 +4394,10 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const job = await createMediaJob(payload);
+        mediaTtsCredentials.set(job.id, {
+          key: apiKeyFrom(req),
+          baseUrl: baseUrlFrom(req),
+        });
         return sendJson(res, 201, job);
       } catch (err) {
         return sendJson(res, 400, { error: err.message || 'Could not create media job.' });
