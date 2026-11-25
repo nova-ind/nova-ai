@@ -31,7 +31,7 @@ Ek hi EXE me Nova app, zero-dependency Node runtime aur **wahi logo** (white rou
 - WebView2 runtime offline installer ke andar hai; purane PC par missing ho to setup khud silently install kar deta hai.
 - Title bar ka **“Bing Login”** button ek baar Microsoft sign-in tab kholta hai. Login cookies `%LOCALAPPDATA%\Nova AI\workspace\.browser-profile` me persist hote hain, isliye baar baar login nahi karna padta.
 - Port 4173 busy ho to launcher apne aap free port pick kar leta hai.
-- Sidebar ke niche **folder icon** se coding folder chuno — native Windows folder dialog khulta hai. Chat/Agent usi folder me code likh sakta hai (Bots panel se multiple folders allow kar sakte hain).
+- Sidebar ke niche **folder icon** se coding folder chuno — native Windows folder dialog khulta hai. Folder select karte hi **Agent mode automatically on** ho jata hai, aur “app banao / code likho / bug fix karo” jaise prompts seedhe usi folder me files likhte hain (Bots panel se multiple folders allow kar sakte hain). Agent provider limit/auth fail ho to bhi selected folder me ek complete offline starter app (`index.html`, `styles.css`, `app.js`, `server.js`, `README.md`) bana diya jata hai, taaki folder khaali na rahe.
 - Composer me **scissors icon** se free FFmpeg editor khulta hai: trim, merge, compress, mute, add audio, extract MP3, resize, convert. FFmpeg/ffprobe installer ke andar offline bundled hain.
 - Data/log: `%LOCALAPPDATA%\Nova AI\workspace\desktop-launcher.log`.
 - Chat API ke liye internet + API key chahiye; image tools ke liye Chrome/Edge recommended hain.
@@ -94,6 +94,7 @@ OpenRouter / Groq / Ollama bhi chalega — bas `UPSTREAM_BASE_URL` badal do
 4. Ussi page par **Account ID** (32-character string) copy karein. Account ID dashboard ke right sidebar me bhi milta hai.
 5. Nova app me **Settings → Cloudflare Account ID** aur **Cloudflare API token** me dono paste karein → **Save settings**.
 6. Image provider `Cloudflare Flux` ya `Auto` chunein. Free plan roz 10,000 neurons deta hai — Flux images ke liye kaafi.
+7. Settings me **Test Cloudflare token** dabayein. Ye actual Workers AI image run karta hai. `Authentication error` ka matlab token Cloudflare Global API key ya Cloudflare Images token hai — Workers AI REST API token dobara banayein aur same Account ID ke saath paste karein.
 
 > Global API key (`X-Auth-Key`) mat use karein. Nova ko sirf Workers AI API token + Account ID chahiye. Token sirf ek baar dikhayi deta hai — usako kahin safe save karein.
 
