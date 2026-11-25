@@ -625,6 +625,19 @@ svg {
   border-radius: 10px;
 }
 
+.queued-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(108, 92, 231, 0.18);
+  color: var(--accent, #a99bff);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  vertical-align: middle;
+}
+
 .msg-meta {
   display: flex;
   align-items: center;

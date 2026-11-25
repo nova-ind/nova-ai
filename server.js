@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { openSync, closeSync } from 'node:fs';
 import { readFile, readdir, writeFile, mkdir, stat, rm, copyFile, rename, access } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +31,7 @@ let ffmpegVersionCache = null;
 let ffmpegEncodersCache = null;
 const stockImageCache = new Map();
 const mediaTtsCredentials = new Map();
+const agentAppProcesses = new Map();
 
 const PORT = Number(process.env.PORT || 4173);
 const UPSTREAM_BASE = (process.env.UPSTREAM_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
@@ -1276,6 +1278,88 @@ function safeWorkspacePath(rel = '', root = WORKSPACE) {
   return target;
 }
 
+const NODE_STATIC_SERVER = [
+  "const http=require('http');const fs=require('fs');const path=require('path');",
+  "const root=process.cwd();const port=Number(process.env.PORT||4173);",
+  "const types={'.html':'text/html','.js':'text/javascript','.css':'text/css','.json':'application/json','.png':'image/png','.jpg':'image/jpeg','.svg':'image/svg+xml'};",
+  "http.createServer((req,res)=>{let name=decodeURIComponent(req.url.split('?')[0]);if(name==='/')name='/index.html';const file=path.resolve(root,'.'+name);if(!file.startsWith(root)){res.writeHead(403).end('Forbidden');return;}fs.stat(file,(err,info)=>{const target=(!err&&info.isFile())?file:path.join(root,'index.html');fs.readFile(target,(e,data)=>{if(e){res.writeHead(404).end('Not found');return;}res.writeHead(200,{'content-type':types[path.extname(target)]||'application/octet-stream'});res.end(data);});});}).listen(port,()=>console.log('Nova app running at http://localhost:'+port));",
+].join('\n');
+
+async function fileExists(file) {
+  try { await access(file); return true; } catch { return false; }
+}
+
+async function packageScripts(dir) {
+  try {
+    const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8'));
+    return pkg?.scripts && typeof pkg.scripts === 'object' ? pkg.scripts : {};
+  } catch {
+    return {};
+  }
+}
+
+async function resolveAppCommand(dir, args = {}, port = 4173) {
+  const manual = String(args.command || '').trim();
+  if (manual) {
+    return {
+      command: process.platform === 'win32' ? 'cmd.exe' : 'sh',
+      args: process.platform === 'win32' ? ['/d', '/s', '/c', manual] : ['-c', manual],
+      label: manual,
+    };
+  }
+  const scripts = await packageScripts(dir);
+  for (const name of ['dev', 'start', 'serve']) {
+    if (scripts[name]) {
+      return {
+        command: process.platform === 'win32' ? 'npm.cmd' : 'npm',
+        args: ['run', name],
+        label: `npm run ${name}`,
+      };
+    }
+  }
+  for (const entry of ['server.js', 'app.js', 'index.js', 'main.js']) {
+    if (await fileExists(path.join(dir, entry))) {
+      return { command: process.execPath, args: [entry], label: `node ${entry}` };
+    }
+  }
+  if (await fileExists(path.join(dir, 'index.html'))) {
+    return {
+      command: process.execPath,
+      args: ['-e', NODE_STATIC_SERVER],
+      label: `static server on port ${port}`,
+    };
+  }
+  throw new Error(`App run karne ka tarika nahi mila: ${dir}. package.json ya index.html banao, ya command bhejo.`);
+}
+
+async function probeLocalUrl(port) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1500) });
+    return response.ok || response.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+async function listScriptFiles(dir) {
+  const found = [];
+  async function walk(current, depth) {
+    if (depth > 4 || found.length >= 60) return;
+    let entries = [];
+    try { entries = await readdir(current, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) await walk(full, depth + 1);
+      else if (entry.name.endsWith('.js') && found.length < 60) found.push(full);
+    }
+  }
+  await walk(dir, 0);
+  return found;
+}
+
+const DESTRUCTIVE_COMMAND = /(?:^|[;&|]\s*)(?:format\s|diskpart(?:\s|$)|shutdown\s|rd\s+\/s\s+\/q\s+[a-z]:\\?\s*$)/i;
+
 const AGENT_TOOLS = [
   {
     type: 'function',
@@ -1397,6 +1481,86 @@ const AGENT_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'run_command',
+      description: 'Run a CMD/terminal command inside the allowed folder and return stdout, stderr and exit code. Use it for builds, npm, python, node, ffprobe, directory checks and any command the user asks to run. Runs in auto mode without asking permission.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          timeoutMs: { type: 'number' },
+          path: { type: 'string' },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'start_app',
+      description: 'Run/test a generated app. Detects npm scripts (dev/start/serve), node entry files or a plain index.html static server. Returns the local URL and log file. Use after writing app files when the user asks to run or test it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          command: { type: 'string' },
+          port: { type: 'number' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'test_app',
+      description: 'Test a generated app: runs npm test when available, otherwise node --check on JS files, and optionally probes its local URL.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          command: { type: 'string' },
+          port: { type: 'number' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'git',
+      description: 'Run git inside the allowed folder. Actions: status, add, commit, push, pull, log, init, remote, sync (commit + push). Use sync after finishing code changes so every stage is pushed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['status', 'add', 'commit', 'push', 'pull', 'log', 'init', 'remote', 'sync'] },
+          path: { type: 'string' },
+          message: { type: 'string' },
+          branch: { type: 'string' },
+          remote: { type: 'string' },
+          files: { type: 'string' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'github_login',
+      description: 'Log in to GitHub for git push. Uses GitHub CLI web login when installed, or accepts a Personal Access Token and stores it in the Windows Git credential manager. Never echo the token in chat.',
+      parameters: {
+        type: 'object',
+        properties: {
+          token: { type: 'string' },
+          username: { type: 'string' },
+          path: { type: 'string' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'create_folder',
       description: 'Create a folder inside the allowed root folder.',
       parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
@@ -1509,6 +1673,11 @@ const TOOL_LABELS = {
   generate_image: 'Creating an image…',
   generate_video: 'Creating a short video…',
   create_media_job: 'Starting resumable video project…',
+  run_command: 'Running CMD command…',
+  start_app: 'Starting the built app…',
+  test_app: 'Testing the built app…',
+  git: 'Running git…',
+  github_login: 'Opening GitHub login…',
   create_folder: 'Creating a folder…',
   delete_file: 'Deleting a file…',
   copy_file: 'Copying a file…',
@@ -1522,9 +1691,10 @@ const TOOL_LABELS = {
   browser_screenshot: 'Taking screenshot…',
 };
 
-function runCommand(command, args, timeoutMs = 20_000) {
+function runCommand(command, args, timeoutMs = 20_000, cwd = WORKSPACE, input = null, env = process.env) {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd: WORKSPACE, windowsHide: true });
+    const child = spawn(command, args, { cwd, windowsHide: true, env });
+    if (input != null) child.stdin?.end(String(input));
     let out = '';
     let err = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
@@ -2761,6 +2931,184 @@ async function runTool(name, args, root = WORKSPACE) {
       return `Video job started: ${job.id}. Status: ${job.status}. Progress updates chat me dikhenge aur PC restart ke baad bhi resume hoga.`;
     }
 
+    if (name === 'run_command') {
+      const command = String(args.command || '').trim();
+      if (!command) return 'Error: command required hai.';
+      if (DESTRUCTIVE_COMMAND.test(command)) {
+        return 'Error: ye system-level destructive command block hai. App folder ke andar kaam karein.';
+      }
+      const dir = args.path ? safeWorkspacePath(args.path, root) : root;
+      const timeout = Math.min(180_000, Math.max(1000, Number(args.timeoutMs) || 30_000));
+      const shell = process.platform === 'win32';
+      const result = await runCommand(
+        shell ? 'cmd.exe' : 'sh',
+        shell ? ['/d', '/s', '/c', command] : ['-c', command],
+        timeout,
+        dir,
+      );
+      return [
+        `CMD (${dir}): ${command}`,
+        result.out ? `STDOUT:\n${result.out}` : '',
+        result.err ? `STDERR:\n${result.err}` : '',
+        `EXIT: ${result.code ?? 'killed'}`,
+      ].filter(Boolean).join('\n');
+    }
+
+    if (name === 'start_app') {
+      const dir = args.path ? safeWorkspacePath(args.path, root) : root;
+      const info = await stat(dir);
+      const cwd = info.isDirectory() ? dir : path.dirname(dir);
+      const port = Math.min(65535, Math.max(1, Number(args.port) || 4173));
+      const plan = await resolveAppCommand(cwd, args, port);
+      const log = path.join(cwd, 'nova-app.log');
+      const logFd = openSync(log, 'a');
+      const child = spawn(plan.command, plan.args, {
+        cwd,
+        detached: true,
+        windowsHide: true,
+        stdio: ['ignore', logFd, logFd],
+        env: { ...process.env, PORT: String(port) },
+      });
+      closeSync(logFd);
+      child.unref();
+      agentAppProcesses.set(cwd, { pid: child.pid, port, log, command: plan.label, startedAt: Date.now() });
+      await sleep(1800);
+      const reachable = await probeLocalUrl(port);
+      return [
+        `App started: ${plan.label} (pid ${child.pid}).`,
+        reachable ? `APP_URL:http://localhost:${port}` : `Server abhi response nahi de raha — log check karein.`,
+        `FILE:${log}`,
+      ].join('\n');
+    }
+
+    if (name === 'test_app') {
+      const dir = args.path ? safeWorkspacePath(args.path, root) : root;
+      const info = await stat(dir);
+      const cwd = info.isDirectory() ? dir : path.dirname(dir);
+      const lines = [`Test folder: ${cwd}`];
+      const format = (result) => [
+        result.out ? result.out : '',
+        result.err ? `STDERR: ${result.err}` : '',
+        `EXIT: ${result.code ?? 'killed'}`,
+      ].filter(Boolean).join('\n');
+      if (String(args.command || '').trim()) {
+        const command = String(args.command).trim();
+        const shell = process.platform === 'win32';
+        lines.push(format(await runCommand(
+          shell ? 'cmd.exe' : 'sh',
+          shell ? ['/d', '/s', '/c', command] : ['-c', command],
+          120_000,
+          cwd,
+        )));
+      } else {
+        const scripts = await packageScripts(cwd);
+        if (scripts.test) {
+          lines.push(`npm test:`, format(await runCommand(
+            process.platform === 'win32' ? 'npm.cmd' : 'npm',
+            ['test'],
+            120_000,
+            cwd,
+          )));
+        } else {
+          const files = await listScriptFiles(cwd);
+          if (!files.length) lines.push('Koi JS file nahi mili; index.html/static app check karein.');
+          for (const file of files) {
+            const result = await runCommand(process.execPath, ['--check', file], 20_000, cwd);
+            lines.push(`${path.relative(cwd, file)}: ${result.code === 0 ? 'syntax OK' : `FAIL — ${result.err.slice(0, 300)}`}`);
+          }
+        }
+      }
+      if (args.port) {
+        const port = Number(args.port);
+        lines.push(await probeLocalUrl(port)
+          ? `APP_URL:http://localhost:${port} — app response de raha hai.`
+          : `Port ${port} par app nahi mila.`);
+      }
+      return lines.join('\n');
+    }
+
+    if (name === 'git') {
+      const dir = args.path ? safeWorkspacePath(args.path, root) : root;
+      const info = await stat(dir);
+      const cwd = info.isDirectory() ? dir : path.dirname(dir);
+      const action = String(args.action || 'status').toLowerCase();
+      const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+      const run = (gitArgs, timeout = 60_000) => runCommand('git', gitArgs, timeout, cwd, null, env);
+      const format = (result) => [
+        result.out ? result.out : '',
+        result.err ? `STDERR: ${result.err}` : '',
+        `EXIT: ${result.code ?? 'killed'}`,
+      ].filter(Boolean).join('\n');
+      const addFiles = async () => {
+        const files = String(args.files || '').trim();
+        return format(await run(files ? ['add', ...files.split(/\s+/)] : ['add', '-A']));
+      };
+      const push = async () => {
+        const remote = String(args.remote || 'origin').trim();
+        const branch = String(args.branch || '').trim();
+        return format(await run(['push', '-u', remote, branch || 'HEAD'], 180_000));
+      };
+      if (action === 'status') return format(await run(['status', '--short', '--branch']));
+      if (action === 'add') return await addFiles();
+      if (action === 'commit' || action === 'sync') {
+        const message = String(args.message || '').trim();
+        if (!message) return 'Error: commit message required hai.';
+        const results = [await addFiles(), format(await run(['commit', '-m', message], 120_000))];
+        if (action === 'sync') results.push(await push());
+        return results.join('\n\n');
+      }
+      if (action === 'push') return await push();
+      if (action === 'pull') return format(await run(['pull'], 120_000));
+      if (action === 'log') return format(await run(['log', '--oneline', '-n', '12']));
+      if (action === 'init') return format(await run(['init']));
+      if (action === 'remote') {
+        const url = String(args.url || '').trim();
+        if (url) return format(await run(['remote', 'add', 'origin', url]));
+        return format(await run(['remote', '-v']));
+      }
+      return `Unknown git action: ${action}`;
+    }
+
+    if (name === 'github_login') {
+      const dir = args.path ? safeWorkspacePath(args.path, root) : root;
+      const info = await stat(dir);
+      const cwd = info.isDirectory() ? dir : path.dirname(dir);
+      const token = String(args.token || '').trim();
+      const username = String(args.username || 'x-access-token').trim();
+      if (token) {
+        const input = `protocol=https\nhost=github.com\nusername=${username}\npassword=${token}\n\n`;
+        const approve = await runCommand('git', ['credential', 'approve'], 15_000, cwd, input);
+        if (approve.code !== 0) return `GitHub login save nahi hua: ${approve.err || approve.out || 'git credential error'}`;
+        await runCommand('git', ['config', '--global', 'credential.helper', 'manager'], 10_000, cwd);
+        return 'GitHub PAT Windows credential manager me save ho gaya. Ab git push auto chalega — token chat me nahi dikhaya gaya.';
+      }
+      const ghVersion = await runCommand('gh', ['--version'], 8000, cwd);
+      if (ghVersion.code === 0) {
+        const log = path.join(WORKSPACE, 'github-login.log');
+        const logFd = openSync(log, 'a');
+        const child = spawn('gh', [
+          'auth', 'login', '--web', '--git-protocol', 'https', '--hostname', 'github.com',
+        ], { cwd, detached: true, windowsHide: true, stdio: ['ignore', logFd, logFd] });
+        closeSync(logFd);
+        child.unref();
+        await sleep(6000);
+        const text = await readFile(log, 'utf8').catch(() => '');
+        const code = /([A-Z0-9]{4}-[A-Z0-9]{4})/.exec(text)?.[1];
+        return [
+          'GitHub CLI se web login shuru ho gaya.',
+          code ? `One-time code: ${code}` : 'Code terminal log me hai; browser me device login confirm karein.',
+          'OPEN:https://github.com/login/device',
+          `FILE:${log}`,
+        ].join('\n');
+      }
+      return [
+        'GitHub CLI installed nahi hai. Do tarike hain:',
+        '1) Browser me GitHub login karke PAT banayein (repo permission), phir mujhe bolein: github login <token>',
+        '2) GitHub CLI install karein — main automatic web login chala dunga.',
+        'OPEN:https://github.com/settings/tokens',
+      ].join('\n');
+    }
+
     if (name === 'create_folder') {
       const dir = safeWorkspacePath(args.path || 'new-folder', root);
       await mkdir(dir, { recursive: true });
@@ -3146,7 +3494,7 @@ async function streamOfflineScaffold(res, root, prompt, reason) {
   res.end();
 }
 
-function agentSystem(modes, customSystem = '', root = WORKSPACE) {
+function agentSystem(modes, customSystem = '', root = WORKSPACE, autoMode = true) {
   const toolNames = AGENT_TOOLS.map((tool) => tool.function.name).join(', ');
   return [
     BASE_PERSONA,
@@ -3157,6 +3505,9 @@ function agentSystem(modes, customSystem = '', root = WORKSPACE) {
     'CODE RULE: For any request to create/fix an app, website, code file, script or project, ALWAYS call write_file (and create_folder when needed). Write real complete files into the allowed folder. If the folder is empty, scaffold the whole project. Never only describe or paste code in chat without saving it.',
     'IMAGE RULE: For any image request call generate_image. Prefer provider auto (Bing first, then Cloudflare Flux, then Hugging Face Flux). Never use Pollinations — the user disabled it because of poor quality.',
     'VIDEO RULE: If the user asks for any video — story, cartoon, cinematic, meme/funny, or a video from an MP3 song — call create_media_job, never just describe it. Infer style (cinematic/cartoon/meme/anime/realistic), fx and transitions from the request. Use ratio 9:16 for reels/stories/short-form and 16:9 for normal video. If the user attached an MP3, pass its workspace audioPath. Default video provider is ltx (free open-source); Pollinations is disabled.',
+    autoMode
+      ? 'AUTO MODE (full permission): The user enabled OpenCode-style auto mode. When asked to run/test a built app, run CMD commands, check git, commit/push or log in to GitHub, call run_command/start_app/test_app/git/github_login directly. Do not ask for confirmation and do not merely print commands.'
+      : 'Permission mode: ask before running shell commands, starting apps or pushing to git.',
     `Available tools: ${toolNames}.`,
     'You may emit several tool calls across several turns. After tools run, continue automatically. Only give the final Markdown answer when the task is complete; include links to any files or images you created.',
     'IMPORTANT fallback: if native tool calling is not available, put each action on its own line as <tool_call>{"name":"tool_name","arguments":{...}}</tool_call> and nothing else in that turn. After seeing results, continue. Never claim you did something you did not actually do.',
@@ -3205,7 +3556,7 @@ async function handleAgent(req, res, key) {
     return sendJson(res, 403, { error: err.message });
   }
   const conversation = [
-    { role: 'system', content: agentSystem(modes, payload.system, root) },
+    { role: 'system', content: agentSystem(modes, payload.system, root, payload.autoMode !== false) },
     ...messages,
   ];
 
@@ -3309,8 +3660,11 @@ async function handleAgent(req, res, key) {
               url: `/api/file?path=${encodeURIComponent(fullPath)}`,
             });
           }
-          if (result.startsWith('OPEN:')) {
-            sse(res, { type: 'open_url', url: result.slice(5).trim() });
+          const openUrl = result.startsWith('OPEN:')
+            ? result.slice(5).trim()
+            : result.match(/APP_URL:(\S+)/)?.[1];
+          if (openUrl) {
+            sse(res, { type: 'open_url', url: openUrl });
           }
           if (call.name === 'generate_image') {
             const match = /(\/api\/imagine\?[^\s]+)/.exec(result);

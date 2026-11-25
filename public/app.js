@@ -115,6 +115,7 @@ const els = {
   lyricsInput: $('lyricsInput'),
   voiceInput: $('voiceInput'),
   narrationToggle: $('narrationToggle'),
+  autoModeToggle: $('autoModeToggle'),
   modelInput: $('modelInput'),
   modelOptions: $('modelOptions'),
   modelFilter: $('modelFilter'),
@@ -201,6 +202,7 @@ const DEFAULT_SETTINGS = {
   lyrics: '',
   voice: 'Microsoft Hazel Desktop',
   narration: true,
+  autoMode: true,
   codingFolder: '',
   modes: { agent: true, think: false, search: false, imagine: false, video: false, fun: false },
 };
@@ -1056,6 +1058,12 @@ function buildMessage(message, index, isLast) {
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = message.content || '';
+    if (message.queued) {
+      const badge = document.createElement('span');
+      badge.className = 'queued-badge';
+      badge.textContent = 'Queued';
+      bubble.append(badge);
+    }
     for (const src of message.images || []) {
       const img = document.createElement('img');
       img.src = src;
@@ -1334,9 +1342,11 @@ function apiMessages(chat) {
   return output;
 }
 
+const queuedTurns = [];
+
 async function send(rawText) {
-  const text = rawText.trim();
-  if ((!text && !attachments.length) || busy()) return;
+  const text = String(rawText || '').trim();
+  if (!text && !attachments.length) return;
 
   const chat = ensureChat();
   const images = attachments.filter((a) => a.kind === 'image').map((a) => a.dataUrl);
@@ -1344,14 +1354,21 @@ async function send(rawText) {
     .filter((a) => a.kind === 'text')
     .map(({ name, text: body }) => ({ name, text: body }));
   const audio = attachments.find((a) => a.kind === 'audio');
-
-  chat.messages.push({
+  const userMessage = {
     role: 'user',
     content: text || (files.length ? 'Please review the attached file.' : ''),
     images,
     files,
     ts: Date.now(),
-  });
+  };
+
+  // OpenCode-style: agent chal raha ho tab bhi naya message likh sakte hain — queue me chalega.
+  if (busy()) {
+    chat.messages.push({ ...userMessage, queued: true });
+    queuedTurns.push({ chatId: chat.id, text, audio, ts: userMessage.ts });
+  } else {
+    chat.messages.push(userMessage);
+  }
 
   if (!chat.title) {
     chat.title = (text || audio?.name || files[0]?.name || 'New request').replace(/\s+/g, ' ').slice(0, 46);
@@ -1367,10 +1384,19 @@ async function send(rawText) {
   syncComposer();
   scrollToBottom(true);
 
+  if (busy()) {
+    toast('Message queue me hai — current task khatam hone par chalega');
+    return;
+  }
+  await handleUserTurn(chat, text, audio);
+}
+
+async function handleUserTurn(chat, text, audio) {
   // User prompt/idea/caption maang raha hai to media mode ignore karo — video mat banao.
   const asksForText = /\b(prompt|prompts|idea|ideas|caption|captions|script|likh|likho)\b/i.test(text || '');
   const wantsVideo = wantsVideoRequest(text);
-  const wantsCoding = wantsCodingRequest(text) && !wantsVideo;
+  const wantsCoding = wantsCodingRequest(text) || wantsAgentOpsRequest(text);
+  const wantsAgent = wantsCoding && !wantsVideo;
   if (asksForText && (settings.modes.video || settings.modes.imagine)) {
     settings.modes.video = false;
     settings.modes.imagine = false;
@@ -1384,8 +1410,8 @@ async function send(rawText) {
     return;
   }
 
-  // "App banao", "code likho", "bug fix karo" — coding folder me agent chalao, chahe imagine mode on ho.
-  if (wantsCoding) {
+  // "App banao", "cmd chalao", "test/run karo", "git push" — agent auto mode me chalao.
+  if (wantsAgent) {
     settings.modes.agent = true;
     settings.modes.imagine = false;
     settings.modes.video = false;
@@ -1410,6 +1436,18 @@ async function send(rawText) {
   }
 }
 
+async function drainQueuedTurns() {
+  if (busy() || !queuedTurns.length) return;
+  const next = queuedTurns.shift();
+  const chat = chats.find((item) => item.id === next.chatId);
+  if (!chat) return;
+  const queued = [...chat.messages].reverse().find((item) => item.role === 'user' && item.ts === next.ts);
+  if (queued) delete queued.queued;
+  touch(chat);
+  renderMessages();
+  await handleUserTurn(chat, next.text, next.audio);
+}
+
 function wantsVideoRequest(text) {
   const value = String(text || '');
   if (/\b(prompt|prompts|idea|ideas|caption|captions|script|likh|likho)\b/i.test(value)) return false;
@@ -1421,9 +1459,15 @@ function wantsVideoRequest(text) {
 
 function wantsCodingRequest(text) {
   const value = String(text || '');
-  const noun = /\b(code|coding|app|application|website|web\s*site|site|project|software|script|file|folder|bug|fix|debug|api|backend|frontend|component|function|database|db|html|css|javascript|python|node|react|flutter|server|page|ui)\b/i;
-  const verb = /\b(ban|bana|bna|bno|bnao|banayein|banaye|banao|likh|likho|create|build|develop|implement|fix|write|do|de)\b/i;
+  const noun = /\b(code|coding|app|application|website|web\s*site|site|project|software|script|file|folder|bug|fix|debug|api|backend|frontend|component|function|database|db|html|css|javascript|python|node|react|flutter|server|page|ui|cmd|command|terminal|shell|git|github|test|run|build|npm|exe)\b/i;
+  const verb = /\b(ban|bana|bna|bno|bnao|banayein|banaye|banao|likh|likho|create|build|develop|implement|fix|write|do|de|chal|chala|chalao|chalayein|run|test|push|pull|commit|login|start|check|debug|install)\b/i;
   return noun.test(value) && verb.test(value);
+}
+
+function wantsAgentOpsRequest(text) {
+  const value = String(text || '').toLowerCase();
+  if (wantsVideoRequest(value)) return false;
+  return /\b(cmd|command|terminal|shell|git|github|push|commit|pull|login|gh-cli|npm|node|python|test|run|chalao|chalayein|chala|check|start|deploy|localhost|build karo|test karo|run karo)\b/i.test(value);
 }
 
 async function runChat(chat) {
@@ -1537,6 +1581,7 @@ async function runChat(chat) {
     syncComposer();
     scrollToBottom(true);
     els.input.focus();
+    queueMicrotask(() => drainQueuedTurns());
   }
 }
 
@@ -1579,6 +1624,7 @@ async function runAgent(chat) {
     modes,
     chatId: chat.id,
     rootDir: settings.codingFolder || '',
+    autoMode: settings.autoMode !== false,
   };
   if (settings.customModel) body.model = settings.customModel;
   else if (settings.provider !== 'nvidia' && PROVIDERS[settings.provider]?.model) {
@@ -1724,6 +1770,7 @@ async function runAgent(chat) {
     syncComposer();
     scrollToBottom(true);
     els.input.focus();
+    queueMicrotask(() => drainQueuedTurns());
   }
 }
 
@@ -2998,6 +3045,7 @@ function openSettings() {
   els.lyricsInput.value = settings.lyrics || '';
   els.voiceInput.value = settings.voice || 'Microsoft Hazel Desktop';
   els.narrationToggle.checked = settings.narration !== false;
+  if (els.autoModeToggle) els.autoModeToggle.checked = settings.autoMode !== false;
   updateFolderButton();
   els.modelInput.value = settings.customModel || '';
   els.tempInput.value = String(settings.temperature ?? 0.7);
@@ -4110,6 +4158,7 @@ els.saveSettings.addEventListener('click', async () => {
   settings.lyrics = els.lyricsInput.value.trim();
   settings.voice = els.voiceInput.value.trim() || 'Microsoft Hazel Desktop';
   settings.narration = els.narrationToggle.checked;
+  settings.autoMode = els.autoModeToggle ? els.autoModeToggle.checked : settings.autoMode !== false;
   settings.baseUrl = els.baseUrlInput.value.trim() || PROVIDERS[settings.provider]?.base || PROVIDERS.nvidia.base;
   settings.customModel = els.modelInput.value.trim();
   syncActiveModel();

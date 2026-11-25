@@ -113,7 +113,8 @@ OpenRouter / Groq / Ollama bhi chalega — bas `UPSTREAM_BASE_URL` badal do
 | **Multiple bots** | 🤖 button — kai bots banao, har ka apna master prompt + allowed folder; “Run all bots” ek click me sab chalata hai |
 | **Allowed folders / coding folder** | Sidebar folder button ya Bots panel se native picker se folder chuno; bot aur chat agent sirf unhi folders me file operations karte hain |
 | **Free FFmpeg editor** | Trim/cut, merge, compress, mute, add/replace audio, extract MP3, resize aur convert — sab local, offline, bina kisi paid service ke |
-| **Agent tools** | `web_search`, `list_files`, `read_file`, `write_file`, `create_folder`, `delete_file`, `copy_file`, `move_file`, `run_code`, `generate_image`, `open_webpage`, `browser_open`, `browser_wait`, `browser_click`, `browser_type`, `browser_text`, `browser_screenshot` |
+| **Agent tools** | `web_search`, `list_files`, `read_file`, `write_file`, `create_folder`, `delete_file`, `copy_file`, `move_file`, `run_code`, `generate_image`, `create_media_job`, `run_command`, `start_app`, `test_app`, `git`, `github_login`, `open_webpage`, `browser_open`, `browser_wait`, `browser_click`, `browser_type`, `browser_text`, `browser_screenshot` |
+| **Auto mode / full permission** | Settings → *Auto mode* ON (default). Agent chat se hi CMD commands chalata hai, banayi hui app ko run/test karta hai, `git status/add/commit/push` karta hai aur GitHub web login/PAT se authentication setup karta hai. System-level destructive commands block hain. Agent chal raha ho tab bhi naya message bhej sakte hain — current task khatam hone par automatically chal jata hai (OpenCode-style queue). |
 | **Workspace files** | Agent ne banayi files `G:\Nova Bot\workspace` me save hoti hain aur chat se `/workspace/...` link se khulti hain |
 | **Think** | Extended reasoning toggle; reasoning models par live "Thinking" panel |
 | **Search (DeepSearch)** | Real web search + neeche numbered sources |
