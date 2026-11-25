@@ -1735,6 +1735,17 @@ async function generateImage(chat, prompt) {
     }
   }
 
+  // Local PC image worker connected ho to seedha server par bhejo — wahan Bing UI se banega.
+  const workerReady = Boolean(
+    serverConfig.imageWorkerConnected || serverConfig.mediaProviders?.imageWorker,
+  );
+  if (provider === 'auto' && !isLocal && workerReady) {
+    assistant.url = imagineUrl('auto');
+    touch(chat);
+    renderMessages();
+    return;
+  }
+
   const tryBrowserHf = provider === 'huggingface' || (provider === 'auto' && !isLocal);
   if (tryBrowserHf) {
     try {
@@ -1744,7 +1755,7 @@ async function generateImage(chat, prompt) {
       renderMessages();
       return;
     } catch (err) {
-      if (provider === 'huggingface' || err?.isHfQuota) {
+      if (provider === 'huggingface') {
         assistant.status = 'error';
         assistant.error = err.message;
         touch(chat);

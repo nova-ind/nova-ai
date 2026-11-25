@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { readFile, readdir, writeFile, mkdir, stat, rm, copyFile, rename, access } from 'node:fs/promises';
 import path from 'node:path';
@@ -54,6 +55,7 @@ const VIDEO_PROVIDERS = [
 const CDP_PORT = Number(process.env.CDP_PORT || 9222);
 const BROWSER_PROFILE = path.join(WORKSPACE, '.browser-profile');
 const BING_COOKIE_FILE = path.join(WORKSPACE, 'bing-auth.json');
+const WORKER_TOKEN_FILE = path.join(WORKSPACE, 'image-worker-token.json');
 const LIVE_URL = (process.env.LIVE_URL || 'https://nova-ai-9gbh.onrender.com').replace(/\/+$/, '');
 let bingCookie = (process.env.BING_AUTH_COOKIE || '').trim();
 try {
@@ -61,6 +63,23 @@ try {
   bingCookie = String(savedBing.cookie || '').trim() || bingCookie;
 } catch {
   /* first run */
+}
+let imageWorkerToken = (process.env.NOVA_WORKER_TOKEN || '').trim();
+let imageWorkerLastSeen = 0;
+const pendingImageJobs = new Map();
+try {
+  const savedWorker = JSON.parse(await readFile(WORKER_TOKEN_FILE, 'utf8'));
+  imageWorkerToken = String(savedWorker.token || '').trim() || imageWorkerToken;
+} catch {
+  /* first run */
+}
+if (BING_SUPPORTED && !imageWorkerToken) {
+  imageWorkerToken = randomBytes(24).toString('hex');
+  await writeFile(
+    WORKER_TOKEN_FILE,
+    JSON.stringify({ token: imageWorkerToken, createdAt: Date.now() }),
+    'utf8',
+  ).catch(() => {});
 }
 let browserTargetId = null;
 
@@ -682,10 +701,11 @@ async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'au
     }
     if (provider === 'cloudflare') return generateCloudflareImage(prompt, model);
     if (provider === 'huggingface') return generateHuggingFaceImage(prompt, model, ratio);
+    if (provider === 'worker') return generateImageViaWorker(prompt, ratio);
     if (provider === 'pollinations') {
       throw new Error('Pollinations band hai — app Bing/Cloudflare/Hugging Face free providers use karti hai.');
     }
-    throw new Error(`Unknown image provider: ${provider}. Available: bing, cloudflare, huggingface.`);
+    throw new Error(`Unknown image provider: ${provider}. Available: bing, cloudflare, huggingface, worker.`);
   }
   if (provider === 'ltx') return generateLtxVideo(prompt, { duration, ratio });
   if (provider === 'pollinations') {
@@ -697,6 +717,7 @@ async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'au
 
 function configuredImageProviders() {
   return [
+    ...(!BING_SUPPORTED && imageWorkerConnected() ? ['worker'] : []),
     ...(BING_SUPPORTED || bingCookie ? ['bing'] : []),
     ...(cloudflareAccount && cloudflareToken ? ['cloudflare'] : []),
     ...(hfToken ? ['huggingface'] : []),
@@ -709,7 +730,7 @@ async function generateImageSmart(prompt, options = {}) {
   const order = useAuto ? configuredImageProviders() : [requested];
   if (!order.length) {
     throw new Error(
-      'Koi free image provider configured nahi hai. Local PC par Bing automatically chalega; online site par Settings me Cloudflare token ya Hugging Face token daalo (dono free).',
+      'Koi free image provider configured nahi hai. Local PC kholein ya Settings me Cloudflare/Hugging Face free token daalo.',
     );
   }
   let lastError = null;
@@ -1471,7 +1492,7 @@ async function syncBingLoginToLive() {
   const response = await fetch(`${LIVE_URL}/api/bing-cookie`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ cookie }),
+    body: JSON.stringify({ cookie, workerToken: imageWorkerToken, currentToken: imageWorkerToken }),
     signal: AbortSignal.timeout(30_000),
   });
   const data = await response.json().catch(() => ({}));
@@ -1564,6 +1585,155 @@ async function generateBingImageHttp(prompt) {
     return Buffer.from(await imageResponse.arrayBuffer());
   }
   throw new Error('Bing image generation timed out.');
+}
+
+/* ---------- live → local PC image worker (Bing UI par Render se bhejkar) ---------- */
+
+function imageWorkerConnected() {
+  return Boolean(imageWorkerToken && Date.now() - imageWorkerLastSeen < 90_000);
+}
+
+function generateImageViaWorker(prompt, ratio) {
+  if (!imageWorkerToken) {
+    throw new Error(
+      'Live PC image worker connected nahi hai. Local PC kholein aur Settings → “Sync Bing login to live site” dabayein.',
+    );
+  }
+  const id = randomUUID();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      pendingImageJobs.delete(id);
+      reject(
+        new Error(
+          'Local PC se image nahi mili. PC chaloo aur Settings → “Sync Bing login to live site” dabayein.',
+        ),
+      );
+    }, 240_000);
+    pendingImageJobs.set(id, {
+      id,
+      prompt: String(prompt).slice(0, 700),
+      ratio: ratio || '16:9',
+      status: 'queued',
+      createdAt: Date.now(),
+      finish: (err, bytes) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        pendingImageJobs.delete(id);
+        if (err) reject(err);
+        else resolve(bytes);
+      },
+    });
+  });
+}
+
+function workerTokenFrom(req, body = {}) {
+  return String(req.headers['x-worker-token'] || body.workerToken || body.token || body.currentToken || '').trim();
+}
+
+function authorizedWorker(req, body = {}) {
+  return Boolean(imageWorkerToken && workerTokenFrom(req, body) === imageWorkerToken);
+}
+
+async function handleImageWorkerPoll(req, res) {
+  if (req.method !== 'GET') return sendJson(res, 405, { error: 'Method not allowed.' });
+  if (!authorizedWorker(req)) return sendJson(res, 401, { error: 'Worker token invalid.' });
+  imageWorkerLastSeen = Date.now();
+  const now = Date.now();
+  for (const job of pendingImageJobs.values()) {
+    if (job.status === 'queued' || (job.status === 'claimed' && now - (job.claimedAt || 0) > 90_000)) {
+      job.status = 'claimed';
+      job.claimedAt = now;
+      return sendJson(res, 200, { job: { id: job.id, prompt: job.prompt, ratio: job.ratio } });
+    }
+  }
+  return sendJson(res, 200, { job: null, connected: true });
+}
+
+async function handleImageWorkerResult(req, res) {
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed.' });
+  let body = {};
+  try {
+    body = JSON.parse((await readBody(req)) || '{}');
+  } catch {
+    return sendJson(res, 400, { error: 'Invalid JSON body.' });
+  }
+  if (!authorizedWorker(req, body)) return sendJson(res, 401, { error: 'Worker token invalid.' });
+  imageWorkerLastSeen = Date.now();
+  const job = pendingImageJobs.get(String(body.id || ''));
+  if (!job) return sendJson(res, 404, { error: 'Image job not found.' });
+  if (body.error) {
+    job.finish(new Error(String(body.error).slice(0, 500)));
+    return sendJson(res, 200, { ok: true });
+  }
+  let bytes;
+  try {
+    bytes = Buffer.from(String(body.image || ''), 'base64');
+    if (bytes.length < 128) throw new Error('Empty image.');
+  } catch (err) {
+    job.finish(new Error('Local worker sent invalid image bytes.'));
+    return sendJson(res, 200, { ok: true });
+  }
+  job.finish(null, bytes);
+  return sendJson(res, 200, { ok: true });
+}
+
+let imageWorkerBusy = false;
+async function pollImageWorker() {
+  if (imageWorkerBusy || !BING_SUPPORTED || !imageWorkerToken) return;
+  imageWorkerBusy = true;
+  try {
+    const response = await fetch(`${LIVE_URL}/api/image-worker/poll`, {
+      headers: { 'x-worker-token': imageWorkerToken },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (response.status === 401 || response.status === 403) {
+      // Render restart / token mismatch — local PC dobara setup kar deta hai.
+      await syncBingLoginToLive().catch(() => {});
+      return;
+    }
+    if (!response.ok) return;
+    const data = await response.json().catch(() => ({}));
+    const job = data.job;
+    if (!job?.id) return;
+    try {
+      const bytes = await generateBingImage(String(job.prompt || '').slice(0, 700));
+      await fetch(`${LIVE_URL}/api/image-worker/result`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-worker-token': imageWorkerToken,
+        },
+        body: JSON.stringify({ id: job.id, image: bytes.toString('base64') }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      console.log(`  Image worker: image bheji gayi -> ${String(job.id).slice(0, 8)}`);
+    } catch (err) {
+      await fetch(`${LIVE_URL}/api/image-worker/result`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-worker-token': imageWorkerToken,
+        },
+        body: JSON.stringify({ id: job.id, error: String(err.message || err).slice(0, 500) }),
+        signal: AbortSignal.timeout(30_000),
+      }).catch(() => {});
+    }
+  } catch {
+    /* offline — agle tick me dobara try */
+  } finally {
+    imageWorkerBusy = false;
+  }
+}
+
+function startImageWorker() {
+  if (!BING_SUPPORTED || !imageWorkerToken) return;
+  setTimeout(() => pollImageWorker().catch(() => {}), 3000);
+  setInterval(() => pollImageWorker().catch(() => {}), 2500);
+  console.log(`  Image worker: local Bing -> ${LIVE_URL}\n`);
 }
 
 async function generateCloudflareImage(prompt, model) {
@@ -1838,7 +2008,9 @@ function mediaProviderState() {
       bing: Boolean(BING_SUPPORTED || bingCookie),
       cloudflare: Boolean(cloudflareAccount && cloudflareToken),
       huggingface: Boolean(hfToken),
+      imageWorker: imageWorkerConnected(),
     },
+    imageWorker: imageWorkerConnected(),
   };
 }
 
@@ -2498,6 +2670,7 @@ const server = http.createServer(async (req, res) => {
         hasServerKey: Object.values(serverKeyState()).some(Boolean),
         serverKeys: serverKeyState(),
         liveUrl: LIVE_URL,
+        imageWorkerConnected: imageWorkerConnected(),
         tiers: TIERS.map(({ id, label, hint, model }) => ({ id, label, hint, model })),
         defaultTier: 'auto',
         defaultModel: DEFAULT_MODEL,
@@ -2590,7 +2763,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/bing-cookie') {
       if (req.method === 'GET') {
-        return sendJson(res, 200, { configured: Boolean(bingCookie) });
+        return sendJson(res, 200, {
+          configured: Boolean(bingCookie),
+          workerConfigured: Boolean(imageWorkerToken),
+          workerConnected: imageWorkerConnected(),
+        });
       }
       if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed.' });
       try {
@@ -2603,10 +2780,40 @@ const server = http.createServer(async (req, res) => {
           JSON.stringify({ cookie, updatedAt: Date.now() }),
           'utf8',
         ).catch(() => {});
-        return sendJson(res, 200, { ok: true, configured: true });
+        const workerToken = String(body.workerToken || '').trim().slice(0, 200);
+        if (workerToken) {
+          if (
+            imageWorkerToken &&
+            String(body.currentToken || '') !== imageWorkerToken &&
+            workerToken !== imageWorkerToken
+          ) {
+            throw new Error('Worker token mismatch — local PC aur live alag hain.');
+          }
+          imageWorkerToken = workerToken;
+          imageWorkerLastSeen = Date.now();
+          await writeFile(
+            WORKER_TOKEN_FILE,
+            JSON.stringify({ token: workerToken, updatedAt: Date.now() }),
+            'utf8',
+          ).catch(() => {});
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          configured: true,
+          workerConfigured: Boolean(imageWorkerToken),
+          workerConnected: imageWorkerConnected(),
+        });
       } catch (err) {
         return sendJson(res, 400, { error: err.message || 'Invalid Bing cookie.' });
       }
+    }
+
+    if (url.pathname === '/api/image-worker/poll') {
+      return await handleImageWorkerPoll(req, res);
+    }
+
+    if (url.pathname === '/api/image-worker/result') {
+      return await handleImageWorkerResult(req, res);
     }
 
     if (req.method === 'GET' && url.pathname === '/api/media-providers') {
@@ -2961,6 +3168,7 @@ await loadJobs();
 await loadAllowedFolders();
 await loadMediaJobs();
 await resumeMediaJobs();
+startImageWorker();
 setInterval(() => {
   scheduleTick().catch(() => {});
 }, 30_000);

@@ -18,6 +18,8 @@ services:
         sync: false
       - key: BING_AUTH_COOKIE
         sync: false
+      - key: NOVA_WORKER_TOKEN
+        sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: OPENROUTER_API_KEY
