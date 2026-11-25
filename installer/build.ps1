@@ -17,6 +17,14 @@ $webviewRuntimeUrl = 'https://msedge.sf.dl.delivery.mp.microsoft.com/filestreami
 $webviewRuntimeHash = '82b2d8a7013e0c0ea15d48ff4742ee3778ba16bd8b7b4a47876645b3e48d4016'
 $webviewRuntime = Join-Path $packagesDir 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
 
+$ffmpegUrl = 'https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-24-12-41/ffmpeg-n9.0.2-963-g4d831360c9-win64-lgpl-9.0.zip'
+$ffmpegHash = '4eac755f025785c71ae3fc3fe7b531d59bc058de8f3173917f043f7f31e4aa97'
+$ffmpegZip = Join-Path $packagesDir 'ffmpeg-pinned-win64-lgpl.zip'
+$ffmpegDir = Join-Path $packagesDir 'ffmpeg'
+$ffmpegExe = Join-Path $ffmpegDir 'ffmpeg.exe'
+$ffprobeExe = Join-Path $ffmpegDir 'ffprobe.exe'
+$ffmpegLicense = Join-Path $ffmpegDir 'FFMPEG_LICENSE.txt'
+
 $csc = @(
   'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe',
   'C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe'
@@ -43,7 +51,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Logo generator compilation failed.' }
 & $iconGeneratorExe $assetsDir
 if ($LASTEXITCODE -ne 0) { throw 'Logo generation failed.' }
 
-Write-Host '[2/6] Preparing embedded WebView2 SDK + offline runtime...'
+Write-Host '[2/6] Preparing WebView2 SDK, offline runtime and FFmpeg...'
 if (-not (Test-Path $sdkNupkg)) {
   Invoke-WebRequest -Uri $sdkUrl -OutFile $sdkNupkg -UseBasicParsing -TimeoutSec 600
 }
@@ -67,6 +75,29 @@ if ($actualHash -ne $webviewRuntimeHash) {
   throw "WebView2 runtime hash mismatch: $actualHash"
 }
 
+if (-not (Test-Path $ffmpegZip)) {
+  Invoke-WebRequest -Uri $ffmpegUrl -OutFile $ffmpegZip -UseBasicParsing -TimeoutSec 1200
+}
+$ffmpegActualHash = (Get-FileHash $ffmpegZip -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($ffmpegActualHash -ne $ffmpegHash) {
+  throw "FFmpeg hash mismatch: $ffmpegActualHash"
+}
+if (-not (Test-Path $ffmpegExe) -or -not (Test-Path $ffprobeExe)) {
+  $ffmpegExtract = Join-Path $packagesDir 'ffmpeg-extract'
+  if (Test-Path $ffmpegExtract) { Remove-Item $ffmpegExtract -Recurse -Force }
+  Expand-Archive -Path $ffmpegZip -DestinationPath $ffmpegExtract -Force
+  $foundFfmpeg = Get-ChildItem $ffmpegExtract -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
+  $foundFfprobe = Get-ChildItem $ffmpegExtract -Recurse -Filter 'ffprobe.exe' | Select-Object -First 1
+  $foundLicense = Get-ChildItem $ffmpegExtract -Recurse -Filter 'LICENSE*' | Select-Object -First 1
+  if (-not $foundFfmpeg -or -not $foundFfprobe) {
+    throw 'FFmpeg/ffprobe were not found in the downloaded archive.'
+  }
+  New-Item -ItemType Directory -Path $ffmpegDir -Force | Out-Null
+  Copy-Item $foundFfmpeg.FullName $ffmpegExe -Force
+  Copy-Item $foundFfprobe.FullName $ffprobeExe -Force
+  if ($foundLicense) { Copy-Item $foundLicense.FullName $ffmpegLicense -Force }
+}
+
 Write-Host '[3/6] Staging Nova app files...'
 if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
 New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
@@ -83,6 +114,11 @@ Copy-Item $nodeExe (Join-Path $stagingDir 'runtime\node.exe') -Force
 Copy-Item $webviewRuntime (Join-Path $stagingDir 'runtime\MicrosoftEdgeWebView2RuntimeInstallerX64.exe') -Force
 if (Test-Path $nodeLicense) {
   Copy-Item $nodeLicense (Join-Path $stagingDir 'runtime\NODE_LICENSE.txt') -Force
+}
+Copy-Item $ffmpegExe (Join-Path $stagingDir 'runtime\ffmpeg.exe') -Force
+Copy-Item $ffprobeExe (Join-Path $stagingDir 'runtime\ffprobe.exe') -Force
+if (Test-Path $ffmpegLicense) {
+  Copy-Item $ffmpegLicense (Join-Path $stagingDir 'runtime\FFMPEG_LICENSE.txt') -Force
 }
 
 Write-Host '[4/6] Compiling Nova desktop launcher...'
