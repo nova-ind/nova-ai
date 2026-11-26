@@ -724,7 +724,8 @@ function withCharacterBible(prompt, bible) {
   const text = String(prompt || '').trim();
   if (!bible || !text) return text;
   if (text.toLowerCase().includes(bible.slice(0, 60).toLowerCase())) return text;
-  return `${bible}. ${text}`;
+  const joiner = /[.!?।]$/.test(bible) ? ' ' : '. ';
+  return `${bible}${joiner}${text}`;
 }
 
 function collectDurationSeconds(text) {
