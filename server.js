@@ -76,6 +76,9 @@ const HF_FLUX_SPACES = [
 const BING_SUPPORTED = process.platform === 'win32'; // Chrome/CDP profile sirf local Windows par hota hai
 const DEFAULT_IMAGE_PROVIDER = process.env.DEFAULT_IMAGE_PROVIDER || (BING_SUPPORTED ? 'bing' : 'auto');
 const DEFAULT_VIDEO_PROVIDER = process.env.DEFAULT_VIDEO_PROVIDER || 'ltx';
+const CHATGPT_CHAT_TITLE = 'Nova-AI';
+const CHATGPT_STATE_FILE = path.join(WORKSPACE, 'chatgpt-nova.json');
+let chatgptSessionState = { configured: false, chatId: null, title: CHATGPT_CHAT_TITLE };
 const CF_IMAGE_MODELS = [
   '@cf/black-forest-labs/flux-1-schnell',
   '@cf/black-forest-labs/flux-2-klein-4b',
@@ -83,6 +86,7 @@ const CF_IMAGE_MODELS = [
   '@cf/black-forest-labs/flux-2-dev',
 ];
 const IMAGE_PROVIDERS = [
+  { id: 'chatgpt', label: 'ChatGPT Go · Nova-AI chat', note: 'Same persistent chat · character lock' },
   { id: 'bing', label: 'Bing Image Creator', note: 'Free · best quality · Chrome required' },
   { id: 'cloudflare', label: 'Cloudflare Flux', note: 'Free 10k neurons/day · needs free token' },
   { id: 'huggingface', label: 'Hugging Face Flux', note: 'Free ZeroGPU Space · token optional (5 min/day)' },
@@ -1503,7 +1507,7 @@ function validImageBytes(bytes) {
   return width >= 256 && height >= 256;
 }
 
-async function collectJobImages(job, prompts, directory = null) {
+async function collectJobImages(job, prompts, directory = null, onImage = null) {
   const provider = job.imageProvider || DEFAULT_IMAGE_PROVIDER;
   const list = Array.isArray(prompts) ? prompts.map((item) => String(item || '').trim()).filter(Boolean) : [];
   if (!list.length) throw new Error('Image prompts nahi mile — pehle story likhna zaroori hai.');
@@ -1577,12 +1581,15 @@ async function collectJobImages(job, prompts, directory = null) {
       throw new Error(`Scene ${index + 1}/${list.length} ki unique image nahi bani. Bing/login check karke dobara try karein.`);
     }
     if (file) await writeFile(file, chosen);
+    const relative = file ? `media-jobs/${job.id}/${path.basename(file)}` : null;
     pool.push(chosen);
     await updateMediaJob(job, {
       step: `${provider === 'stock' ? 'Stock' : 'Bing'} se scene ${index + 1}/${list.length} ki image ready — story line se match…`,
-      progress: 10 + Math.round(((index + 1) / list.length) * 55),
+      progress: 20 + Math.round(((index + 1) / list.length) * 45),
       ...(file ? { resumeOnStart: true } : {}),
     });
+    // Har image banate hi timeline me daal do — poori video ka intezaar nahi.
+    if (onImage) await onImage(index, relative);
   }
   return pool;
 }
@@ -1903,104 +1910,8 @@ async function runMediaJob(job) {
         }
       } catch { /* directory abhi nahi bani ya read fail */ }
     }
-    // Studio uploads ko story ke visual beats par distribute karo — AI image tabhi banao jab upload na ho.
-    const visualAssets = (job.sourceAssets || []).filter((asset) => asset.kind === 'image' || asset.kind === 'video');
-    let imagePool = [];
-    if (job.studio && visualAssets.length) {
-      await updateMediaJob(job, {
-        step: `${visualAssets.length} uploaded clips/images ko ${visualBeats.length} beats par arrange kar rahe hain…`,
-        progress: 12,
-      });
-      for (let index = 0; index < visualBeats.length; index += 1) {
-        const asset = visualAssets[index % visualAssets.length];
-        const scene = job.scenes[index] || { index: index + 1 };
-        scene.image = asset.kind === 'image' ? asset.path : null;
-        scene.video = asset.kind === 'video' ? asset.path : null;
-        scene.sourceAsset = asset.name;
-        scene.imagePrompt = visualBeats[index]?.prompt || scene.imagePrompt;
-        job.scenes[index] = scene;
-      }
-      await updateMediaJob(job, {
-        imagePoolCount: visualAssets.length,
-        step: `Timeline ready — ${visualBeats.length} scenes uploaded media se sync hain…`,
-        progress: 13,
-      });
-    } else {
-      // Ek image me multiple scenes/collage nahi: har visual beat ka apna prompt aur apni unique image.
-      imagePool = await collectJobImages(job, sceneImagePrompts, directory);
-      if (imagePool.length !== visualBeats.length) {
-        throw new Error(`Sirf ${imagePool.length}/${visualBeats.length} images bani — duplicate images nahi lagayenge.`);
-      }
-      await updateMediaJob(job, {
-        imagePoolCount: imagePool.length,
-        step: `${imagePool.length} unique images ready — har ek apni narration line ke exact hisse se match karti hai…`,
-        progress: 12,
-      });
-    }
 
-    // Visual beats already get FFmpeg zoom/pan — extra LTX clips slow aur inconsistent hote hain.
-    const useMotion = job.useAiVideo && job.sceneCount <= 8 && !job.analysis && !job.visualBeats?.length;
-    for (let index = 0; index < job.sceneCount; index += 1) {
-      if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
-      const beat = job.visualBeats?.[index] || { lineIndex: index, prompt: job.imagePrompts?.[index] };
-      const lineIndex = Number.isFinite(Number(beat?.lineIndex)) ? Number(beat.lineIndex) : index;
-      const scene = job.scenes[index] || { index: index + 1, caption: captions[lineIndex] || `Scene ${index + 1}` };
-      scene.lineIndex = lineIndex;
-      scene.caption = captions[lineIndex] || scene.caption;
-      scene.imagePrompt = beat?.prompt || job.imagePrompts?.[index] || scene.imagePrompt;
-      scene.status = scene.status || 'pending';
-      if (!scene.image && !scene.video && Array.isArray(imagePool)) {
-        await updateMediaJob(job, {
-          step: `Scene ${index + 1}/${job.sceneCount}: ${job.style} image ban rahi hai…`,
-          progress: 10 + Math.round(((index + 0.3) / job.sceneCount) * 60),
-        });
-        const bytes = imagePool[index];
-        const file = `scene-${String(index + 1).padStart(2, '0')}.jpg`;
-        await writeFile(path.join(directory, file), bytes);
-        scene.image = `media-jobs/${job.id}/${file}`;
-        scene.status = 'image-ready';
-      } else if (!scene.status || scene.status === 'pending') {
-        scene.status = job.studio && scene.video ? 'clip-ready' : 'image-ready';
-      }
-
-      if (useMotion && !scene.video && !scene.videoError) {
-        await updateMediaJob(job, {
-          step: `Scene ${index + 1}/${job.sceneCount}: AI motion clip ban raha hai…`,
-          progress: 10 + Math.round(((index + 0.7) / job.sceneCount) * 60),
-        });
-        try {
-          const motionPrompt = `${scene.caption}. ${job.style} style, ${(job.fx || []).join(', ')} motion.`;
-          const bytes = await fetchMediaBytesWithRetry(
-            job,
-            'video',
-            motionPrompt,
-            job.videoModel,
-            job.clipSeconds,
-            job.videoProvider,
-            job.ratio,
-          );
-          const file = `scene-${String(index + 1).padStart(2, '0')}.mp4`;
-          await writeFile(path.join(directory, file), bytes);
-          scene.video = `media-jobs/${job.id}/${file}`;
-          scene.status = 'ready';
-        } catch (err) {
-          scene.videoError = String(err.message || err).slice(0, 300);
-          scene.status = scene.image ? 'image-ready' : 'pending';
-        }
-      } else if (!scene.videoError) {
-        scene.status = 'ready';
-      }
-
-      job.scenes[index] = scene;
-      await updateMediaJob(job, {
-        progress: 10 + Math.round(((index + 1) / job.sceneCount) * 60),
-        stage: 'assets',
-        completedScenes: job.scenes.filter((item) => ['ready', 'clip-ready', 'image-ready'].includes(item.status)).length,
-        step: `Scene ${index + 1}/${job.sceneCount} saved · ${job.scenes.filter((item) => ['ready', 'clip-ready', 'image-ready'].includes(item.status)).length} ready…`,
-      });
-    }
-
-    if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
+    // Story ke turant baad natural audio — timeline me images aur audio sath sath dikhte hain.
     let narrationPath = job.narrationPath ? resolveJobAudioPath(job.narrationPath) : null;
     try { if (narrationPath) await access(narrationPath); else narrationPath = null; } catch { narrationPath = null; }
     let ambientPath = job.ambientPath ? resolveJobAudioPath(job.ambientPath) : null;
@@ -2008,9 +1919,9 @@ async function runMediaJob(job) {
 
     if (job.narration && (!audioPath || job.studio)) {
       if (narrationPath) {
-        await updateMediaJob(job, { stage: 'voice', step: 'Saved voice track mil gayi — dobara nahi bana rahe…', progress: 72 });
+        await updateMediaJob(job, { stage: 'voice', step: 'Saved voice track mil gayi — dobara nahi bana rahe…', progress: 18 });
       } else {
-        await updateMediaJob(job, { stage: 'voice', step: 'Natural AI voice se har scene ki story line uske time par boli ja rahi hai…', progress: 72 });
+        await updateMediaJob(job, { stage: 'voice', step: 'Natural AI voice se har scene ki story line uske time par boli ja rahi hai…', progress: 18 });
         try {
           narrationPath = await buildTimedNarration(
             captions,
@@ -2024,10 +1935,10 @@ async function runMediaJob(job) {
           await updateMediaJob(job, {
             narrationPath: path.relative(WORKSPACE, narrationPath).replace(/\\/g, '/'),
             step: 'Pro natural voice ready — story scene ke saath sync hai…',
-            progress: 73,
+            progress: 20,
           });
         } catch (err) {
-          await updateMediaJob(job, { step: `AI voice unavailable (${String(err.message || err).slice(0, 90)}) — local film voice se banana…`, progress: 72 });
+          await updateMediaJob(job, { step: `AI voice unavailable (${String(err.message || err).slice(0, 90)}) — local film voice se banana…`, progress: 18 });
           try {
             narrationPath = await synthesizeNarration(
               narrationText,
@@ -2057,6 +1968,128 @@ async function runMediaJob(job) {
         await updateMediaJob(job, { step: `Ambient skip: ${String(err.message || err).slice(0, 100)}` });
       }
     }
+
+    // Studio uploads ko story ke visual beats par distribute karo — AI image tabhi banao jab upload na ho.
+    const visualAssets = (job.sourceAssets || []).filter((asset) => asset.kind === 'image' || asset.kind === 'video');
+    let imagePool = [];
+    if (job.studio && visualAssets.length) {
+      await updateMediaJob(job, {
+        step: `${visualAssets.length} uploaded clips/images ko ${visualBeats.length} beats par arrange kar rahe hain…`,
+        progress: 12,
+      });
+      for (let index = 0; index < visualBeats.length; index += 1) {
+        const asset = visualAssets[index % visualAssets.length];
+        const scene = job.scenes[index] || { index: index + 1 };
+        scene.image = asset.kind === 'image' ? asset.path : null;
+        scene.video = asset.kind === 'video' ? asset.path : null;
+        scene.sourceAsset = asset.name;
+        scene.imagePrompt = visualBeats[index]?.prompt || scene.imagePrompt;
+        job.scenes[index] = scene;
+      }
+      await updateMediaJob(job, {
+        imagePoolCount: visualAssets.length,
+        scenes: job.scenes,
+        stage: 'assets',
+        step: `Timeline ready — ${visualBeats.length} scenes uploaded media se sync hain…`,
+        progress: 21,
+      });
+    } else {
+      // Ek image me multiple scenes/collage nahi: har visual beat ka apna prompt aur apni unique image.
+      // Har image banate hi scene/timeline me save — 2 image bani to 2 clip turant dikhenge.
+      imagePool = await collectJobImages(job, sceneImagePrompts, directory, async (index, relativePath) => {
+        if (!relativePath) return;
+        const beat = visualBeats[index] || {};
+        const lineIndex = Number.isFinite(Number(beat?.lineIndex)) ? Number(beat.lineIndex) : index;
+        const scene = job.scenes[index] || { index: index + 1 };
+        scene.lineIndex = lineIndex;
+        scene.caption = captions[lineIndex] || scene.caption || `Scene ${index + 1}`;
+        scene.imagePrompt = beat.prompt || scene.imagePrompt;
+        scene.image = relativePath;
+        scene.status = 'image-ready';
+        job.scenes[index] = scene;
+        const ready = job.scenes.filter((item) => ['ready', 'clip-ready', 'image-ready'].includes(item.status)).length;
+        await updateMediaJob(job, {
+          scenes: job.scenes,
+          stage: 'assets',
+          completedScenes: ready,
+          step: `Scene ${index + 1}/${visualBeats.length} ki image ready — voice track ke saath timeline me add ho gayi…`,
+          progress: 20 + Math.round(((index + 1) / visualBeats.length) * 45),
+        });
+      });
+      if (imagePool.length !== visualBeats.length) {
+        throw new Error(`Sirf ${imagePool.length}/${visualBeats.length} images bani — duplicate images nahi lagayenge.`);
+      }
+      await updateMediaJob(job, {
+        imagePoolCount: imagePool.length,
+        scenes: job.scenes,
+        step: `${imagePool.length} unique images ready — har ek apni narration line ke exact hisse se match karti hai…`,
+        progress: 65,
+      });
+    }
+
+    // Visual beats already get FFmpeg zoom/pan — extra LTX clips slow aur inconsistent hote hain.
+    const useMotion = job.useAiVideo && job.sceneCount <= 8 && !job.analysis && !job.visualBeats?.length;
+    for (let index = 0; index < job.sceneCount; index += 1) {
+      if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
+      const beat = job.visualBeats?.[index] || { lineIndex: index, prompt: job.imagePrompts?.[index] };
+      const lineIndex = Number.isFinite(Number(beat?.lineIndex)) ? Number(beat.lineIndex) : index;
+      const scene = job.scenes[index] || { index: index + 1, caption: captions[lineIndex] || `Scene ${index + 1}` };
+      scene.lineIndex = lineIndex;
+      scene.caption = captions[lineIndex] || scene.caption;
+      scene.imagePrompt = beat?.prompt || job.imagePrompts?.[index] || scene.imagePrompt;
+      scene.status = scene.status || 'pending';
+      if (!scene.image && !scene.video && Array.isArray(imagePool)) {
+        await updateMediaJob(job, {
+          step: `Scene ${index + 1}/${job.sceneCount}: ${job.style} image ban rahi hai…`,
+          progress: 65 + Math.round(((index + 0.3) / job.sceneCount) * 5),
+        });
+        const bytes = imagePool[index];
+        const file = `scene-${String(index + 1).padStart(2, '0')}.jpg`;
+        await writeFile(path.join(directory, file), bytes);
+        scene.image = `media-jobs/${job.id}/${file}`;
+        scene.status = 'image-ready';
+      } else if (!scene.status || scene.status === 'pending') {
+        scene.status = job.studio && scene.video ? 'clip-ready' : 'image-ready';
+      }
+
+      if (useMotion && !scene.video && !scene.videoError) {
+        await updateMediaJob(job, {
+          step: `Scene ${index + 1}/${job.sceneCount}: AI motion clip ban raha hai…`,
+          progress: 65 + Math.round(((index + 0.7) / job.sceneCount) * 5),
+        });
+        try {
+          const motionPrompt = `${scene.caption}. ${job.style} style, ${(job.fx || []).join(', ')} motion.`;
+          const bytes = await fetchMediaBytesWithRetry(
+            job,
+            'video',
+            motionPrompt,
+            job.videoModel,
+            job.clipSeconds,
+            job.videoProvider,
+            job.ratio,
+          );
+          const file = `scene-${String(index + 1).padStart(2, '0')}.mp4`;
+          await writeFile(path.join(directory, file), bytes);
+          scene.video = `media-jobs/${job.id}/${file}`;
+          scene.status = 'ready';
+        } catch (err) {
+          scene.videoError = String(err.message || err).slice(0, 300);
+          scene.status = scene.image ? 'image-ready' : 'pending';
+        }
+      } else if (!scene.videoError) {
+        scene.status = 'ready';
+      }
+
+      job.scenes[index] = scene;
+      await updateMediaJob(job, {
+        progress: 65 + Math.round(((index + 1) / job.sceneCount) * 10),
+        stage: 'assets',
+        completedScenes: job.scenes.filter((item) => ['ready', 'clip-ready', 'image-ready'].includes(item.status)).length,
+        step: `Scene ${index + 1}/${job.sceneCount} saved · ${job.scenes.filter((item) => ['ready', 'clip-ready', 'image-ready'].includes(item.status)).length} ready…`,
+      });
+    }
+
+    if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
 
     const bin = await ffmpegExecutable('ffmpeg');
     if (!bin) {
@@ -3360,7 +3393,7 @@ async function ensureCookieBrowser() {
   throw new Error('Cookie reader browser start nahi hua.');
 }
 
-async function cookiesFromCdpPort(port) {
+async function cookiesFromCdpPort(port, domains = null) {
   const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
     signal: AbortSignal.timeout(8000),
   });
@@ -3368,9 +3401,11 @@ async function cookiesFromCdpPort(port) {
   const target = targets.find((item) => item.type === 'page') || targets[0];
   if (!target?.webSocketDebuggerUrl) throw new Error('Browser me page nahi mila.');
   const result = await cdpCommand(target.webSocketDebuggerUrl, 'Storage.getCookies', {});
-  return (result.cookies || []).filter((item) =>
-    /bing\.com$/i.test(String(item.domain || '').replace(/^\./, '')),
-  );
+  const allow = domains || [/bing\.com$/i];
+  return (result.cookies || []).filter((item) => {
+    const domain = String(item.domain || '').replace(/^\./, '');
+    return allow.some((pattern) => pattern.test(domain));
+  });
 }
 
 async function openBrowserLogin() {
@@ -5463,13 +5498,13 @@ async function ffmpegEncoderSet(bin) {
   return ffmpegEncodersCache;
 }
 
-async function ffmpegVideoCodecArgs(bin, crf = 23) {
+async function ffmpegVideoCodecArgs(bin, crf = 23, bitrate = null) {
   const encoders = await ffmpegEncoderSet(bin);
   if (encoders.has('libx264')) {
     return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(crf)];
   }
   if (encoders.has('libopenh264')) {
-    return ['-c:v', 'libopenh264', '-b:v', '4M'];
+    return ['-c:v', 'libopenh264', '-b:v', bitrate || '4M'];
   }
   return ['-c:v', 'mpeg4', '-q:v', '3'];
 }
@@ -5537,8 +5572,12 @@ async function ffmpegBuildArgs(operation, payload, output) {
   const width = Math.max(0, Math.min(3840, Number(payload.width) || 0));
   const height = Math.max(0, Math.min(3840, Number(payload.height) || 0));
   const bin = await ffmpegExecutable('ffmpeg');
+  const pixels = Math.max(width * height, 1280 * 720);
+  const qualityFactor = Math.max(0.35, Math.min(1.8, 25 / crf));
+  const kbps = Math.round((pixels / 921600) * 4000 * qualityFactor);
+  const bitrate = `${Math.max(300, Math.min(60000, kbps))}k`;
   const reencode = [
-    ...(bin ? await ffmpegVideoCodecArgs(bin, crf) : ['-c:v', 'mpeg4', '-q:v', '3']),
+    ...(bin ? await ffmpegVideoCodecArgs(bin, crf, bitrate) : ['-c:v', 'mpeg4', '-q:v', '3']),
     '-c:a', 'aac', '-b:a', '128k',
   ];
 
@@ -5560,7 +5599,8 @@ async function ffmpegBuildArgs(operation, payload, output) {
       '-movflags', '+faststart', output,
     );
   } else if (operation === 'extract-audio') {
-    args.push('-i', input, '-vn', '-c:a', 'libmp3lame', '-q:a', '2', output);
+    const mp3Q = Math.min(5, Math.max(0, Number(payload.mp3Q ?? 2)));
+    args.push('-i', input, '-vn', '-c:a', 'libmp3lame', '-q:a', String(mp3Q), output);
   } else if (operation === 'resize') {
     if (!width && !height) throw new Error('Width ya height do mein se kam se kam ek do.');
     const filter = `scale=${width || -2}:${height || -2}`;
@@ -5766,6 +5806,23 @@ const VIDEO_STUDIO_PRESETS = [
   { id: 'music', label: 'Music video', fx: ['neon', 'glow', 'chromatic'], transitions: ['wiperight', 'zoomin', 'hlwind'], visualizers: ['eqbars', 'wavelength'] },
 ];
 
+const VIDEO_STUDIO_EXPORT_SIZES = {
+  '120p': [214, 120],
+  '240p': [426, 240],
+  '360p': [640, 360],
+  '480p': [854, 480],
+  '720p': [1280, 720],
+  '1080p': [1920, 1080],
+  '1440p': [2560, 1440],
+  '4k': [3840, 2160],
+};
+const VIDEO_STUDIO_EXPORT_QUALITY = {
+  draft: { crf: 28, mp3Q: 5 },
+  standard: { crf: 23, mp3Q: 3 },
+  high: { crf: 18, mp3Q: 2 },
+  max: { crf: 15, mp3Q: 0 },
+};
+
 function videoStudioCatalog() {
   return {
     fx: VIDEO_STUDIO_FX,
@@ -5774,6 +5831,9 @@ function videoStudioCatalog() {
     presets: VIDEO_STUDIO_PRESETS,
     categories: ['story', 'cartoon', 'comedy', 'science fiction', 'music', 'ad / promo', 'documentary'],
     ratios: ['16:9', '9:16'],
+    exportFormats: ['video', 'mp3'],
+    exportResolutions: Object.keys(VIDEO_STUDIO_EXPORT_SIZES),
+    exportQualities: Object.keys(VIDEO_STUDIO_EXPORT_QUALITY),
     note: 'Sab effects local FFmpeg se render hote hain — koi paid plugin nahi.',
   };
 }
@@ -7306,6 +7366,56 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 201, job);
       } catch (err) {
         return sendJson(res, 400, { error: err.message || 'Studio render shuru nahi hua.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/video-studio/export') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      try {
+        const job = mediaJobs.find((item) => item.id === payload.jobId);
+        if (!job) throw new Error('Pehle Studio me video banayein.');
+        const format = payload.format === 'mp3' ? 'mp3' : 'video';
+        const resolution = String(payload.resolution || '720p').toLowerCase();
+        const quality = String(payload.quality || 'standard').toLowerCase();
+        const size = VIDEO_STUDIO_EXPORT_SIZES[resolution];
+        const preset = VIDEO_STUDIO_EXPORT_QUALITY[quality];
+        if (!size || !preset) throw new Error('Resolution ya quality support nahi hai.');
+        const source = format === 'mp3'
+          ? (job.output || job.narrationPath || job.audioPath || job.ambientPath)
+          : job.output;
+        if (!source) throw new Error(format === 'mp3'
+          ? 'MP3 ke liye voice/audio track abhi ready nahi hua.'
+          : 'Video export ke liye pehle final render karein.');
+        const sourceAbs = resolveJobAudioPath(source);
+        if (!sourceAbs) throw new Error('Source file allowed folder ke bahar hai.');
+        await stat(sourceAbs);
+        const [baseWidth, baseHeight] = size;
+        const vertical = job.ratio === '9:16';
+        const width = vertical ? baseHeight : baseWidth;
+        const height = vertical ? baseWidth : baseHeight;
+        const outputFolder = path.join(WORKSPACE, 'media-jobs', job.id);
+        const outputName = `export-${format}-${resolution}-${quality}-${Date.now()}`;
+        const ffmpegPayload = format === 'mp3'
+          ? { operation: 'extract-audio', input: sourceAbs, outputFolder, outputName, mp3Q: preset.mp3Q }
+          : { operation: 'resize', input: sourceAbs, outputFolder, outputName, width, height, crf: preset.crf };
+        const ffmpegJob = await createFfmpegJob(ffmpegPayload);
+        await updateMediaJob(job, {
+          lastExport: {
+            format,
+            resolution,
+            quality,
+            status: ffmpegJob.status,
+            outputUrl: ffmpegJob.outputUrl,
+          },
+        });
+        return sendJson(res, 200, { ok: true, job: ffmpegJob, outputUrl: ffmpegJob.outputUrl });
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Export shuru nahi hua.' });
       }
     }
 

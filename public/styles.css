@@ -2162,10 +2162,7 @@ video:-webkit-full-screen {
 /* -------------------- Video Studio — clean premium editor ------------------- */
 .studio { --studio-panel-w: 300px; --studio-timeline-h: 32vh; --timeline-head-h: 56px; --studio-clip-scale: 1; position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: #08090b; color: #f4f4f5; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
 .studio[hidden] { display: none; }
-.studio.is-editing .studio-top { height: 38px; flex: 0 0 38px; display: flex; justify-content: flex-start; padding: 0 14px; }
-.studio.is-editing .studio-mark, .studio.is-editing .studio-steps, .studio.is-editing .studio-top-right { display: none; }
-.studio.is-editing .brand-copy strong { font-size: 12px; }
-.studio.is-editing .brand-copy small { font-size: 9px; }
+.studio.is-editing .studio-top { display: none; }
 .studio.is-editing .studio-stage { padding: 8px 10px; gap: 0; }
 .studio.is-editing .studio-preview { border-radius: 10px; }
 .studio.is-editing .studio-log { display: none; }
@@ -2270,6 +2267,8 @@ video:-webkit-full-screen {
 .tool-sep { width: 1px; height: 14px; margin: 0 2px; background: #292c31; }
 .mini-tool { height: 22px; padding: 0 7px; border: 0; border-radius: 5px; background: transparent; color: #a9acb2; font-size: 9.5px; cursor: pointer; }
 .mini-tool:hover { background: #1c1f23; color: #fff; }
+.export-select { height: 22px; padding: 0 4px; border: 1px solid #292c31; border-radius: 5px; background: #121417; color: #a9acb2; font-size: 9px; cursor: pointer; }
+.export-select:focus { outline: none; border-color: #555a62; color: #fff; }
 .layout-menu { position: absolute; top: 30px; right: 0; z-index: 8; width: 150px; padding: 5px; border: 1px solid #2a2d32; border-radius: 9px; background: #14171b; box-shadow: 0 18px 40px rgba(0,0,0,.5); }
 .layout-menu[hidden] { display: none; }
 .layout-menu button { display: block; width: 100%; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: #c9cbd0; font-size: 10.5px; text-align: left; cursor: pointer; }
@@ -2307,8 +2306,13 @@ video:-webkit-full-screen {
 .studio-split-mark::before { content: ''; position: absolute; top: 0; left: -3px; width: 7px; height: 7px; border-radius: 2px; background: #d2a35d; }
 .studio-beat img { width: 100%; height: 100%; object-fit: cover; opacity: .62; }
 .studio-beat span { position: absolute; inset: 0; display: grid; place-items: center; color: #d6d8dc; font-size: 8.5px; text-shadow: 0 1px 3px #000; }
-.audio-track { flex: 1; height: 100%; display: flex; align-items: center; overflow: hidden; padding: 0 14px; }
-.audio-wave { width: 100%; height: 20px; opacity: .45; background: repeating-linear-gradient(90deg, #3a3e45 0 2px, transparent 2px 6px); }
+.audio-track { position: relative; flex: 1; height: 100%; display: flex; align-items: center; gap: 8px; overflow: hidden; padding: 0 14px; cursor: pointer; }
+.audio-track:hover { background: #0f1114; }
+.studio-audio { display: none; }
+.audio-wave { position: relative; flex: 1; height: 20px; overflow: hidden; border-radius: 4px; background: repeating-linear-gradient(90deg, #3a3e45 0 2px, transparent 2px 6px); opacity: .6; }
+.audio-wave i { position: absolute; inset: 0 auto 0 0; width: 0; background: repeating-linear-gradient(90deg, #6bc697 0 2px, transparent 2px 6px); }
+.audio-label { flex: 0 0 auto; color: #85888e; font-size: 9px; }
+.audio-empty { color: #6d7076; font-size: 9.5px; }
 .studio-log { flex: 0 0 auto; display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid #1c1e21; background: #0d0f12; }
 .studio-log-col { padding: 7px 14px; }
 .studio-log-col + .studio-log-col { border-left: 1px solid #1c1e21; }

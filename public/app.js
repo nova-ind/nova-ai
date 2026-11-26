@@ -16,6 +16,9 @@ const studioState = {
   timer: null,
   layout: null,
   timelineReady: false,
+  audio: null,
+  audioPath: '',
+  audioBar: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -93,6 +96,7 @@ const els = {
   studioEta: $('studioEta'),
   studioTimeline: $('studioTimeline'),
   studioImageTimeline: $('studioImageTimeline'),
+  studioAudioTrack: $('studioAudioTrack'),
   studioRuler: $('studioRuler'),
   studioPlayhead: $('studioPlayhead'),
   studioTimecode: $('studioTimecode'),
@@ -110,6 +114,11 @@ const els = {
   studioMuteVideo: $('studioMuteVideo'),
   studioMuteImage: $('studioMuteImage'),
   studioMuteAudio: $('studioMuteAudio'),
+  studioExportBtn: $('studioExportBtn'),
+  studioExportFormat: $('studioExportFormat'),
+  studioExportResolution: $('studioExportResolution'),
+  studioExportQuality: $('studioExportQuality'),
+  studioExportState: $('studioExportState'),
   studioLayoutBtn: $('studioLayoutBtn'),
   studioLayoutMenu: $('studioLayoutMenu'),
   studioTogglePanel: $('studioTogglePanel'),
@@ -2503,6 +2512,7 @@ function applyStudioMute() {
   els.studioImageTimeline?.closest('.timeline-track')?.classList.toggle('track-muted', Boolean(muted.image));
   document.querySelector('.timeline-track--audio')?.classList.toggle('track-muted', Boolean(muted.audio));
   if (els.studioPreview) els.studioPreview.muted = Boolean(muted.video || muted.audio);
+  if (studioState.audio) studioState.audio.muted = Boolean(muted.audio);
 }
 
 function toggleStudioTrack(track) {
@@ -2661,7 +2671,7 @@ function renderStudioRuler(durationSeconds) {
 
 function updateStudioPlayhead() {
   const duration = studioVideoDuration();
-  const current = Number(els.studioPreview?.currentTime) || 0;
+  const current = Number(els.studioPreview?.currentTime) || Number(studioState.audio?.currentTime) || 0;
   const ratio = duration ? Math.min(1, current / duration) : 0;
   if (els.studioPlayhead) els.studioPlayhead.style.left = `calc(92px + (100% - 92px) * ${ratio})`;
   if (els.studioTimecode) els.studioTimecode.textContent = `${formatStudioClock(current)} / ${formatStudioClock(duration)}`;
@@ -2669,7 +2679,9 @@ function updateStudioPlayhead() {
 
 function syncStudioPlayButton() {
   if (!els.studioTimelinePlay) return;
-  const paused = !els.studioPreview || els.studioPreview.paused;
+  const paused = els.studioPreview?.src
+    ? (!els.studioPreview || els.studioPreview.paused)
+    : !(studioState.audio && !studioState.audio.paused);
   els.studioTimelinePlay.innerHTML = paused
     ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>'
     : '<svg viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z" /></svg>';
@@ -2678,23 +2690,86 @@ function syncStudioPlayButton() {
 
 function studioSeekTo(seconds) {
   const duration = studioVideoDuration();
-  if (!els.studioPreview || !els.studioPreview.src) return;
-  try { els.studioPreview.currentTime = studioClamp(seconds, 0, duration); } catch { /* not seekable yet */ }
+  const target = studioClamp(seconds, 0, duration);
+  if (els.studioPreview?.src) {
+    try { els.studioPreview.currentTime = target; } catch { /* not seekable yet */ }
+  }
+  if (studioState.audio) {
+    try { studioState.audio.currentTime = Math.min(target, studioState.audio.duration || target); } catch { /* not seekable yet */ }
+  }
   updateStudioPlayhead();
+  if (studioState.audioBar && duration) studioState.audioBar.style.width = `${Math.round((target / duration) * 100)}%`;
 }
 
 async function toggleStudioPlayback() {
-  if (!els.studioPreview?.src) {
-    toast('Pehle final video render karein');
+  const hasVideo = Boolean(els.studioPreview?.src);
+  if (!hasVideo && !studioState.audio) {
+    toast('Pehle voice track ya final video ready ho');
     return;
   }
   try {
-    if (els.studioPreview.paused) await els.studioPreview.play();
-    else els.studioPreview.pause();
+    if (hasVideo) {
+      if (els.studioPreview.paused) await els.studioPreview.play();
+      else els.studioPreview.pause();
+    } else if (studioState.audio.paused) {
+      await studioState.audio.play();
+    } else {
+      studioState.audio.pause();
+    }
   } catch (error) {
     toast(error?.message || 'Playback start nahi hua');
   }
   syncStudioPlayButton();
+}
+
+async function exportStudioMedia() {
+  const job = mediaJobs.find((item) => item.id === studioState.jobId) || mediaJobs.find((item) => item.studio);
+  if (!job) {
+    toast('Pehle Studio me video banayein');
+    return;
+  }
+  const payload = {
+    jobId: job.id,
+    format: els.studioExportFormat?.value || 'video',
+    resolution: els.studioExportResolution?.value || '720p',
+    quality: els.studioExportQuality?.value || 'standard',
+  };
+  try {
+    const response = await fetch('/api/video-studio/export', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Export shuru nahi hua');
+    const label = `${payload.format.toUpperCase()} · ${payload.resolution} · ${payload.quality}`;
+    if (els.studioExportState) els.studioExportState.textContent = `${label} · queued`;
+    toast(`${label} export shuru — FFmpeg background me chal raha hai`);
+    watchStudioExport(data.job?.id, data.outputUrl, label);
+  } catch (error) {
+    toast(error?.message || 'Export fail ho gaya');
+  }
+}
+
+function watchStudioExport(jobId, outputUrl, label) {
+  if (!jobId) return;
+  const timer = setInterval(async () => {
+    try {
+      const response = await fetch(`/api/ffmpeg/jobs/${encodeURIComponent(jobId)}`);
+      if (!response.ok) return;
+      const job = await response.json();
+      if (els.studioExportState) {
+        els.studioExportState.textContent = `${label} · ${job.status || 'working'} ${Math.round(Number(job.progress) || 0)}%`;
+      }
+      if (job.status === 'done' || job.status === 'error') {
+        clearInterval(timer);
+        if (job.status === 'done' && outputUrl) window.open(outputUrl, '_blank');
+        toast(job.status === 'done' ? `${label} export ready` : (job.error || `${label} export fail`));
+      }
+    } catch {
+      clearInterval(timer);
+    }
+  }, 1500);
 }
 
 function setupStudioTimeline() {
@@ -2729,6 +2804,12 @@ function setupStudioTimeline() {
       if (clip) studioSeekTo(Number(clip.dataset.start) || 0);
     });
   }
+  els.studioAudioTrack?.addEventListener('click', (event) => {
+    const rect = els.studioAudioTrack.getBoundingClientRect();
+    const ratio = studioClamp((event.clientX - rect.left - 92) / Math.max(1, rect.width - 92), 0, 1);
+    studioSeekTo(ratio * studioVideoDuration());
+  });
+  els.studioExportBtn?.addEventListener('click', exportStudioMedia);
   els.studioMuteVideo?.addEventListener('click', () => toggleStudioTrack('video'));
   els.studioMuteImage?.addEventListener('click', () => toggleStudioTrack('image'));
   els.studioMuteAudio?.addEventListener('click', () => toggleStudioTrack('audio'));
@@ -3147,6 +3228,10 @@ function renderStudioDashboard() {
     els.studioCounts.textContent = '0 scenes · 0 done';
     els.studioTimeline.innerHTML = '<div class="studio-hint">Scene timeline yahan dikhogi.</div>';
     if (els.studioImageTimeline) els.studioImageTimeline.innerHTML = '<div class="studio-hint">Image beats yahan dikhenge.</div>';
+    if (els.studioAudioTrack) els.studioAudioTrack.innerHTML = '<div class="audio-wave"><i></i></div><span class="audio-empty">Voice track story ke baad yahan aayega…</span>';
+    studioState.audio = null;
+    studioState.audioPath = '';
+    studioState.audioBar = null;
     renderStudioRuler(60);
     updateStudioPlayhead();
     els.studioDone.innerHTML = '<span class="studio-hint">—</span>';
@@ -3213,6 +3298,7 @@ function renderStudioDashboard() {
     els.studioTimeline.append(node);
   });
   renderStudioImageTimeline(job, scenes);
+  renderStudioAudioTrack(job);
   renderStudioRuler(Number(job.durationSeconds) || studioVideoDuration());
   updateStudioPlayhead();
   els.studioSceneCount.textContent = scenes.length ? `· ${done}/${scenes.length} ready` : '';
@@ -3244,6 +3330,51 @@ function renderStudioDashboard() {
       els.studioPreview.dataset.controls = '1';
     }
   }
+}
+
+function renderStudioAudioTrack(job) {
+  const track = els.studioAudioTrack;
+  if (!track) return;
+  const srcPath = job.narrationPath || job.audioPath || job.ambientPath || '';
+  if (studioState.audio && studioState.audioPath === srcPath) return;
+  if (studioState.audio) {
+    studioState.audio.pause();
+    studioState.audio.removeAttribute('src');
+    studioState.audio = null;
+    studioState.audioPath = '';
+    studioState.audioBar = null;
+  }
+  if (!srcPath) {
+    const empty = document.createElement('span');
+    empty.className = 'audio-empty';
+    empty.textContent = 'Voice track story ke baad yahan aayega…';
+    track.replaceChildren(empty);
+    return;
+  }
+  const audio = document.createElement('audio');
+  audio.className = 'studio-audio';
+  audio.preload = 'metadata';
+  audio.src = `/api/file?path=${encodeURIComponent(srcPath)}`;
+  audio.muted = Boolean(studioState.layout?.muted?.audio);
+  const wave = document.createElement('div');
+  wave.className = 'audio-wave';
+  const bar = document.createElement('i');
+  wave.append(bar);
+  const label = document.createElement('span');
+  label.className = 'audio-label';
+  label.textContent = job.narrationPath ? 'Narration' : (job.audioPath ? 'Uploaded audio' : 'Ambient');
+  track.replaceChildren(audio, wave, label);
+  studioState.audio = audio;
+  studioState.audioPath = srcPath;
+  studioState.audioBar = bar;
+  const duration = Number(job.durationSeconds) || 60;
+  audio.addEventListener('timeupdate', () => {
+    bar.style.width = `${Math.round((Number(audio.currentTime || 0) / duration) * 100)}%`;
+    if (!els.studioPreview?.src) updateStudioPlayhead();
+  });
+  audio.addEventListener('play', syncStudioPlayButton);
+  audio.addEventListener('pause', syncStudioPlayButton);
+  syncStudioPlayButton();
 }
 
 function renderStudioImageTimeline(job, scenes) {
