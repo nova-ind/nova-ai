@@ -2168,6 +2168,7 @@ video:-webkit-full-screen {
 .studio.is-editing .brand-copy small { font-size: 9px; }
 .studio.is-editing .studio-stage { padding: 8px 10px; gap: 0; }
 .studio.is-editing .studio-preview { border-radius: 10px; }
+.studio.is-editing .studio-log { display: none; }
 .studio.layout-locked .studio-resizer { display: none; }
 .studio.panel-hidden .studio-panel, .studio.panel-hidden .studio-resizer-x { display: none; }
 .studio.panel-hidden .studio-workspace { grid-template-columns: minmax(0, 1fr); }
