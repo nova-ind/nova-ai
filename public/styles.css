@@ -1289,6 +1289,43 @@ svg {
   background: #000;
 }
 
+.video-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.video-control-btn {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.video-control-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.video-error {
+  margin-top: 8px;
+  color: #ffb4b4;
+  font-size: 12px;
+}
+
+video:fullscreen,
+video:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+  border-radius: 0;
+  object-fit: contain;
+  background: #000;
+}
+
 .job-card .ghost-btn {
   margin-top: 10px;
 }

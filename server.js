@@ -161,6 +161,50 @@ const UA =
 
 /* ---------------------------------- utils --------------------------------- */
 
+function parseByteRange(header, size) {
+  if (!header) return { start: 0, end: Math.max(0, size - 1), total: size };
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(String(header).trim());
+  if (!match || (!match[1] && !match[2])) return null;
+  let start;
+  let end;
+  if (!match[1]) {
+    const suffix = Number(match[2]);
+    if (!Number.isFinite(suffix) || suffix < 1) return null;
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] ? Number(match[2]) : size - 1;
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size) return null;
+  return { start, end: Math.min(end, size - 1), total: size };
+}
+
+async function sendFileBytes(req, res, target, type, options = {}) {
+  const data = await readFile(target);
+  const range = parseByteRange(req.headers.range, data.length);
+  if (!range && req.headers.range) {
+    res.writeHead(416, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-range': `bytes */${data.length}`,
+      'accept-ranges': 'bytes',
+    });
+    return res.end(JSON.stringify({ error: 'Invalid byte range.' }));
+  }
+  const partial = Boolean(range && req.headers.range);
+  const headers = {
+    'content-type': type,
+    'content-length': partial ? range.end - range.start + 1 : data.length,
+    'accept-ranges': 'bytes',
+    'cache-control': options.cacheControl || 'no-store',
+    'content-disposition': 'inline',
+  };
+  if (partial) headers['content-range'] = `bytes ${range.start}-${range.end}/${range.total}`;
+  res.writeHead(partial ? 206 : 200, headers);
+  if (req.method === 'HEAD') return res.end();
+  return res.end(partial ? data.subarray(range.start, range.end + 1) : data);
+}
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -6541,16 +6585,9 @@ async function serveWorkspace(req, res, pathname) {
   }
 
   try {
-    const data = await readFile(target);
     const ext = path.extname(target).toLowerCase();
     const type = MIME[ext] || (ext === '.md' ? 'text/markdown; charset=utf-8' : 'application/octet-stream');
-    res.writeHead(200, {
-      'content-type': type,
-      'content-length': data.length,
-      'cache-control': 'no-store',
-      'content-disposition': 'inline',
-    });
-    return res.end(data);
+    return await sendFileBytes(req, res, target, type);
   } catch {
     return sendJson(res, 404, { error: 'File not found in workspace.' });
   }
@@ -6629,7 +6666,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    if (req.method === 'GET' && url.pathname.startsWith('/workspace/')) {
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/workspace/')) {
       return await serveWorkspace(req, res, url.pathname);
     }
 
@@ -7054,22 +7091,15 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 405, { error: 'Method not allowed.' });
     }
 
-    if (url.pathname === '/api/file' && req.method === 'GET') {
+    if (url.pathname === '/api/file' && (req.method === 'GET' || req.method === 'HEAD')) {
       const raw = String(url.searchParams.get('path') || '');
       const target = path.resolve(raw);
       if (!raw || !pathInAllowedFolders(target)) {
         return sendJson(res, 403, { error: 'File is outside the allowed folders.' });
       }
       try {
-        const data = await readFile(target);
         const type = MIME[path.extname(target).toLowerCase()] || 'application/octet-stream';
-        res.writeHead(200, {
-          'content-type': type,
-          'content-length': data.length,
-          'cache-control': 'no-store',
-          'content-disposition': 'inline',
-        });
-        return res.end(data);
+        return await sendFileBytes(req, res, target, type);
       } catch {
         return sendJson(res, 404, { error: 'File not found.' });
       }

@@ -70,6 +70,9 @@ namespace NovaDesktop
         private bool exiting;
         private bool suppressRestart;
         private bool webViewFailedShown;
+        private bool videoFullscreen;
+        private FormWindowState normalWindowState = FormWindowState.Normal;
+        private FormBorderStyle normalBorderStyle = FormBorderStyle.Sizable;
         private int crashCount;
 
         public MainForm()
@@ -216,6 +219,7 @@ namespace NovaDesktop
             webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
             webView.CoreWebView2.NewWindowRequested += WebView_NewWindowRequested;
             webView.CoreWebView2.WebMessageReceived += WebView_WebMessageReceived;
+            webView.CoreWebView2.ContainsFullScreenElementChanged += WebView_ContainsFullScreenElementChanged;
             webView.CoreWebView2.ProcessFailed += (s, failed) =>
             {
                 WriteLog("WebView2 process failed — app window recover kar raha hai.");
@@ -233,6 +237,47 @@ namespace NovaDesktop
             };
             webViewReady = true;
             TryNavigate();
+        }
+
+        private void WebView_ContainsFullScreenElementChanged(object sender, object e)
+        {
+            bool entering = false;
+            try
+            {
+                entering = webView.CoreWebView2.ContainsFullScreenElement;
+            }
+            catch
+            {
+                return;
+            }
+
+            try
+            {
+                BeginInvoke(new MethodInvoker(() =>
+                {
+                    if (entering && !videoFullscreen)
+                    {
+                        normalWindowState = WindowState;
+                        normalBorderStyle = FormBorderStyle;
+                        videoFullscreen = true;
+                        topBar.Visible = false;
+                        FormBorderStyle = FormBorderStyle.None;
+                        WindowState = FormWindowState.Maximized;
+                        webView.BringToFront();
+                    }
+                    else if (!entering && videoFullscreen)
+                    {
+                        videoFullscreen = false;
+                        WindowState = normalWindowState;
+                        FormBorderStyle = normalBorderStyle;
+                        topBar.Visible = true;
+                    }
+                }));
+            }
+            catch
+            {
+                // Form already closing — ignore fullscreen transition.
+            }
         }
 
         private void WebView_NewWindowRequested(object sender, CoreWebView2NewWindowRequestedEventArgs e)

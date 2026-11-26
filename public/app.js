@@ -771,6 +771,67 @@ function agentTraceEl(message, open = Boolean(message.streaming)) {
   return details;
 }
 
+function playerControls(video, jobId = '') {
+  const row = document.createElement('div');
+  row.className = 'video-controls';
+
+  const play = document.createElement('button');
+  play.type = 'button';
+  play.className = 'video-control-btn';
+  play.textContent = '▶ Play';
+  play.addEventListener('click', async () => {
+    if (video.paused || video.ended) {
+      try {
+        await video.play();
+      } catch (err) {
+        toast(err?.message || 'Video play nahi hua.');
+      }
+    } else {
+      video.pause();
+    }
+  });
+
+  const full = document.createElement('button');
+  full.type = 'button';
+  full.className = 'video-control-btn';
+  full.textContent = '⛶ Full screen';
+  full.addEventListener('click', async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else if (video.requestFullscreen) {
+        await video.requestFullscreen();
+      } else if (video.webkitEnterFullscreen) {
+        video.webkitEnterFullscreen();
+      } else {
+        window.open(video.currentSrc || video.src, '_blank');
+      }
+    } catch (err) {
+      toast(err?.message || 'Full screen unavailable — Open button se dekhein.');
+    }
+  });
+
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'video-control-btn';
+  open.textContent = 'Open';
+  open.addEventListener('click', () => window.open(video.currentSrc || video.src, '_blank'));
+
+  video.addEventListener('play', () => { play.textContent = '❚❚ Pause'; });
+  video.addEventListener('pause', () => { play.textContent = '▶ Play'; });
+  video.addEventListener('ended', () => { play.textContent = '▶ Play'; });
+  video.addEventListener('error', () => {
+    const fallback = document.createElement('div');
+    fallback.className = 'video-error';
+    fallback.textContent = 'Is browser me video decode nahi hua — Open button se system player me chalayein.';
+    if (!row.parentElement?.querySelector('.video-error')) row.before(fallback);
+  });
+
+  row.append(play, full, open);
+  if (jobId) row.dataset.jobId = jobId;
+  return row;
+}
+
 function jobCard(message) {
   const job = message.job || {};
   const card = document.createElement('div');
@@ -824,9 +885,10 @@ function jobCard(message) {
     const url = `/workspace/${String(job.output).replace(/\\/g, '/')}`;
     const video = document.createElement('video');
     video.controls = true;
+    video.playsInline = true;
     video.preload = 'metadata';
     video.src = url;
-    card.append(video);
+    card.append(video, playerControls(video, job.id));
 
     const actions = document.createElement('div');
     actions.className = 'image-caption';
@@ -889,15 +951,16 @@ function videoCard(message) {
   } else {
     const video = document.createElement('video');
     video.controls = true;
+    video.playsInline = true;
     video.preload = 'metadata';
     video.src = message.url;
     video.addEventListener('error', () => {
-      message.status = 'error';
-      message.error = 'Video could not be loaded.';
-      saveChats();
-      renderMessages();
+      const fallback = document.createElement('div');
+      fallback.className = 'video-error';
+      fallback.textContent = 'Video load nahi hua — Open button se system player me chalayein.';
+      if (!card.querySelector('.video-error')) card.append(fallback);
     });
-    card.append(video);
+    card.append(video, playerControls(video));
   }
 
   const caption = document.createElement('div');
