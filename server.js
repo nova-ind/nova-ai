@@ -786,7 +786,7 @@ function extractCharacterBible(text) {
 function withCharacterBible(prompt, bible) {
   const text = String(prompt || '').trim();
   if (!bible || !text) return text;
-  if (text.toLowerCase().includes(bible.slice(0, 60).toLowerCase())) return text;
+  if (text.toLowerCase().includes(bible.toLowerCase())) return text;
   const joiner = /[.!?।]$/.test(bible) ? ' ' : '. ';
   return `${bible}${joiner}${text}`;
 }
@@ -1038,6 +1038,170 @@ async function generateImagePromptsWithModel(job, captions, creds) {
   const filled = Array.from({ length: count }, (_, index) => prompts[index] || fallbackImagePrompts(job, [lines[index]])[0])
     .map((prompt) => withCharacterBible(prompt, characterBible));
   return { characterBible, imagePrompts: filled };
+}
+
+// Ek narration line me kai visual beats ho sakte hain — bell, ringing, darshan.
+function splitLineVisualParts(line) {
+  const text = String(line || '').replace(/\s+/g, ' ').trim();
+  if (!text) return [];
+  const sentences = text.split(/[।.!?;]+\s*/).map((part) => part.trim()).filter(Boolean);
+  const parts = [];
+  for (const sentence of sentences) {
+    const pieces = sentence.split(/\s+(?:और\s+फिर|और|तथा|फिर|and\s+then|then|and)\s+/i).map((part) => part.trim()).filter(Boolean);
+    if (pieces.length > 1 && pieces.every((part) => part.split(/\s+/).filter(Boolean).length >= 4)) {
+      parts.push(...pieces);
+    } else {
+      parts.push(sentence);
+    }
+  }
+  if (parts.length <= 1) return [text];
+  if (parts.length > 3) return [parts[0], parts[1], parts.slice(2).join(' ')];
+  return parts;
+}
+
+function fallbackLineImagePrompts(job, line, basePrompt = '') {
+  const bible = String(job.characterBible || '').trim();
+  const parts = splitLineVisualParts(line);
+  const context = String(basePrompt || '').trim();
+  const movieLook = job.type === 'song' || job.style === 'cinematic'
+    ? 'cinematic film still, dramatic movie lighting, 35mm film look, wide establishing shot, depth of field, '
+    : '';
+  return parts.slice(0, 3).map((part) => withCharacterBible(
+    `${part}. ${context ? `Story context: ${context.slice(0, 220)}. ` : ''}${movieLook}${job.style ? `${job.style} style, ` : ''}single coherent scene, one cinematic frame, no collage, no panels, no text.`,
+    bible,
+  ));
+}
+
+async function generateVisualBeatsWithModel(job, captions, creds) {
+  const key = String(creds?.key || '').trim();
+  if (!key) throw new Error('Visual storyboard model key unavailable.');
+  const base = String(creds?.baseUrl || UPSTREAM_BASE).replace(/\/+$/, '');
+  const model = String(process.env.STORYBOARD_MODEL || process.env.STORY_MODEL || DEFAULT_MODEL || '').trim();
+  const lines = captions.map((line) => String(line || '').trim()).filter(Boolean);
+  if (!lines.length) throw new Error('Visual storyboard ke liye story lines nahi mili.');
+  const count = lines.length;
+  const story = lines.map((line, index) => `Line ${index + 1}: ${line}`).join('\n');
+  const knownBible = String(job.characterBible || '').trim();
+  const hints = Array.isArray(job.imagePrompts) && job.imagePrompts.length === count
+    ? job.imagePrompts.map((prompt, index) => `${index + 1}. ${prompt}`).join('\n')
+    : '';
+  const system = [
+    'You are a film storyboard director. Read the complete story below before writing anything.',
+    `There are exactly ${count} narration lines. For each line, create 1, 2 or 3 image prompts.`,
+    'Use 2 or 3 images only when that line clearly contains multiple distinct visual events, objects or actions. A single event gets exactly 1 image.',
+    'Example: "A big bell hangs near the temple entrance. Devotees ring it before entering, then see the deity." => 3 images: the bell at the entrance, devotees ringing it, and the devotee receiving darshan inside.',
+    'Each image prompt: 25-55 English words, exactly one coherent scene, matching the exact subject/action/emotion of that part of the line. Add shot language: wide establishing shot, medium shot or close-up detail, plus lighting, mood and lens feel. For cinematic/song videos it must read like a 35mm film still, never a poster or collage. Never split panel, text or watermark.',
+    'Every recurring character must keep the exact same age, face, hair, clothes and body proportions in every prompt.',
+    'Return ONLY valid JSON: {"characterBible":"...","lineImages":[{"line":1,"images":["prompt 1","prompt 2"]}]}',
+    'lineImages must contain exactly one entry per narration line, in order. Do not add, skip, reorder or merge lines.',
+  ].join('\n');
+  const user = [
+    knownBible ? `Existing character lock: ${knownBible}` : '',
+    hints ? `One-image hints already supplied by the user:\n${hints}` : '',
+    `User idea: ${String(job.prompt || '').slice(0, 4000)}`,
+    `FULL STORY (${count} lines):\n${story}`,
+    `Return exactly ${count} line entries now.`,
+  ].filter(Boolean).join('\n\n');
+  const response = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model,
+      stream: false,
+      temperature: 0.35,
+      max_tokens: Math.min(10_000, Math.max(1600, count * 260)),
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    }),
+    signal: AbortSignal.timeout(180_000),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Visual storyboard model failed (${response.status}): ${detail.slice(0, 180)}`);
+  }
+  const payload = await response.json();
+  const content = payload?.choices?.[0]?.message?.content;
+  const raw = typeof content === 'string' ? content : JSON.stringify(content || '');
+  let parsed = null;
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start !== -1 && end > start) {
+    try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch { parsed = null; }
+  }
+  const rawLines = parsed?.lineImages || parsed?.lines || parsed?.scenes || [];
+  if (!Array.isArray(rawLines)) throw new Error('Model ne line-wise image plan nahi diya.');
+  const lineImages = lines.map((line, index) => {
+    const entry = rawLines[index];
+    const rawPrompts = Array.isArray(entry)
+      ? entry
+      : (entry?.images || entry?.prompts || entry?.imagePrompts || (entry?.prompt ? [entry.prompt] : []));
+    const prompts = Array.isArray(rawPrompts)
+      ? rawPrompts.map((item) => String(typeof item === 'string' ? item : item?.prompt || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 3)
+      : [];
+    return prompts.length ? prompts : fallbackLineImagePrompts(job, line, job.imagePrompts?.[index]);
+  });
+  if (!lineImages.some((images) => images.length)) throw new Error('Model ne koi visual image prompt nahi diya.');
+  const characterBible = String(parsed?.characterBible || knownBible || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+  return {
+    characterBible,
+    lineImages: lineImages.map((images) => images.map((prompt) => withCharacterBible(prompt, characterBible))),
+  };
+}
+
+function withVisualBeatLock(job, beat) {
+  return {
+    lineIndex: Number(beat?.lineIndex) || 0,
+    prompt: withCharacterBible(String(beat?.prompt || ''), job.characterBible),
+    start: Number(beat?.start) || 0,
+    end: Number(beat?.end) || 0,
+  };
+}
+
+function buildVisualBeats(job, captions, lineImages) {
+  const target = Math.min(900, Math.max(5, Number(job.durationSeconds) || captions.length * 30));
+  const starts = Array.isArray(job.storyboardStarts) && job.storyboardStarts.length === captions.length
+    ? job.storyboardStarts
+    : captions.map((_, index) => (index * target) / captions.length);
+  const ends = Array.isArray(job.storyboardEnds) && job.storyboardEnds.length === captions.length
+    ? job.storyboardEnds
+    : captions.map((_, index) => ((index + 1) * target) / captions.length);
+  const beats = [];
+  for (let lineIndex = 0; lineIndex < captions.length; lineIndex += 1) {
+    const prompts = Array.isArray(lineImages[lineIndex]) && lineImages[lineIndex].length
+      ? lineImages[lineIndex].slice(0, 3)
+      : fallbackLineImagePrompts(job, captions[lineIndex], job.imagePrompts?.[lineIndex]);
+    const lineStart = Number.isFinite(Number(starts[lineIndex])) ? Number(starts[lineIndex]) : (lineIndex * target) / captions.length;
+    const lineEnd = Number.isFinite(Number(ends[lineIndex])) && Number(ends[lineIndex]) > lineStart
+      ? Number(ends[lineIndex])
+      : ((lineIndex + 1) * target) / captions.length;
+    const span = Math.max(1, lineEnd - lineStart);
+    // Image ka time uske bolne wale clause ki lambai ke hisaab se — lambi line ko zyada time.
+    const clauseParts = splitLineVisualParts(captions[lineIndex]);
+    const weights = prompts.map((_, part) => {
+      if (clauseParts.length !== prompts.length) return 1;
+      return Math.max(1, String(clauseParts[part] || '').split(/\s+/).filter(Boolean).length);
+    });
+    const totalWeight = weights.reduce((sum, value) => sum + value, 0) || prompts.length;
+    let cursor = lineStart;
+    for (let part = 0; part < prompts.length; part += 1) {
+      const beatEnd = part === prompts.length - 1
+        ? lineEnd
+        : cursor + (span * weights[part]) / totalWeight;
+      beats.push({
+        lineIndex,
+        prompt: withCharacterBible(prompts[part], job.characterBible),
+        start: Number(cursor.toFixed(3)),
+        end: Number(beatEnd.toFixed(3)),
+      });
+      cursor = beatEnd;
+    }
+  }
+  return beats;
 }
 
 function buildStoryScript(job, baseCaptions) {
@@ -1294,7 +1458,7 @@ function validImageBytes(bytes) {
   return width >= 256 && height >= 256;
 }
 
-async function collectJobImages(job, prompts) {
+async function collectJobImages(job, prompts, directory = null) {
   const provider = job.imageProvider || DEFAULT_IMAGE_PROVIDER;
   const list = Array.isArray(prompts) ? prompts.map((item) => String(item || '').trim()).filter(Boolean) : [];
   if (!list.length) throw new Error('Image prompts nahi mile — pehle story likhna zaroori hai.');
@@ -1316,41 +1480,63 @@ async function collectJobImages(job, prompts) {
       : await fetchImageResult(text, job.imageModel, forceProvider, job.ratio);
     return pickUnique(result.images || []);
   };
+  const movieLook = job.type === 'song' || job.style === 'cinematic'
+    ? 'cinematic film still, dramatic movie lighting, 35mm film look, wide establishing shot, depth of field, '
+    : '';
+  const frameWord = job.style === 'cartoon' ? 'one illustration' : 'one cinematic frame';
   // Har story line ka apna prompt aur apni image — exact 1:1, koi duplicate/collage nahi.
   for (let index = 0; index < list.length; index += 1) {
     const scenePrompt = list[index];
     const firstSentence = scenePrompt.split(/(?<=[.!?।])\s+/)[0] || scenePrompt;
     const variants = [
-      `${scenePrompt}. ${job.style ? `${job.style} style, ` : ''}single coherent scene, one illustration, no collage, no panels, no text.`,
-      `${firstSentence.slice(0, 220)}. ${job.style ? `${job.style} style, ` : ''}single coherent scene, one illustration, no collage, no panels, no text.`,
-      `${scenePrompt.slice(0, 260)}. cinematic composition, one coherent scene, one illustration, no collage, no panels, no text.`,
+      `${scenePrompt}. ${movieLook}${job.style ? `${job.style} style, ` : ''}single coherent scene, ${frameWord}, no collage, no panels, no text.`,
+      `${firstSentence.slice(0, 220)}. ${movieLook}${job.style ? `${job.style} style, ` : ''}single coherent scene, ${frameWord}, no collage, no panels, no text.`,
+      `${scenePrompt.slice(0, 260)}. ${movieLook}cinematic composition, one coherent scene, ${frameWord}, no collage, no panels, no text.`,
     ];
+    const file = directory
+      ? path.join(directory, `scene-${String(index + 1).padStart(2, '0')}.jpg`)
+      : null;
     let chosen = null;
+    // Retry par pehle se bani image reuse karo — itni mehnat dobara na ho.
+    if (file) {
+      try {
+        await access(file);
+        const bytes = await readFile(file);
+        if (validImageBytes(bytes)) {
+          const hash = createHash('sha1').update(bytes).digest('hex');
+          if (!usedHashes.has(hash)) {
+            usedHashes.add(hash);
+            chosen = bytes;
+          }
+        }
+      } catch { /* file nahi hai ya corrupt — dobara banayein */ }
+    }
     // Ek scene fail ho to usi scene ko dobara banao; kabhi agle scene ki image repeat nahi.
-    for (let attempt = 0; attempt < 6 && !chosen; attempt += 1) {
+    // Bing 2 baar fail ho to free fallback providers — poori video rukti nahi.
+    const fallbacks = provider === 'bing'
+      ? ['stock', 'cloudflare', 'huggingface', 'worker']
+      : ['stock', 'auto'];
+    let activeProvider = provider;
+    for (let attempt = 0; attempt < 8 && !chosen; attempt += 1) {
       const text = variants[Math.min(attempt, variants.length - 1)];
       try {
-        chosen = await requestUnique(text);
+        chosen = await requestUnique(text, activeProvider);
       } catch {
         chosen = null;
       }
       if (chosen) break;
-      if (attempt === 3 && provider !== 'auto' && provider !== 'stock') {
-        try {
-          chosen = await requestUnique(text, 'auto');
-        } catch {
-          chosen = null;
-        }
-      }
-      if (!chosen) await sleep(1200);
+      if (attempt >= 1) activeProvider = fallbacks[(attempt - 1) % fallbacks.length];
+      if (!chosen) await sleep(800);
     }
     if (!chosen) {
       throw new Error(`Scene ${index + 1}/${list.length} ki unique image nahi bani. Bing/login check karke dobara try karein.`);
     }
+    if (file) await writeFile(file, chosen);
     pool.push(chosen);
     await updateMediaJob(job, {
       step: `${provider === 'stock' ? 'Stock' : 'Bing'} se scene ${index + 1}/${list.length} ki image ready — story line se match…`,
       progress: 10 + Math.round(((index + 1) / list.length) * 55),
+      ...(file ? { resumeOnStart: true } : {}),
     });
   }
   return pool;
@@ -1556,66 +1742,101 @@ async function runMediaJob(job) {
       progress: 68,
     });
 
-    const exactSceneCount = Math.max(1, captions.length);
-    if (job.sceneCount !== exactSceneCount) {
-      await updateMediaJob(job, {
-        sceneCount: exactSceneCount,
-        step: `Story ki ${captions.length} lines hain — utne hi scenes aur images banenge…`,
+    const lineCount = Math.max(1, captions.length);
+    const savedBeats = Array.isArray(job.visualBeats) ? job.visualBeats : [];
+    const savedLineImages = Array.isArray(job.lineImagePrompts) ? job.lineImagePrompts : [];
+    const canReuseBeats = savedBeats.length > 0
+      && savedLineImages.length === captions.length
+      && savedBeats.length === Number(job.sceneCount)
+      && savedBeats.every((beat) => {
+        const lineIndex = Number(beat?.lineIndex);
+        return Number.isInteger(lineIndex) && lineIndex >= 0 && lineIndex < captions.length;
       });
-    }
-    let sceneImagePrompts = Array.isArray(job.imagePrompts)
-      ? job.imagePrompts.slice(0, exactSceneCount)
-      : [];
-    if (sceneImagePrompts.length !== exactSceneCount) {
-      await updateMediaJob(job, {
-        step: `Poori story padh kar ${exactSceneCount} scene ke image prompts bana rahe hain — har line ke liye ek image…`,
-        progress: 69,
+    await updateMediaJob(job, {
+      step: canReuseBeats
+        ? 'Saved visual beats mil gaye — wahi images ke saath aage badh rahe hain…'
+        : `Poori story padh kar visual beats bana rahe hain — har line me 1 se 3 images ho sakti hain…`,
+      progress: 69,
+    });
+    let lineImages = [];
+    let visualBeats = [];
+    if (canReuseBeats) {
+      lineImages = savedLineImages.map((images, index) => {
+        const list = Array.isArray(images) && images.length
+          ? images.slice(0, 3)
+          : fallbackLineImagePrompts(job, captions[index], job.imagePrompts?.[index]);
+        return list.map((prompt) => withCharacterBible(prompt, job.characterBible));
       });
+      visualBeats = savedBeats.map((beat) => withVisualBeatLock(job, beat));
+    } else {
       try {
-        const generated = await generateImagePromptsWithModel(job, captions, creds);
-        sceneImagePrompts = generated.imagePrompts;
+        const generated = await generateVisualBeatsWithModel(job, captions, creds);
+        lineImages = generated.lineImages;
+        job.characterBible = generated.characterBible || job.characterBible || '';
         await updateMediaJob(job, {
-          characterBible: generated.characterBible,
-          imagePrompts: sceneImagePrompts,
-          step: `Story ke hisaab se ${sceneImagePrompts.length} image prompts ready — characters locked…`,
+          characterBible: job.characterBible,
+          step: `Story ke ${lineCount} lines ke visual beats ready — characters locked…`,
         });
       } catch (err) {
-        sceneImagePrompts = fallbackImagePrompts(job, captions);
+        lineImages = captions.map((line, index) => fallbackLineImagePrompts(job, line, job.imagePrompts?.[index]));
         await updateMediaJob(job, {
-          imagePrompts: sceneImagePrompts,
-          step: `Image-prompt model unavailable (${String(err.message || err).slice(0, 90)}) — story lines se exact prompts bana diye…`,
+          step: `Visual model unavailable (${String(err.message || err).slice(0, 90)}) — line ke clause se images bana rahe hain…`,
         });
       }
+      lineImages = lineImages.map((images, index) => {
+        const list = Array.isArray(images) && images.length
+          ? images.slice(0, 3)
+          : fallbackLineImagePrompts(job, captions[index], job.imagePrompts?.[index]);
+        return list.map((prompt) => withCharacterBible(prompt, job.characterBible));
+      });
+      visualBeats = buildVisualBeats(job, captions, lineImages);
     }
-    if (job.characterBible) {
-      sceneImagePrompts = sceneImagePrompts.map((prompt) => withCharacterBible(prompt, job.characterBible));
-    }
-    sceneImagePrompts = Array.from({ length: exactSceneCount }, (_, index) => sceneImagePrompts[index] || fallbackImagePrompts(job, [captions[index]])[0]);
+    if (!visualBeats.length) throw new Error('Story se koi visual beat nahi bana.');
+    const sceneImagePrompts = visualBeats.map((beat) => beat.prompt);
     await updateMediaJob(job, {
-      sceneCount: exactSceneCount,
+      sceneCount: visualBeats.length,
+      narrationLineCount: captions.length,
+      visualBeats,
+      lineImagePrompts: lineImages,
       imagePrompts: sceneImagePrompts,
-      step: job.imageProvider === 'stock'
-        ? 'Har story line ke liye alag copyright-free stock image dhoondh rahe hain (Openverse CC0/PDM)…'
-        : 'Har story line ke liye alag Bing image ban rahi hai — exact 1 line = 1 image…',
+      step: `${captions.length} narration lines → ${visualBeats.length} matching images. Har image apni line ke saath sync hai…`,
       progress: 9,
     });
-    // Ek image me multiple scenes/collage nahi: har scene ka apna prompt aur apni unique image.
-    const imagePool = await collectJobImages(job, sceneImagePrompts);
-    if (imagePool.length !== exactSceneCount) {
-      throw new Error(`Sirf ${imagePool.length}/${exactSceneCount} images bani — duplicate images nahi lagayenge.`);
+    // Naye beats bane ho to purani scene images hat do — warna purani image naye line ke saath galat lagegi.
+    if (!canReuseBeats) {
+      for (const scene of job.scenes || []) {
+        scene.image = null;
+        scene.video = null;
+      }
+      try {
+        for (const file of await readdir(directory)) {
+          if (/^scene-\d+\.(jpg|jpeg|png|webp)$/i.test(file)) {
+            await rm(path.join(directory, file), { force: true });
+          }
+        }
+      } catch { /* directory abhi nahi bani ya read fail */ }
+    }
+    // Ek image me multiple scenes/collage nahi: har visual beat ka apna prompt aur apni unique image.
+    const imagePool = await collectJobImages(job, sceneImagePrompts, directory);
+    if (imagePool.length !== visualBeats.length) {
+      throw new Error(`Sirf ${imagePool.length}/${visualBeats.length} images bani — duplicate images nahi lagayenge.`);
     }
     await updateMediaJob(job, {
       imagePoolCount: imagePool.length,
-      step: `${imagePool.length} unique images ready — har ek apni story line se match karti hai…`,
+      step: `${imagePool.length} unique images ready — har ek apni narration line ke exact hisse se match karti hai…`,
       progress: 12,
     });
 
-    const useMotion = job.useAiVideo && job.sceneCount <= 8 && !job.analysis;
+    // Visual beats already get FFmpeg zoom/pan — extra LTX clips slow aur inconsistent hote hain.
+    const useMotion = job.useAiVideo && job.sceneCount <= 8 && !job.analysis && !job.visualBeats?.length;
     for (let index = 0; index < job.sceneCount; index += 1) {
       if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
-      const scene = job.scenes[index] || { index: index + 1, caption: captions[index] || `Scene ${index + 1}` };
-      scene.caption = captions[index] || scene.caption;
-      if (job.imagePrompts?.[index]) scene.imagePrompt = job.imagePrompts[index];
+      const beat = job.visualBeats?.[index] || { lineIndex: index, prompt: job.imagePrompts?.[index] };
+      const lineIndex = Number.isFinite(Number(beat?.lineIndex)) ? Number(beat.lineIndex) : index;
+      const scene = job.scenes[index] || { index: index + 1, caption: captions[lineIndex] || `Scene ${index + 1}` };
+      scene.lineIndex = lineIndex;
+      scene.caption = captions[lineIndex] || scene.caption;
+      scene.imagePrompt = beat?.prompt || job.imagePrompts?.[index] || scene.imagePrompt;
       if (!scene.image) {
         await updateMediaJob(job, {
           step: `Scene ${index + 1}/${job.sceneCount}: ${job.style} image ban rahi hai…`,
@@ -1689,7 +1910,7 @@ async function runMediaJob(job) {
         ambientPath = await generateAmbientBed(
           path.join(directory, 'ambient.wav'),
           job.durationSeconds,
-          { boundaries: captions.length || job.sceneCount || 1 },
+          { boundaries: job.visualBeats?.length || captions.length || job.sceneCount || 1 },
         );
       } catch (err) {
         await updateMediaJob(job, { step: `Ambient skip: ${String(err.message || err).slice(0, 100)}` });
@@ -1730,6 +1951,14 @@ async function resumeMediaJobs() {
       continue;
     }
     if (job.status === 'queued' || job.status === 'assets') {
+      runMediaJob(job).catch(() => {});
+    } else if (job.status === 'error' && job.resumeOnStart && (job.resumeAttempts || 0) < 3 && !mediaRunning.has(job.id)) {
+      await updateMediaJob(job, { resumeAttempts: (job.resumeAttempts || 0) + 1 });
+      await updateMediaJob(job, {
+        status: 'assets',
+        error: null,
+        step: 'App restart — saved images se wahin se resume…',
+      });
       runMediaJob(job).catch(() => {});
     } else if (job.status === 'rendering') {
       const directory = path.join(WORKSPACE, 'media-jobs', job.id);
@@ -3277,7 +3506,7 @@ async function generateBingImages(prompt) {
     if (!started) throw new Error('Bing image generation could not start.');
     await sleep(1500);
 
-    const first = await waitForPageValue(bingImageUrlsScript(previousSrcs, 1), 240_000, imagePageEvaluate);
+    const first = await waitForPageValue(bingImageUrlsScript(previousSrcs, 1), 120_000, imagePageEvaluate);
     if (typeof first === 'string' && first.startsWith('ERROR:')) throw new Error(first.slice(6));
     if (!first || typeof first !== 'string') {
       throw new Error('Bing ne image return nahi ki. Free limit ya sign-in check karein.');
@@ -3301,7 +3530,7 @@ async function generateBingImages(prompt) {
       urls.map((url) =>
         fetch(url, {
           headers: { 'user-agent': UA },
-          signal: AbortSignal.timeout(90_000),
+          signal: AbortSignal.timeout(45_000),
         }).then(async (response) => {
           if (!response.ok) throw new Error(`Bing image download failed (${response.status}).`);
           return Buffer.from(await response.arrayBuffer());
@@ -5989,8 +6218,17 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   const fps = 24;
   const count = scenes.length;
   const target = Math.min(900, Math.max(5, Number(job.durationSeconds) || count * 5));
-  const transition = Math.min(0.8, Math.max(0.3, target / count / 8));
-  const perScene = target / count;
+  // Har image apni narration line ke andar ka ek visual beat hai — isliye scene durations equal nahi.
+  const rawDurations = scenes.map((scene, index) => {
+    const beat = Array.isArray(job.visualBeats) ? job.visualBeats[index] : null;
+    const start = Number(beat?.start);
+    const end = Number(beat?.end);
+    return end > start ? end - start : target / count;
+  });
+  const rawTotal = rawDurations.reduce((sum, value) => sum + value, 0) || target;
+  const durations = rawDurations.map((value) => (value * target) / rawTotal);
+  const minDuration = Math.min(...durations);
+  const transition = Math.min(0.8, Math.max(0.2, minDuration / 5));
   const allowedTransitions = new Set([
     'fade', 'wipeleft', 'wiperight', 'slideleft', 'slideright', 'circleclose', 'circleopen',
   ]);
@@ -5999,10 +6237,10 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   const output = path.join(directory, 'final.mp4');
 
   const args = [];
-  for (const scene of scenes) {
-    const image = path.resolve(WORKSPACE, String(scene.image).replace(/\\/g, '/'));
+  for (let index = 0; index < scenes.length; index += 1) {
+    const image = path.resolve(WORKSPACE, String(scenes[index].image).replace(/\\/g, '/'));
     if (!pathInAllowedFolders(image)) throw new Error('Scene image allowed folder ke bahar hai.');
-    const inputDuration = scenes.indexOf(scene) < count - 1 ? perScene + transition : perScene;
+    const inputDuration = index < count - 1 ? durations[index] + transition : durations[index];
     args.push('-loop', '1', '-framerate', String(fps), '-t', inputDuration.toFixed(3), '-i', image);
   }
 
@@ -6020,18 +6258,31 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
 
   const filters = [];
   for (let index = 0; index < count; index += 1) {
+    const frames = Math.max(2, Math.round(durations[index] * fps));
+    const motion = index % 4;
+    const zoomIn = `1+0.15*on/${frames}`;
+    const zoomOut = `max(1.0,1.15-0.15*on/${frames})`;
+    const z = motion === 1 || motion === 3 ? zoomOut : zoomIn;
+    const centerX = `iw/2-(iw/zoom/2)`;
+    const centerY = `ih/2-(ih/zoom/2)`;
+    const x = motion === 2
+      ? `(iw-iw/zoom)*on/${frames}`
+      : (motion === 3 ? `(iw-iw/zoom)*(1-on/${frames})` : centerX);
+    const y = motion >= 2 ? `(ih-ih/zoom)/2` : centerY;
     filters.push(
       `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,`
-      + `crop=${width}:${height},setsar=1,`
-      + `zoompan=z='min(pzoom+0.0012,1.18)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${width}x${height}:fps=${fps}[v${index}]`,
+      + `crop=${width}:${height},setsar=1,hue=s=1.07,`
+      + `zoompan=z='${z}':x='${x}':y='${y}':d=1:s=${width}x${height}:fps=${fps}[v${index}]`,
     );
   }
   let current = 'v0';
+  let xfadeOffset = 0;
   for (let index = 1; index < count; index += 1) {
     const label = `x${index}`;
+    xfadeOffset += durations[index - 1];
     filters.push(
       `[${current}][v${index}]xfade=transition=${transitionName}:duration=${transition.toFixed(3)}`
-      + `:offset=${(index * perScene).toFixed(3)}[${label}]`,
+      + `:offset=${xfadeOffset.toFixed(3)}[${label}]`,
     );
     current = label;
   }
@@ -6106,6 +6357,7 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
     output: path.relative(WORKSPACE, output).replace(/\\/g, '/'),
     outputUrl: `/api/file?path=${encodeURIComponent(output)}`,
     error: null,
+    resumeOnStart: false,
   });
   return output;
 }
@@ -6511,7 +6763,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    const mediaJobMatch = /^\/api\/media-jobs\/([^/]+)(?:\/(render|error|status))?$/.exec(url.pathname);
+    const mediaJobMatch = /^\/api\/media-jobs\/([^/]+)(?:\/(render|error|status|retry))?$/.exec(url.pathname);
     if (mediaJobMatch) {
       const job = mediaJobs.find((item) => item.id === mediaJobMatch[1]);
       if (!job) return sendJson(res, 404, { error: 'Media job not found.' });
@@ -6530,6 +6782,30 @@ const server = http.createServer(async (req, res) => {
           error: String(payload.error || 'Browser render failed.').slice(0, 600),
           step: 'Error',
         });
+        return sendJson(res, 200, job);
+      }
+
+      if (req.method === 'POST' && mediaJobMatch[2] === 'retry') {
+        // Naya job nahi — same job ko uski saved images/visual beats ke saath aage chalao.
+        if (!['error', 'awaiting-render', 'assets'].includes(job.status)) {
+          return sendJson(res, 400, { error: 'Job abhi chal raha hai ya pehle se ready hai.' });
+        }
+        if (mediaRunning.has(job.id)) return sendJson(res, 409, { error: 'Job already running.' });
+        let payload = {};
+        try { payload = JSON.parse((await readBody(req)) || '{}'); } catch { payload = {}; }
+        const provider = String(payload.imageProvider || '').trim();
+        const allowedProviders = ['bing', 'stock', 'cloudflare', 'huggingface', 'worker', 'auto'];
+        cancelledJobs.delete(job.id);
+        await updateMediaJob(job, {
+          status: 'assets',
+          error: null,
+          step: provider && provider !== job.imageProvider
+            ? `${provider} se saved scenes wahin se resume…`
+            : 'Resume — saved scenes se wahin se aage badh rahe hain…',
+          progress: Math.max(0, Math.min(90, Number(job.progress) || 0)),
+          ...(allowedProviders.includes(provider) ? { imageProvider: provider } : {}),
+        });
+        runMediaJob(job).catch(() => {});
         return sendJson(res, 200, job);
       }
 

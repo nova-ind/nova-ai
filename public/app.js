@@ -843,51 +843,35 @@ function jobCard(message) {
     card.append(actions);
   }
 
-  if (job.status === 'error') {
+  if (job.status === 'error' || job.status === 'awaiting-render') {
+    const resume = async (imageProvider) => {
+      try {
+        const response = await fetch(`/api/media-jobs/${encodeURIComponent(job.id)}/retry`, {
+          method: 'POST',
+          headers: apiHeaders(),
+          body: JSON.stringify(imageProvider ? { imageProvider } : {}),
+        });
+        const updated = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(updated.error || 'Resume nahi hua');
+        applyJobUpdate(updated);
+        toast('Video wahin se resume ho raha hai — purani images dobara nahi bani gi.');
+      } catch (err) {
+        toast(err.message || 'Resume nahi hua');
+      }
+    };
     const retry = document.createElement('button');
     retry.type = 'button';
     retry.className = 'ghost-btn';
-    retry.textContent = 'Retry';
-    retry.addEventListener('click', async () => {
-      const live = mediaJobs.find((item) => item.id === job.id);
-      if (!live) return;
-      try {
-        if (live.scenes?.length) {
-          const response = await fetch(`/api/media-jobs/${encodeURIComponent(live.id)}/status`, {
-            method: 'POST',
-            headers: apiHeaders(),
-            body: JSON.stringify({ status: 'awaiting-render', step: 'Retry · browser render…', progress: 75 }),
-          });
-          const updated = await response.json().catch(() => ({}));
-          if (response.ok) applyJobUpdate(updated);
-        } else {
-          const response = await fetch('/api/media-jobs', {
-            method: 'POST',
-            headers: apiHeaders(),
-            body: JSON.stringify({
-              prompt: live.prompt,
-              chatId: live.chatId,
-              type: live.type,
-              ratio: live.ratio,
-              style: live.style,
-              fx: live.fx,
-              transitions: live.transitions,
-              audioPath: live.audioPath,
-              sceneCount: live.sceneCount,
-              clipSeconds: live.clipSeconds,
-              useAiVideo: live.useAiVideo,
-              imageModel: live.imageModel,
-              videoModel: live.videoModel,
-            }),
-          });
-          const created = await response.json().catch(() => ({}));
-          if (response.ok) applyJobUpdate(created);
-        }
-      } catch (err) {
-        toast(err.message || 'Retry nahi hua');
-      }
-    });
+    retry.textContent = job.status === 'awaiting-render' ? 'Resume video' : 'Resume from saved images';
+    retry.addEventListener('click', () => resume());
     card.append(retry);
+
+    const stock = document.createElement('button');
+    stock.type = 'button';
+    stock.className = 'ghost-btn';
+    stock.textContent = 'Resume with free stock';
+    stock.addEventListener('click', () => resume('stock'));
+    card.append(stock);
   }
 
   return card;
