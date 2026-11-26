@@ -13,11 +13,33 @@ const WORKSPACE = path.join(__dirname, 'workspace');
 const SCHEDULES_FILE = path.join(WORKSPACE, 'schedules.json');
 const FOLDERS_FILE = path.join(WORKSPACE, 'allowed-folders.json');
 const MEDIA_JOBS_FILE = path.join(WORKSPACE, 'media-jobs.json');
+const MEMORY_FILE = path.join(WORKSPACE, 'memory.md');
+const MEMORY_TEMPLATE = `# Nova Working Memory
+
+Ye file har naye chat aur model change ke baad bhi padhi jaati hai. Yahan sirf wahi likho jo aage kaam chalu rakhne ke liye zaroori ho.
+
+## Current goal
+- (Abhi ka target likho.)
+
+## Decisions
+- (Facts jo baar baar nahi samjhane chahiye.)
+
+## Next steps
+- (Resume point.)
+
+## Active jobs
+- (Server khud yahan status nahi likhta; active video jobs system prompt me alag se dikhte hain.)
+`;
 const FFMPEG_BIN = process.env.FFMPEG_PATH
   || path.join(__dirname, 'runtime', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
 const FFPROBE_BIN = process.env.FFPROBE_PATH
   || path.join(__dirname, 'runtime', process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
 await mkdir(WORKSPACE, { recursive: true });
+try {
+  await access(MEMORY_FILE);
+} catch {
+  await writeFile(MEMORY_FILE, MEMORY_TEMPLATE, 'utf8');
+}
 
 let jobs = [];
 let allowedFolders = [];
@@ -377,8 +399,48 @@ function resolveModel(tier, messages, modes) {
   return TIERS[0].model;
 }
 
-function buildSystem(modes, results) {
-  const chunks = [BASE_PERSONA, `Current date: ${new Date().toISOString().slice(0, 10)}.`];
+async function readWorkingMemory() {
+  try {
+    return (await readFile(MEMORY_FILE, 'utf8')).slice(0, 20_000);
+  } catch {
+    return '';
+  }
+}
+
+async function writeWorkingMemory(text) {
+  const value = String(text ?? '').slice(0, 30_000);
+  await writeFile(MEMORY_FILE, value, 'utf8');
+  return value;
+}
+
+async function activeVideoJobsSummary() {
+  try {
+    const parsed = JSON.parse(await readFile(MEDIA_JOBS_FILE, 'utf8'));
+    const statuses = new Set(['queued', 'assets', 'rendering', 'awaiting-render']);
+    return (Array.isArray(parsed) ? parsed : [])
+      .filter((job) => statuses.has(job?.status))
+      .slice(-8)
+      .map((job) => `- ${job.id}: ${job.status} ${job.progress || 0}% — ${job.step || 'no step'} | ${job.durationSeconds || 0}s · ${job.sceneCount || 0} scenes | video=${job.video || '-'}`);
+  } catch {
+    return [];
+  }
+}
+
+async function memoryContext() {
+  const notes = (await readWorkingMemory()).trim();
+  const active = await activeVideoJobsSummary();
+  const chunks = [
+    'WORKING MEMORY (persistent — model ya naya chat badalne par bhi yahi padha jata hai):',
+    notes || '(empty)',
+  ];
+  if (active.length) {
+    chunks.push(`ACTIVE VIDEO JOBS (app restart par auto resume):\n${active.join('\n')}`);
+  }
+  return chunks.join('\n\n');
+}
+
+async function buildSystem(modes, results) {
+  const chunks = [BASE_PERSONA, `Current date: ${new Date().toISOString().slice(0, 10)}.`, await memoryContext()];
 
   if (modes.fun) {
     chunks.push(
@@ -438,9 +500,10 @@ async function handleChat(req, res, key) {
     if (query) results = await webSearch(query);
   }
 
+  const builtSystem = await buildSystem(modes, results);
   const system = typeof payload.system === 'string' && payload.system.trim()
-    ? `${payload.system.trim()}\n\n${buildSystem(modes, results)}`
-    : buildSystem(modes, results);
+    ? `${payload.system.trim()}\n\n${builtSystem}`
+    : builtSystem;
 
   const upstreamBody = {
     model,
@@ -2244,6 +2307,18 @@ const AGENT_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'update_memory',
+      description: 'Overwrite workspace/memory.md with durable notes so the next chat or a different model resumes exactly where work stopped. Include current goal, decisions, resume point and next steps.',
+      parameters: {
+        type: 'object',
+        properties: { content: { type: 'string' } },
+        required: ['content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'run_code',
       description: 'Run JavaScript (node) or Python code in the workspace and return its output. Use it for calculations, data processing or code the user asked to execute.',
       parameters: {
@@ -3817,6 +3892,11 @@ async function runTool(name, args, root = WORKSPACE) {
       return `Saved ${relative} (${content.length} characters). FILE:${file}`;
     }
 
+    if (name === 'update_memory') {
+      const content = await writeWorkingMemory(args.content ?? '');
+      return `Working memory updated (${content.length} characters): ${MEMORY_FILE}`;
+    }
+
     if (name === 'run_code') {
       const code = String(args.code || '').slice(0, 30_000);
       const language = args.language === 'python' ? 'python' : 'js';
@@ -4477,10 +4557,11 @@ async function streamOfflineScaffold(res, root, prompt, reason) {
   res.end();
 }
 
-function agentSystem(modes, customSystem = '', root = WORKSPACE, autoMode = true) {
+async function agentSystem(modes, customSystem = '', root = WORKSPACE, autoMode = true) {
   const toolNames = AGENT_TOOLS.map((tool) => tool.function.name).join(', ');
   return [
     BASE_PERSONA,
+    await memoryContext(),
     customSystem ? `Additional user instructions: ${customSystem}` : '',
     `Allowed folder for all filesystem tools: ${root}. Never access paths outside it.`,
     `Current date: ${new Date().toISOString().slice(0, 10)}.`,
@@ -4492,6 +4573,7 @@ function agentSystem(modes, customSystem = '', root = WORKSPACE, autoMode = true
       ? 'AUTO MODE (full permission): The user enabled OpenCode-style auto mode. When asked to run/test a built app, run CMD commands, check git, commit/push or log in to GitHub, call run_command/start_app/test_app/git/github_login directly. Do not ask for confirmation and do not merely print commands.'
       : 'Permission mode: ask before running shell commands, starting apps or pushing to git.',
     'REA RULE: For clone/replicate/rebuild/similar-app requests, NEVER guess. First call analyze_app for a folder, analyze_webpage for a URL, or analyze_binary for an EXE/DLL. Then call replicate_app with the saved report, use write_file to add missing features, and finish with start_app + test_app. Use compare_apps to measure similarity and iterate until the score is high.',
+    'MEMORY RULE: The working memory above is the single source of truth for unfinished work. Before starting, read it and continue from the exact resume point instead of asking the user to repeat. When you make a durable decision, finish a stage, or leave work unfinished, call update_memory to rewrite workspace/memory.md with: current goal, decisions, exact resume point and next steps. Keep it short and factual.',
     `Available tools: ${toolNames}.`,
     'You may emit several tool calls across several turns. After tools run, continue automatically. Only give the final Markdown answer when the task is complete; include links to any files or images you created.',
     'IMPORTANT fallback: if native tool calling is not available, put each action on its own line as <tool_call>{"name":"tool_name","arguments":{...}}</tool_call> and nothing else in that turn. After seeing results, continue. Never claim you did something you did not actually do.',
@@ -4540,7 +4622,7 @@ async function handleAgent(req, res, key) {
     return sendJson(res, 403, { error: err.message });
   }
   const conversation = [
-    { role: 'system', content: agentSystem(modes, payload.system, root, payload.autoMode !== false) },
+    { role: 'system', content: await agentSystem(modes, payload.system, root, payload.autoMode !== false) },
     ...messages,
   ];
 
@@ -6148,6 +6230,20 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/api/health') {
       return sendJson(res, 200, { ok: true, upstream: UPSTREAM_BASE, model: DEFAULT_MODEL, agent: true });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/memory') {
+      return sendJson(res, 200, { ok: true, content: await readWorkingMemory() });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/memory') {
+      try {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const content = await writeWorkingMemory(body.content ?? '');
+        return sendJson(res, 200, { ok: true, content });
+      } catch (err) {
+        return sendJson(res, 400, { error: `Memory update failed: ${err.message}` });
+      }
     }
 
     if (req.method === 'GET' && url.pathname.startsWith('/workspace/')) {
