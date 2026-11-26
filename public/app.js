@@ -14,6 +14,8 @@ const studioState = {
   audioFx: new Set(),
   jobId: null,
   timer: null,
+  layout: null,
+  timelineReady: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -70,6 +72,7 @@ const els = {
   studioClose: $('studioClose'),
   studioSteps: $('studioSteps'),
   studioUpload: $('studioUpload'),
+  studioDrop: $('studioDrop'),
   studioFiles: $('studioFiles'),
   studioMediaList: $('studioMediaList'),
   studioPrompt: $('studioPrompt'),
@@ -80,6 +83,7 @@ const els = {
   studioNarration: $('studioNarration'),
   studioAgentBtn: $('studioAgentBtn'),
   studioPreview: $('studioPreview'),
+  studioPreviewWrap: $('studioPreviewWrap'),
   studioPreviewEmpty: $('studioPreviewEmpty'),
   studioSave: $('studioSave'),
   studioStage: $('studioStage'),
@@ -88,11 +92,38 @@ const els = {
   studioCounts: $('studioCounts'),
   studioEta: $('studioEta'),
   studioTimeline: $('studioTimeline'),
+  studioImageTimeline: $('studioImageTimeline'),
+  studioRuler: $('studioRuler'),
+  studioPlayhead: $('studioPlayhead'),
+  studioTimecode: $('studioTimecode'),
+  studioTimelinePlay: $('studioTimelinePlay'),
+  studioTimelineHome: $('studioTimelineHome'),
+  studioPrevFrame: $('studioPrevFrame'),
+  studioNextFrame: $('studioNextFrame'),
+  studioSplit: $('studioSplit'),
+  studioSnap: $('studioSnap'),
+  studioZoomOut: $('studioZoomOut'),
+  studioZoomFit: $('studioZoomFit'),
+  studioZoomIn: $('studioZoomIn'),
+  studioUndo: $('studioUndo'),
+  studioRedo: $('studioRedo'),
+  studioMuteVideo: $('studioMuteVideo'),
+  studioMuteImage: $('studioMuteImage'),
+  studioMuteAudio: $('studioMuteAudio'),
+  studioLayoutBtn: $('studioLayoutBtn'),
+  studioLayoutMenu: $('studioLayoutMenu'),
+  studioTogglePanel: $('studioTogglePanel'),
+  studioResetLayout: $('studioResetLayout'),
+  studioLockBtn: $('studioLockBtn'),
+  studioExitBtn: $('studioExitBtn'),
+  studioPanelResizer: $('studioPanelResizer'),
+  studioTimelineResizer: $('studioTimelineResizer'),
   studioSceneCount: $('studioSceneCount'),
   studioResumeBtn: $('studioResumeBtn'),
   studioDone: $('studioDone'),
   studioRemaining: $('studioRemaining'),
   studioPreset: $('studioPreset'),
+  studioPresetGrid: $('studioPresetGrid'),
   studioPresetName: $('studioPresetName'),
   studioTransition: $('studioTransition'),
   studioBpm: $('studioBpm'),
@@ -826,52 +857,87 @@ function agentTraceEl(message, open = Boolean(message.streaming)) {
 function playerControls(video, jobId = '') {
   const row = document.createElement('div');
   row.className = 'video-controls';
+  const icons = {
+    play: '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>',
+    pause: '<svg viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z" /></svg>',
+    back: '<svg viewBox="0 0 24 24"><path d="M11 7V3L4 9l7 6v-4a6 6 0 1 1-6 6" /></svg>',
+    forward: '<svg viewBox="0 0 24 24"><path d="M13 7V3l7 6-7 6v-4a6 6 0 1 0 6 6" /></svg>',
+    volume: '<svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zM17 9l4 6M21 9l-4 6" /></svg>',
+    muted: '<svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zM17 10l4 4M21 10l-4 4" /></svg>',
+    full: '<svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>',
+    open: '<svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" /></svg>',
+  };
+  const iconButton = (key, title, handler) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'video-control-btn';
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    button.innerHTML = icons[key];
+    button.addEventListener('click', handler);
+    return button;
+  };
 
-  const play = document.createElement('button');
-  play.type = 'button';
-  play.className = 'video-control-btn';
-  play.textContent = '▶ Play';
-  play.addEventListener('click', async () => {
+  const play = iconButton('play', 'Play / Pause', async () => {
     if (video.paused || video.ended) {
-      try {
-        await video.play();
-      } catch (err) {
-        toast(err?.message || 'Video play nahi hua.');
-      }
+      try { await video.play(); } catch (err) { toast(err?.message || 'Video play nahi hua.'); }
     } else {
       video.pause();
     }
   });
-
-  const full = document.createElement('button');
-  full.type = 'button';
-  full.className = 'video-control-btn';
-  full.textContent = '⛶ Full screen';
-  full.addEventListener('click', async () => {
+  const back = iconButton('back', 'Reverse 5 seconds', () => {
+    try { video.currentTime = Math.max(0, (video.currentTime || 0) - 5); } catch { /* ignore */ }
+  });
+  const forward = iconButton('forward', 'Forward 5 seconds', () => {
+    try { video.currentTime = Math.min(video.duration || Infinity, (video.currentTime || 0) + 5); } catch { /* ignore */ }
+  });
+  const mute = iconButton('volume', 'Mute / Unmute', () => {
+    video.muted = !video.muted;
+    mute.innerHTML = video.muted ? icons.muted : icons.volume;
+  });
+  const full = iconButton('full', 'Full screen', async () => {
     try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen();
-      } else if (video.requestFullscreen) {
-        await video.requestFullscreen();
-      } else if (video.webkitEnterFullscreen) {
-        video.webkitEnterFullscreen();
-      } else {
-        window.open(video.currentSrc || video.src, '_blank');
-      }
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else if (video.requestFullscreen) await video.requestFullscreen();
+      else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+      else window.open(video.currentSrc || video.src, '_blank');
     } catch (err) {
       toast(err?.message || 'Full screen unavailable — Open button se dekhein.');
     }
   });
+  const open = iconButton('open', 'Open in system player', () => window.open(video.currentSrc || video.src, '_blank'));
 
-  const open = document.createElement('button');
-  open.type = 'button';
-  open.className = 'video-control-btn';
-  open.textContent = 'Open';
-  open.addEventListener('click', () => window.open(video.currentSrc || video.src, '_blank'));
+  const ratio = document.createElement('select');
+  ratio.className = 'video-ratio';
+  ratio.title = 'Video ratio';
+  ratio.setAttribute('aria-label', 'Video ratio');
+  ratio.innerHTML = '<option value="fit">Fit</option><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="fill">Fill</option>';
+  ratio.addEventListener('change', () => {
+    const value = ratio.value;
+    video.style.objectFit = value === 'fill' ? 'fill' : 'contain';
+    if (value === '16:9') {
+      video.style.aspectRatio = '16 / 9';
+      video.style.width = '100%';
+      video.style.height = 'auto';
+      video.style.maxHeight = '100%';
+      video.style.maxWidth = '100%';
+    } else if (value === '9:16') {
+      video.style.aspectRatio = '9 / 16';
+      video.style.width = 'auto';
+      video.style.height = '100%';
+      video.style.maxWidth = '100%';
+    } else {
+      video.style.aspectRatio = 'auto';
+      video.style.width = '100%';
+      video.style.height = '100%';
+      video.style.maxHeight = '';
+      video.style.maxWidth = '';
+    }
+  });
 
-  video.addEventListener('play', () => { play.textContent = '❚❚ Pause'; });
-  video.addEventListener('pause', () => { play.textContent = '▶ Play'; });
-  video.addEventListener('ended', () => { play.textContent = '▶ Play'; });
+  video.addEventListener('play', () => { play.innerHTML = icons.pause; });
+  video.addEventListener('pause', () => { play.innerHTML = icons.play; });
+  video.addEventListener('ended', () => { play.innerHTML = icons.play; });
   video.addEventListener('error', () => {
     const fallback = document.createElement('div');
     fallback.className = 'video-error';
@@ -879,7 +945,7 @@ function playerControls(video, jobId = '') {
     if (!row.parentElement?.querySelector('.video-error')) row.before(fallback);
   });
 
-  row.append(play, full, open);
+  row.append(back, play, forward, ratio, mute, full, open);
   if (jobId) row.dataset.jobId = jobId;
   return row;
 }
@@ -1625,6 +1691,9 @@ async function send(rawText) {
 }
 
 async function handleUserTurn(chat, text, audio) {
+  // Studio layout voice commands — local me apply hote hain, API call nahi.
+  if (await handleStudioVoiceCommand(chat, text)) return;
+
   // User prompt/idea/caption maang raha hai to media mode ignore karo — video mat banao.
   const asksForText = /\b(prompt|prompts|idea|ideas|caption|captions|script|likh|likho)\b/i.test(text || '');
   const wantsVideo = wantsVideoRequest(text);
@@ -2320,8 +2389,409 @@ function inferVideoTransitions(prompt) {
 
 /* ------------------------- CapCut-style video studio ----------------------- */
 
+const STUDIO_LAYOUT_PRESETS = {
+  focus: { panelWidth: 260, timelineRatio: 0.24, panelHidden: false },
+  balanced: { panelWidth: 300, timelineRatio: 0.32, panelHidden: false },
+  timeline: { panelWidth: 300, timelineRatio: 0.45, panelHidden: false },
+};
+const studioLayoutHistory = { past: [], future: [] };
+
+function studioClamp(value, min, max) {
+  return Math.min(max, Math.max(min, Number(value) || min));
+}
+
+function defaultStudioLayout() {
+  const preset = STUDIO_LAYOUT_PRESETS.balanced;
+  return {
+    panelWidth: preset.panelWidth,
+    timelineHeight: Math.round(window.innerHeight * preset.timelineRatio),
+    panelHidden: true,
+    locked: false,
+    clipScale: 1,
+    snap: true,
+    splitMarks: [],
+    muted: { video: false, image: false, audio: false },
+  };
+}
+
+function loadStudioLayout() {
+  const fallback = defaultStudioLayout();
+  try {
+    const saved = JSON.parse(localStorage.getItem('nova-studio-layout') || '{}');
+    const merged = {
+      ...fallback,
+      ...saved,
+      muted: { ...fallback.muted, ...(saved.muted || {}) },
+    };
+    if (!Array.isArray(merged.splitMarks)) merged.splitMarks = [];
+    return merged;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveStudioLayout() {
+  try {
+    localStorage.setItem('nova-studio-layout', JSON.stringify(studioState.layout));
+  } catch {
+    /* storage unavailable — layout current session me rehta hai */
+  }
+}
+
+function applyStudioLayout() {
+  const layout = studioState.layout || defaultStudioLayout();
+  studioState.layout = layout;
+  els.studio.style.setProperty('--studio-panel-w', `${studioClamp(layout.panelWidth, 220, 520)}px`);
+  els.studio.style.setProperty('--studio-timeline-h', `${studioClamp(layout.timelineHeight, 220, Math.round(window.innerHeight * 0.6))}px`);
+  els.studio.style.setProperty('--studio-clip-scale', String(studioClamp(layout.clipScale ?? 1, 0.5, 2)));
+  els.studio.classList.toggle('panel-hidden', Boolean(layout.panelHidden));
+  els.studio.classList.toggle('layout-locked', Boolean(layout.locked));
+  if (els.studioLockBtn) els.studioLockBtn.textContent = layout.locked ? 'Unlock UI' : 'Lock UI';
+  if (els.studioTogglePanel) els.studioTogglePanel.textContent = layout.panelHidden ? 'Show panel' : 'Hide panel';
+  if (els.studioLayoutBtn) els.studioLayoutBtn.hidden = Boolean(layout.locked);
+  els.studioSnap?.classList.toggle('on', layout.snap !== false);
+  if (els.studioUndo) els.studioUndo.disabled = studioLayoutHistory.past.length === 0;
+  if (els.studioRedo) els.studioRedo.disabled = studioLayoutHistory.future.length === 0;
+  renderStudioSplitMarks();
+  applyStudioMute();
+}
+
+function snapshotStudioLayout() {
+  return JSON.parse(JSON.stringify(studioState.layout || defaultStudioLayout()));
+}
+
+function setStudioLayout(patch, persist = true) {
+  const before = snapshotStudioLayout();
+  studioState.layout = { ...before, ...patch };
+  applyStudioLayout();
+  if (persist) {
+    studioLayoutHistory.past.push(before);
+    if (studioLayoutHistory.past.length > 30) studioLayoutHistory.past.shift();
+    studioLayoutHistory.future.length = 0;
+    saveStudioLayout();
+    if (els.studioUndo) els.studioUndo.disabled = false;
+    if (els.studioRedo) els.studioRedo.disabled = true;
+  }
+}
+
+function undoStudioLayout() {
+  if (!studioLayoutHistory.past.length) return;
+  const current = snapshotStudioLayout();
+  const previous = studioLayoutHistory.past.pop();
+  studioLayoutHistory.future.push(current);
+  studioState.layout = previous;
+  applyStudioLayout();
+  saveStudioLayout();
+}
+
+function redoStudioLayout() {
+  if (!studioLayoutHistory.future.length) return;
+  const current = snapshotStudioLayout();
+  const next = studioLayoutHistory.future.pop();
+  studioLayoutHistory.past.push(current);
+  studioState.layout = next;
+  applyStudioLayout();
+  saveStudioLayout();
+}
+
+function applyStudioMute() {
+  const muted = studioState.layout?.muted || {};
+  els.studioMuteVideo?.classList.toggle('off', Boolean(muted.video));
+  els.studioMuteImage?.classList.toggle('off', Boolean(muted.image));
+  els.studioMuteAudio?.classList.toggle('off', Boolean(muted.audio));
+  els.studioTimeline?.closest('.timeline-track')?.classList.toggle('track-muted', Boolean(muted.video));
+  els.studioImageTimeline?.closest('.timeline-track')?.classList.toggle('track-muted', Boolean(muted.image));
+  document.querySelector('.timeline-track--audio')?.classList.toggle('track-muted', Boolean(muted.audio));
+  if (els.studioPreview) els.studioPreview.muted = Boolean(muted.video || muted.audio);
+}
+
+function toggleStudioTrack(track) {
+  if (!studioState.layout) studioState.layout = loadStudioLayout();
+  const muted = { ...(studioState.layout.muted || {}) };
+  muted[track] = !muted[track];
+  setStudioLayout({ muted });
+  const label = { video: 'Video', image: 'Images', audio: 'Audio' }[track] || track;
+  toast(`${label} track ${muted[track] ? 'muted' : 'unmuted'}`);
+}
+
+function renderStudioSplitMarks() {
+  document.querySelectorAll('.studio-split-mark').forEach((node) => node.remove());
+  const dock = document.querySelector('.timeline-dock');
+  if (!dock) return;
+  const marks = Array.isArray(studioState.layout?.splitMarks) ? studioState.layout.splitMarks : [];
+  const duration = studioVideoDuration();
+  for (const seconds of marks) {
+    const mark = document.createElement('span');
+    mark.className = 'studio-split-mark';
+    mark.style.left = `calc(92px + (100% - 92px) * ${duration ? Math.min(1, seconds / duration) : 0})`;
+    mark.title = `Split ${formatStudioClock(seconds)}`;
+    dock.append(mark);
+  }
+}
+
+function splitStudioAtPlayhead() {
+  if (!els.studioPreview?.src) {
+    toast('Pehle video render karein, phir split karein');
+    return;
+  }
+  const seconds = Number(els.studioPreview.currentTime) || 0;
+  const marks = Array.isArray(studioState.layout?.splitMarks) ? [...studioState.layout.splitMarks] : [];
+  marks.push(seconds);
+  setStudioLayout({ splitMarks: marks.slice(-24) });
+  toast(`Split mark ${formatStudioClock(seconds)} par lag gaya`);
+}
+
+function toggleStudioSnap() {
+  const snap = studioState.layout?.snap === false;
+  setStudioLayout({ snap });
+  toast(snap ? 'Snap on — clips se jud jayenge' : 'Snap off');
+}
+
+function zoomStudioClips(direction) {
+  const current = Number(studioState.layout?.clipScale) || 1;
+  const next = direction === 0 ? 1 : studioClamp(current + direction * 0.15, 0.5, 2);
+  setStudioLayout({ clipScale: Number(next.toFixed(2)) });
+  toast(`Timeline zoom ${Math.round(next * 100)}%`);
+}
+
+function startStudioResize(event, type) {
+  if (studioState.layout?.locked) return;
+  event.preventDefault();
+  const handle = event.currentTarget;
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const startPanel = Number(studioState.layout?.panelWidth) || 300;
+  const startTimeline = Number(studioState.layout?.timelineHeight) || 250;
+  handle.classList.add('dragging');
+  try { handle.setPointerCapture(event.pointerId); } catch { /* no capture */ }
+
+  const move = (pointer) => {
+    if (type === 'panel') {
+      setStudioLayout({
+        panelWidth: studioClamp(startPanel + pointer.clientX - startX, 220, Math.min(520, window.innerWidth - 420)),
+      }, false);
+    } else {
+      setStudioLayout({
+        timelineHeight: studioClamp(startTimeline + startY - pointer.clientY, 220, Math.round(window.innerHeight * 0.6)),
+      }, false);
+    }
+  };
+  const stop = () => {
+    handle.classList.remove('dragging');
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', stop);
+    handle.removeEventListener('pointercancel', stop);
+    saveStudioLayout();
+  };
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', stop);
+  handle.addEventListener('pointercancel', stop);
+}
+
+function setupStudioLayoutControls() {
+  studioState.layout = loadStudioLayout();
+  applyStudioLayout();
+  els.studioPanelResizer?.addEventListener('pointerdown', (event) => startStudioResize(event, 'panel'));
+  els.studioTimelineResizer?.addEventListener('pointerdown', (event) => startStudioResize(event, 'timeline'));
+  els.studioLayoutBtn?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    els.studioLayoutMenu.hidden = !els.studioLayoutMenu.hidden;
+  });
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest?.('.timeline-tools') && els.studioLayoutMenu) els.studioLayoutMenu.hidden = true;
+  });
+  els.studioLayoutMenu?.addEventListener('click', (event) => {
+    const preset = event.target.closest('[data-layout]')?.dataset.layout;
+    if (preset && STUDIO_LAYOUT_PRESETS[preset]) {
+      const chosen = STUDIO_LAYOUT_PRESETS[preset];
+      setStudioLayout({
+        panelWidth: chosen.panelWidth,
+        timelineHeight: Math.round(window.innerHeight * chosen.timelineRatio),
+        panelHidden: chosen.panelHidden,
+      });
+      els.studioLayoutMenu.hidden = true;
+      toast(`Layout: ${preset === 'focus' ? 'Focus player' : preset === 'timeline' ? 'Long timeline' : 'Balanced'}`);
+    }
+  });
+  els.studioTogglePanel?.addEventListener('click', () => {
+    const hidden = !studioState.layout.panelHidden;
+    setStudioLayout({ panelHidden: hidden });
+    els.studioLayoutMenu.hidden = true;
+    toast(hidden ? 'Left panel hidden' : 'Left panel shown');
+  });
+  els.studioResetLayout?.addEventListener('click', () => {
+    setStudioLayout(defaultStudioLayout());
+    els.studioLayoutMenu.hidden = true;
+    toast('Layout reset');
+  });
+  els.studioLockBtn?.addEventListener('click', () => {
+    const locked = !studioState.layout.locked;
+    setStudioLayout({ locked });
+    if (locked) els.studioLayoutMenu.hidden = true;
+    toast(locked ? 'UI locked — ab layout fix hai' : 'UI unlocked — resize again');
+  });
+  els.studioUndo?.addEventListener('click', undoStudioLayout);
+  els.studioRedo?.addEventListener('click', redoStudioLayout);
+  els.studioExitBtn?.addEventListener('click', closeStudio);
+}
+
+function formatStudioClock(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const minutes = Math.floor(total / 60);
+  return `${String(minutes).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function studioVideoDuration() {
+  const live = Number(els.studioPreview?.duration);
+  if (Number.isFinite(live) && live > 0) return live;
+  const job = mediaJobs.find((item) => item.id === studioState.jobId) || mediaJobs.find((item) => item.studio);
+  return Number(job?.durationSeconds) || 60;
+}
+
+function renderStudioRuler(durationSeconds) {
+  if (!els.studioRuler) return;
+  const total = Math.max(1, Number(durationSeconds) || 60);
+  els.studioRuler.replaceChildren();
+  for (let index = 0; index <= 5; index += 1) {
+    const tick = document.createElement('span');
+    tick.textContent = formatStudioClock((total * index) / 5);
+    els.studioRuler.append(tick);
+  }
+}
+
+function updateStudioPlayhead() {
+  const duration = studioVideoDuration();
+  const current = Number(els.studioPreview?.currentTime) || 0;
+  const ratio = duration ? Math.min(1, current / duration) : 0;
+  if (els.studioPlayhead) els.studioPlayhead.style.left = `calc(92px + (100% - 92px) * ${ratio})`;
+  if (els.studioTimecode) els.studioTimecode.textContent = `${formatStudioClock(current)} / ${formatStudioClock(duration)}`;
+}
+
+function syncStudioPlayButton() {
+  if (!els.studioTimelinePlay) return;
+  const paused = !els.studioPreview || els.studioPreview.paused;
+  els.studioTimelinePlay.innerHTML = paused
+    ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>'
+    : '<svg viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z" /></svg>';
+  els.studioTimelinePlay.title = paused ? 'Play' : 'Pause';
+}
+
+function studioSeekTo(seconds) {
+  const duration = studioVideoDuration();
+  if (!els.studioPreview || !els.studioPreview.src) return;
+  try { els.studioPreview.currentTime = studioClamp(seconds, 0, duration); } catch { /* not seekable yet */ }
+  updateStudioPlayhead();
+}
+
+async function toggleStudioPlayback() {
+  if (!els.studioPreview?.src) {
+    toast('Pehle final video render karein');
+    return;
+  }
+  try {
+    if (els.studioPreview.paused) await els.studioPreview.play();
+    else els.studioPreview.pause();
+  } catch (error) {
+    toast(error?.message || 'Playback start nahi hua');
+  }
+  syncStudioPlayButton();
+}
+
+function setupStudioTimeline() {
+  if (studioState.timelineReady) return;
+  studioState.timelineReady = true;
+  els.studioPreview?.addEventListener('timeupdate', updateStudioPlayhead);
+  els.studioPreview?.addEventListener('loadedmetadata', () => {
+    renderStudioRuler(studioVideoDuration());
+    updateStudioPlayhead();
+  });
+  els.studioPreview?.addEventListener('play', syncStudioPlayButton);
+  els.studioPreview?.addEventListener('pause', syncStudioPlayButton);
+  els.studioTimelinePlay?.addEventListener('click', toggleStudioPlayback);
+  els.studioTimelineHome?.addEventListener('click', () => studioSeekTo(0));
+  els.studioPrevFrame?.addEventListener('click', () => studioSeekTo((Number(els.studioPreview?.currentTime) || 0) - 1 / 30));
+  els.studioNextFrame?.addEventListener('click', () => studioSeekTo((Number(els.studioPreview?.currentTime) || 0) + 1 / 30));
+  els.studioSplit?.addEventListener('click', splitStudioAtPlayhead);
+  els.studioSnap?.addEventListener('click', toggleStudioSnap);
+  els.studioZoomOut?.addEventListener('click', () => zoomStudioClips(-1));
+  els.studioZoomFit?.addEventListener('click', () => zoomStudioClips(0));
+  els.studioZoomIn?.addEventListener('click', () => zoomStudioClips(1));
+  els.studioRuler?.addEventListener('click', (event) => {
+    const duration = studioVideoDuration();
+    const rect = els.studioRuler.getBoundingClientRect();
+    const usable = Math.max(1, rect.width - 92);
+    const ratio = studioClamp((event.clientX - rect.left - 92) / usable, 0, 1);
+    studioSeekTo(ratio * duration);
+  });
+  for (const track of [els.studioTimeline, els.studioImageTimeline]) {
+    track?.addEventListener('click', (event) => {
+      const clip = event.target.closest('[data-start]');
+      if (clip) studioSeekTo(Number(clip.dataset.start) || 0);
+    });
+  }
+  els.studioMuteVideo?.addEventListener('click', () => toggleStudioTrack('video'));
+  els.studioMuteImage?.addEventListener('click', () => toggleStudioTrack('image'));
+  els.studioMuteAudio?.addEventListener('click', () => toggleStudioTrack('audio'));
+  syncStudioPlayButton();
+}
+
+async function handleStudioVoiceCommand(chat, text) {
+  const value = String(text || '').toLowerCase().trim();
+  if (!value) return false;
+  if (!/(studio|layout|panel|timeline|timlin|player|ui)\b/.test(value)) return false;
+
+  const unlock = /\bunlock\b|(?:ui|layout|panel|studio|timeline)\s*(?:ko\s*)?unlock/.test(value);
+  const lock = /\block\b|(?:ui|layout|panel|studio|timeline)\s*(?:ko\s*)?lock/.test(value);
+  let reply = '';
+
+  if (unlock) {
+    setStudioLayout({ locked: false });
+    reply = 'UI unlock ho gaya — ab panel aur timeline resize kar sakte ho.';
+  } else if (lock) {
+    setStudioLayout({ locked: true });
+    reply = 'UI lock ho gaya — ab layout fixed rahega. Jab bolein "unlock UI" tabhi badlega.';
+  } else if (/(?:hide|chhupa|chhupa do|band)\s*(?:the\s*)?(?:left\s*)?panel|\bpanel\s*(?:hide|chhupa)/.test(value)) {
+    setStudioLayout({ panelHidden: true });
+    reply = 'Left panel hide kar diya — player ko zyada jagah mil gayi.';
+  } else if (/(?:show|dikha|open)\s*(?:the\s*)?(?:left\s*)?panel|\bpanel\s*(?:show|dikha)/.test(value)) {
+    setStudioLayout({ panelHidden: false });
+    reply = 'Left panel wapas dikha diya.';
+  } else if (/(timeline|timlin).*(chota|chhota|compact|small|kam)|(player|video).*(bada|bara|large)/.test(value)) {
+    const preset = STUDIO_LAYOUT_PRESETS.focus;
+    setStudioLayout({
+      panelWidth: preset.panelWidth,
+      timelineHeight: Math.round(window.innerHeight * preset.timelineRatio),
+      panelHidden: false,
+    });
+    reply = 'Timeline compact aur player bada kar diya.';
+  } else if (/(timeline|timlin).*(bada|bara|long|large)/.test(value)) {
+    const preset = STUDIO_LAYOUT_PRESETS.timeline;
+    setStudioLayout({
+      panelWidth: preset.panelWidth,
+      timelineHeight: Math.round(window.innerHeight * preset.timelineRatio),
+      panelHidden: false,
+    });
+    reply = 'Long timeline layout lag gaya.';
+  } else if (/\bpanel\b.*(chota|chhota|small)|(player|video).*(bada|bara)/.test(value)) {
+    setStudioLayout({ panelWidth: 240 });
+    reply = 'Left panel chhota kar diya.';
+  } else {
+    return false;
+  }
+
+  chat.messages.push({ role: 'assistant', content: reply, ts: Date.now() });
+  touch(chat);
+  renderSidebar();
+  renderMessages();
+  scrollToBottom();
+  return true;
+}
+
 function openStudio() {
   els.studio.hidden = false;
+  els.studio.classList.add('is-editing');
+  setupStudioLayoutControls();
+  setupStudioTimeline();
   studioState.jobId = studioState.jobId || (mediaJobs.find((job) => job.studio)?.id || null);
   loadStudioCatalog();
   renderStudioAssets();
@@ -2412,10 +2882,41 @@ function studioChips(container, values, selectedSet, group) {
   }
 }
 
+function renderStudioPresets(presets) {
+  const container = els.studioPresetGrid;
+  if (!container) return;
+  const notes = {
+    hollywood: 'Cinematic glow',
+    cartoon: 'Bright & playful',
+    comedy: 'Fast cuts',
+    science: 'Neon sci-fi',
+    emotional: 'Soft & warm',
+    music: 'Beat driven',
+  };
+  container.replaceChildren();
+  for (const preset of presets || []) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = `preset-card${preset.id === studioState.preset ? ' on' : ''}`;
+    card.dataset.preset = preset.id;
+    const title = document.createElement('strong');
+    title.textContent = preset.label;
+    const note = document.createElement('small');
+    note.textContent = notes[preset.id] || 'Pro look';
+    card.append(title, note);
+    card.addEventListener('click', () => {
+      applyStudioPreset(preset.id);
+      if (els.studioPreset) els.studioPreset.value = preset.id;
+    });
+    container.append(card);
+  }
+}
+
 function renderStudioControls() {
   const catalog = studioState.catalog || studioFallbackCatalog();
   fillStudioSelect(els.studioCategory, catalog.categories, els.studioCategory.value || 'cartoon');
   fillStudioSelect(els.studioPreset, catalog.presets || [], studioState.preset);
+  renderStudioPresets(catalog.presets || []);
   fillStudioSelect(els.studioTransition, catalog.transitions, 'zoomin');
   studioChips(els.studioFx, catalog.fx, studioState.fx, 'fx');
   studioChips(els.studioTransitions, catalog.transitions, studioState.transitions, 'transitions');
@@ -2438,6 +2939,9 @@ function applyStudioPreset(id) {
   studioState.transitions = new Set(preset.transitions || []);
   studioState.visualizers = new Set(preset.visualizers || []);
   els.studioPresetName.textContent = preset.label;
+  for (const card of els.studioPresetGrid?.querySelectorAll('.preset-card') || []) {
+    card.classList.toggle('on', card.dataset.preset === id);
+  }
   studioChips(els.studioFx, catalog.fx, studioState.fx, 'fx');
   studioChips(els.studioTransitions, catalog.transitions, studioState.transitions, 'transitions');
   studioChips(els.studioVisualizers, catalog.visualizers, studioState.visualizers, 'visualizers');
@@ -2591,7 +3095,7 @@ async function renderStudioVideo() {
   const payload = studioPayload();
   if (!payload) return;
   els.studioRender.disabled = true;
-  els.studioRender.textContent = 'Creating… timeline autosave on';
+  els.studioRender.textContent = 'Creating… autosave on';
   els.studioRenderNote.textContent = 'Story, beats, voice, images, FX, visualizers aur render — sab chal rahe hain.';
   try {
     const response = await fetch('/api/video-studio/render', {
@@ -2610,7 +3114,7 @@ async function renderStudioVideo() {
     toast(err.message || 'Render start failed');
   } finally {
     els.studioRender.disabled = false;
-    els.studioRender.textContent = '🚀 Create pro video';
+    els.studioRender.textContent = 'Create video →';
   }
 }
 
@@ -2642,6 +3146,9 @@ function renderStudioDashboard() {
     els.studioProgress.style.width = '0%';
     els.studioCounts.textContent = '0 scenes · 0 done';
     els.studioTimeline.innerHTML = '<div class="studio-hint">Scene timeline yahan dikhogi.</div>';
+    if (els.studioImageTimeline) els.studioImageTimeline.innerHTML = '<div class="studio-hint">Image beats yahan dikhenge.</div>';
+    renderStudioRuler(60);
+    updateStudioPlayhead();
     els.studioDone.innerHTML = '<span class="studio-hint">—</span>';
     els.studioRemaining.innerHTML = '<span class="studio-hint">—</span>';
     els.studioSave.textContent = 'Autosave on';
@@ -2677,15 +3184,37 @@ function renderStudioDashboard() {
     const node = document.createElement('div');
     const isDone = ['done', 'ready', 'clip-ready', 'image-ready'].includes(scene.status);
     node.className = `studio-scene${isDone ? ' done' : ''}${job.status === 'rendering' && index === scenes.length - 1 ? ' active' : ''}`;
+    const source = scene.image || scene.video;
+    if (source) {
+      const thumb = document.createElement(scene.image ? 'img' : 'video');
+      thumb.src = `/api/file?path=${encodeURIComponent(source)}`;
+      if (scene.video) { thumb.muted = true; thumb.preload = 'metadata'; }
+      node.append(thumb);
+    }
+    const copy = document.createElement('div');
+    copy.className = 'scene-copy';
     const title = document.createElement('b');
     title.textContent = `Scene ${index + 1}`;
     const caption = document.createElement('span');
     caption.textContent = scene.caption || scene.imagePrompt || '—';
     const state = document.createElement('em');
     state.textContent = isDone ? '✓ ready' : (scene.status || 'queued');
-    node.append(title, caption, state);
+    copy.append(title, caption, state);
+    node.append(copy);
+    const beat = job.visualBeats?.[index];
+    const duration = Number(job.durationSeconds) || 60;
+    const seconds = beat?.end > beat?.start ? beat.end - beat.start : duration / Math.max(1, scenes.length);
+    const start = Number.isFinite(Number(beat?.start)) ? Number(beat.start) : (duration / Math.max(1, scenes.length)) * index;
+    node.dataset.start = String(start);
+    const time = document.createElement('span');
+    time.className = 'clip-time';
+    time.textContent = `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')}`;
+    node.append(time);
     els.studioTimeline.append(node);
   });
+  renderStudioImageTimeline(job, scenes);
+  renderStudioRuler(Number(job.durationSeconds) || studioVideoDuration());
+  updateStudioPlayhead();
   els.studioSceneCount.textContent = scenes.length ? `· ${done}/${scenes.length} ready` : '';
 
   const stageOrder = ['story', 'assets', 'voice', 'render'];
@@ -2715,6 +3244,38 @@ function renderStudioDashboard() {
       els.studioPreview.dataset.controls = '1';
     }
   }
+}
+
+function renderStudioImageTimeline(job, scenes) {
+  if (!els.studioImageTimeline) return;
+  els.studioImageTimeline.replaceChildren();
+  if (!scenes.length) {
+    const hint = document.createElement('div');
+    hint.className = 'studio-hint';
+    hint.textContent = 'Image beats yahan dikhenge.';
+    els.studioImageTimeline.append(hint);
+    return;
+  }
+  const duration = Number(job.durationSeconds) || 60;
+  scenes.forEach((scene, index) => {
+    const beat = job.visualBeats?.[index];
+    const start = Number.isFinite(Number(beat?.start)) ? Number(beat.start) : (duration / scenes.length) * index;
+    const end = Number.isFinite(Number(beat?.end)) ? Number(beat.end) : start + duration / scenes.length;
+    const node = document.createElement('div');
+    node.className = 'studio-beat';
+    node.dataset.start = String(start);
+    const image = scene.image || scene.video;
+    if (image) {
+      const thumb = document.createElement(scene.image ? 'img' : 'video');
+      thumb.src = `/api/file?path=${encodeURIComponent(image)}`;
+      if (scene.video) { thumb.muted = true; thumb.preload = 'metadata'; }
+      node.append(thumb);
+    }
+    const label = document.createElement('span');
+    label.textContent = `${index + 1} · ${formatStudioClock(end - start)}`;
+    node.append(label);
+    els.studioImageTimeline.append(node);
+  });
 }
 
 function renderStudioPills(container, items, className) {
@@ -4675,6 +5236,7 @@ els.studioBtn.addEventListener('click', openStudio);
 els.topStudioBtn.addEventListener('click', openStudio);
 els.studioClose.addEventListener('click', closeStudio);
 els.studioUpload.addEventListener('click', () => els.studioFiles.click());
+els.studioDrop?.addEventListener('click', () => els.studioFiles.click());
 els.studioFiles.addEventListener('change', () => {
   importStudioFiles(els.studioFiles.files);
   els.studioFiles.value = '';

@@ -190,109 +190,194 @@
       <header class="studio-top">
         <div class="studio-brand">
           <span class="studio-mark">N</span>
-          <div><strong>Video Studio</strong><small>Smart AI editor · autosave on</small></div>
+          <div class="brand-copy"><strong>Video Studio</strong><small>Create · Edit · Export</small></div>
         </div>
         <nav class="studio-steps" id="studioSteps">
-          <button class="studio-step active" data-stage="create"><b>1</b> Create</button>
-          <button class="studio-step" data-stage="edit"><b>2</b> Edit</button>
-          <button class="studio-step" data-stage="export"><b>3</b> Export</button>
+          <button class="studio-step active" data-stage="create">Create</button>
+          <button class="studio-step" data-stage="edit">Edit</button>
+          <button class="studio-step" data-stage="export">Export</button>
         </nav>
         <div class="studio-top-right">
-          <span class="studio-save" id="studioSave">Ready</span>
           <button class="icon-btn" id="studioClose" title="Close Video Studio" aria-label="Close Video Studio">
             <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
           </button>
         </div>
       </header>
 
-      <div class="studio-body">
+      <div class="studio-workspace">
         <aside class="studio-panel studio-left">
-          <div class="studio-panel-head">
-            <h3>Media</h3>
-            <button class="studio-mini" id="studioUpload">+ Import</button>
+          <section class="panel-section">
+            <div class="section-head"><span class="eyebrow">Source</span><button class="text-btn" id="studioUpload">+ Import</button></div>
+            <button class="drop-box" id="studioDrop" type="button">
+              <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" /></svg>
+              <span>Drop images, clips or audio</span>
+              <small>or click to browse</small>
+            </button>
             <input id="studioFiles" type="file" multiple hidden accept="image/*,video/*,audio/*,.mp3,.wav,.m4a,.mp4,.mov,.webm" />
-          </div>
-          <p class="studio-hint">Images, videos ya MP3 drop karein. Har file automatically analyze hoti hai.</p>
-          <div class="studio-media-list" id="studioMediaList"><p class="studio-hint">Abhi koi file nahi.</p></div>
+            <div class="studio-media-list" id="studioMediaList"></div>
+          </section>
 
-          <div class="studio-panel-head"><h3>Idea</h3></div>
-          <textarea id="studioPrompt" class="studio-textarea" rows="4" placeholder="Jaise: 5 minute cartoon video, Aarav aur Mera ke bare me, magical forest me adventure"></textarea>
-          <div class="studio-field-grid">
-            <label>Category<select id="studioCategory"></select></label>
-            <label>Duration<select id="studioDuration">
-              <option value="60">1 minute</option>
-              <option value="180">3 minutes</option>
-              <option value="300">5 minutes</option>
-              <option value="360" selected>6 minutes</option>
-              <option value="600">10 minutes</option>
-            </select></label>
-            <label>Ratio<select id="studioRatio"><option value="16:9">16:9 wide</option><option value="9:16">9:16 reels</option></select></label>
-            <label>Voice<select id="studioVoice">
-              <option value="auto">Auto natural</option>
-              <option value="male">Male</option>
-              <option value="female">Female</option>
-              <option value="child">Child</option>
-            </select></label>
+          <section class="panel-section">
+            <div class="section-head"><span class="eyebrow">Idea</span></div>
+            <textarea id="studioPrompt" class="studio-textarea" rows="3" placeholder="Describe your video in one line…"></textarea>
+            <button class="studio-agent" id="studioAgentBtn" type="button"><span>✦</span> Nova plans the whole video</button>
+          </section>
+
+          <section class="panel-section">
+            <div class="field-row">
+              <label>Category<select id="studioCategory"></select></label>
+              <label>Length<select id="studioDuration">
+                <option value="60">1 min</option>
+                <option value="180">3 min</option>
+                <option value="300">5 min</option>
+                <option value="360" selected>6 min</option>
+                <option value="600">10 min</option>
+              </select></label>
+            </div>
+            <div class="field-row">
+              <label>Format<select id="studioRatio"><option value="16:9">16:9 wide</option><option value="9:16">9:16 reels</option></select></label>
+              <label>Voice<select id="studioVoice">
+                <option value="auto">Natural</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="child">Child</option>
+              </select></label>
+            </div>
+            <label class="studio-check"><input type="checkbox" id="studioNarration" checked /> Narration</label>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-head"><span class="eyebrow">Look</span><span class="studio-pill" id="studioPresetName">Hollywood</span></div>
+            <div class="preset-grid" id="studioPresetGrid"></div>
+            <select id="studioPreset" hidden></select>
+            <details class="studio-details">
+              <summary>Fine-tune <span id="studioFxCount">2 FX</span></summary>
+              <label class="mini-field"><span>Transition</span><select id="studioTransition"></select></label>
+              <label class="mini-field"><span>BPM</span><input id="studioBpm" type="number" min="0" max="220" value="0" placeholder="Auto" /></label>
+              <div class="studio-group"><h4>FX</h4><div class="studio-chips" id="studioFx"></div></div>
+              <div class="studio-group"><h4>Transitions <small id="studioTransitionCount"></small></h4><div class="studio-chips" id="studioTransitions"></div></div>
+              <div class="studio-group"><h4>Visualizers</h4><div class="studio-chips" id="studioVisualizers"></div></div>
+              <div class="studio-group"><h4>Audio FX</h4><div class="studio-chips" id="studioAudioFx"></div></div>
+            </details>
+          </section>
+
+          <div class="render-dock">
+            <button class="studio-primary" id="studioRender" type="button">Create video <span>→</span></button>
+            <p id="studioRenderNote">Story, voice, images, FX and render — handled automatically.</p>
           </div>
-          <label class="studio-check"><input type="checkbox" id="studioNarration" checked /> Story voice-over · narration</label>
-          <button class="studio-ghost" id="studioAgentBtn">✨ Nova agent se sab auto set karein</button>
         </aside>
 
-        <main class="studio-center">
+        <div class="studio-resizer studio-resizer-x" id="studioPanelResizer" title="Drag to resize panel"><i></i></div>
+
+        <main class="studio-stage">
           <div class="studio-preview" id="studioPreviewWrap">
-            <video id="studioPreview" controls playsinline preload="metadata"></video>
+            <video id="studioPreview" playsinline preload="metadata"></video>
             <div class="studio-preview-empty" id="studioPreviewEmpty">
-              <strong>Preview</strong>
-              <span>Render ke baad final video yahan chalega</span>
+              <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+              <strong>Your video appears here</strong>
+              <span>Add an idea or import media, then create.</span>
             </div>
-          </div>
-          <div class="studio-status">
-            <div class="studio-status-row">
-              <strong id="studioStage">Ready</strong>
-              <span id="studioStepText">Video banane ke liye idea likho ya files import karein.</span>
-            </div>
-            <div class="studio-progress"><i id="studioProgress"></i></div>
-            <div class="studio-status-row small">
-              <span id="studioCounts">0 scenes · 0 done</span>
-              <span id="studioEta">Estimate ~2 min</span>
-            </div>
-          </div>
-          <div class="studio-timeline-head">
-            <h3>Timeline <span id="studioSceneCount"></span></h3>
-            <button class="studio-mini" id="studioResumeBtn" hidden>Resume remaining</button>
-          </div>
-          <div class="studio-timeline" id="studioTimeline"><div class="studio-hint">Scene timeline yahan dikhogi.</div></div>
-          <div class="studio-log" id="studioLog">
-            <div class="studio-log-col"><h4>Done</h4><div id="studioDone"><span class="studio-hint">—</span></div></div>
-            <div class="studio-log-col"><h4>Remaining</h4><div id="studioRemaining"><span class="studio-hint">—</span></div></div>
           </div>
         </main>
-
-        <aside class="studio-panel studio-right">
-          <div class="studio-panel-head"><h3>Inspector</h3><span class="studio-pill" id="studioPresetName">Hollywood magical</span></div>
-          <label>Preset<select id="studioPreset"></select></label>
-          <label>Transition<select id="studioTransition"></select></label>
-          <label>BPM <input id="studioBpm" type="number" min="0" max="220" value="0" placeholder="Auto" /></label>
-          <div class="studio-group">
-            <h4>FX <small id="studioFxCount">0 selected</small></h4>
-            <div class="studio-chips" id="studioFx"></div>
-          </div>
-          <div class="studio-group">
-            <h4>Transitions <small id="studioTransitionCount">0 selected</small></h4>
-            <div class="studio-chips" id="studioTransitions"></div>
-          </div>
-          <div class="studio-group">
-            <h4>Visualizers <small>beat sync · 10</small></h4>
-            <div class="studio-chips" id="studioVisualizers"></div>
-          </div>
-          <div class="studio-group">
-            <h4>Audio FX</h4>
-            <div class="studio-chips" id="studioAudioFx"></div>
-          </div>
-          <button class="studio-primary" id="studioRender">🚀 Create pro video</button>
-          <p class="studio-hint" id="studioRenderNote">Sab kaam local FFmpeg + Nova AI karega. Autosave har tick par.</p>
-        </aside>
       </div>
+
+      <div class="studio-resizer studio-resizer-y" id="studioTimelineResizer" title="Drag to resize timeline"><i></i></div>
+
+      <section class="timeline-dock" aria-label="Video timeline">
+        <header class="timeline-bar">
+          <div class="timeline-title">
+            <span class="eyebrow">Timeline</span>
+            <span class="stage-chip" id="studioStage">Ready</span>
+            <span class="timeline-step" id="studioStepText">Add an idea or import media to begin.</span>
+          </div>
+          <div class="timeline-tools">
+            <button class="tool-icon" id="studioUndo" type="button" title="Undo layout" aria-label="Undo layout">
+              <svg viewBox="0 0 24 24"><path d="M9 7H5V3M5 7a8 8 0 1 1 0 10" /></svg>
+            </button>
+            <button class="tool-icon" id="studioRedo" type="button" title="Redo layout" aria-label="Redo layout">
+              <svg viewBox="0 0 24 24"><path d="M15 7h4V3M19 7a8 8 0 1 0 0 10" /></svg>
+            </button>
+            <span class="tool-sep"></span>
+            <button class="tool-icon" id="studioTimelineHome" type="button" title="Go to start" aria-label="Go to start">
+              <svg viewBox="0 0 24 24"><path d="M6 5v14M19 5l-9 7 9 7z" /></svg>
+            </button>
+            <button class="tool-icon" id="studioPrevFrame" type="button" title="Previous frame" aria-label="Previous frame">
+              <svg viewBox="0 0 24 24"><path d="M7 5v14M18 5l-8 7 8 7z" /></svg>
+            </button>
+            <button class="tool-icon" id="studioTimelinePlay" type="button" title="Play / Pause" aria-label="Play or pause">
+              <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+            </button>
+            <button class="tool-icon" id="studioNextFrame" type="button" title="Next frame" aria-label="Next frame">
+              <svg viewBox="0 0 24 24"><path d="M17 5v14M6 5l8 7-8 7z" /></svg>
+            </button>
+            <span class="tool-sep"></span>
+            <button class="tool-icon" id="studioSplit" type="button" title="Split at playhead" aria-label="Split at playhead">
+              <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2" /><circle cx="6" cy="18" r="2" /><path d="M8 8l12 12M20 4L8 16" /></svg>
+            </button>
+            <button class="tool-icon" id="studioSnap" type="button" title="Snap to clips" aria-label="Snap to clips">
+              <svg viewBox="0 0 24 24"><path d="M6 4v8a6 6 0 0 0 12 0V4h-4v8a2 2 0 0 1-4 0V4z" /></svg>
+            </button>
+            <span class="tool-sep"></span>
+            <button class="tool-icon track-toggle" id="studioMuteVideo" type="button" title="Mute video track" aria-label="Mute video track">
+              <svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zM17 9l4 6M21 9l-4 6" /></svg><b>V</b>
+            </button>
+            <button class="tool-icon track-toggle" id="studioMuteImage" type="button" title="Mute image track" aria-label="Mute image track">
+              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.5" /><path d="M4 17l5-5 4 4 3-3 4 4" /></svg><b>I</b>
+            </button>
+            <button class="tool-icon track-toggle" id="studioMuteAudio" type="button" title="Mute audio track" aria-label="Mute audio track">
+              <svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM19 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z" /></svg><b>A</b>
+            </button>
+            <span class="tool-sep"></span>
+            <button class="tool-icon" id="studioZoomOut" type="button" title="Zoom out timeline" aria-label="Zoom out timeline">
+              <svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6" /><path d="M7 10h6M15 15l5 5" /></svg>
+            </button>
+            <button class="tool-icon" id="studioZoomFit" type="button" title="Fit timeline" aria-label="Fit timeline">
+              <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+            </button>
+            <button class="tool-icon" id="studioZoomIn" type="button" title="Zoom in timeline" aria-label="Zoom in timeline">
+              <svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6" /><path d="M7 10h6M10 7v6M15 15l5 5" /></svg>
+            </button>
+            <span class="tool-sep"></span>
+            <button class="mini-tool" id="studioLayoutBtn" type="button">Layout</button>
+            <button class="mini-tool" id="studioLockBtn" type="button">Lock UI</button>
+            <button class="mini-tool" id="studioExitBtn" type="button">Exit</button>
+            <div class="layout-menu" id="studioLayoutMenu" hidden>
+              <button type="button" data-layout="focus">Focus player</button>
+              <button type="button" data-layout="balanced">Balanced</button>
+              <button type="button" data-layout="timeline">Long timeline</button>
+              <button type="button" id="studioTogglePanel">Hide panel</button>
+              <button type="button" id="studioResetLayout">Reset layout</button>
+            </div>
+          </div>
+          <div class="timeline-actions">
+            <span class="timecode" id="studioTimecode">00:00</span>
+            <span class="timeline-meta" id="studioCounts">0 scenes · 0 done</span>
+            <span class="timeline-meta" id="studioEta">~2 min</span>
+            <span class="timeline-meta" id="studioSave">Autosave on</span>
+            <span id="studioSceneCount"></span>
+            <button class="text-btn" id="studioResumeBtn" hidden>Resume remaining</button>
+          </div>
+          <div class="timeline-progress"><i id="studioProgress"></i></div>
+        </header>
+        <div class="timeline-ruler" id="studioRuler"><span>00:00</span><span>00:10</span><span>00:20</span><span>00:30</span><span>00:45</span><span>01:00</span></div>
+        <div class="timeline-track">
+          <div class="track-head"><strong>Video</strong><small>V1</small></div>
+          <div class="studio-timeline" id="studioTimeline"><div class="studio-hint">Scenes will appear as they are built.</div></div>
+        </div>
+        <div class="timeline-track timeline-track--image">
+          <div class="track-head"><strong>Images</strong><small>I1</small></div>
+          <div class="studio-timeline" id="studioImageTimeline"><div class="studio-hint">Image beats appear here.</div></div>
+        </div>
+        <div class="timeline-track timeline-track--audio">
+          <div class="track-head"><strong>Audio</strong><small>A1</small></div>
+          <div class="audio-track"><div class="audio-wave"></div></div>
+        </div>
+        <div class="playhead" id="studioPlayhead"></div>
+        <div class="studio-log" id="studioLog">
+          <div class="studio-log-col"><h4>Done</h4><div id="studioDone"><span class="studio-hint">—</span></div></div>
+          <div class="studio-log-col"><h4>Remaining</h4><div id="studioRemaining"><span class="studio-hint">—</span></div></div>
+        </div>
+      </section>
     </section>
 
     <div class="modal" id="scheduleModal" hidden>

@@ -2071,7 +2071,7 @@ async function runMediaJob(job) {
   } catch (err) {
     await updateMediaJob(job, {
       status: 'error',
-      error: String(err.message || err).slice(0, 600),
+      error: String(err.message || err).slice(0, job.studio ? 4000 : 600),
       step: 'Error',
     });
   } finally {
@@ -5627,6 +5627,7 @@ async function runFfmpegCommand(bin, args, duration, onProgress, jobId) {
     const child = spawn(bin, runArgs, { cwd: WORKSPACE, windowsHide: true });
     if (jobId) ffmpegChildren.set(jobId, child);
     let stderr = '';
+    const errorLines = [];
     let lastUpdate = 0;
     const finish = () => {
       if (jobId) ffmpegChildren.delete(jobId);
@@ -5645,7 +5646,13 @@ async function runFfmpegCommand(bin, args, duration, onProgress, jobId) {
       }
     });
     child.stderr?.on('data', (chunk) => {
-      stderr = (stderr + chunk.toString()).slice(-4000);
+      const text = chunk.toString();
+      for (const line of text.split(/\r?\n/)) {
+        if (/error|invalid|no such|unable|failed|undefined/i.test(line) && errorLines.length < 40) {
+          errorLines.push(line.trim().slice(0, 500));
+        }
+      }
+      stderr = (stderr + text).slice(-4000);
     });
     child.on('error', (error) => {
       finish();
@@ -5654,7 +5661,13 @@ async function runFfmpegCommand(bin, args, duration, onProgress, jobId) {
     child.on('close', (code) => {
       finish();
       if (code === 0) resolve();
-      else reject(new Error(`FFmpeg failed (${code}): ${stderr.slice(-500) || 'unknown error'}`));
+      else {
+        const detail = [
+          ...errorLines.slice(-8),
+          stderr.length > 1300 ? `${stderr.slice(0, 500)}\n…\n${stderr.slice(-450)}` : stderr,
+        ].filter(Boolean).join('\n') || 'unknown error';
+        reject(new Error(`FFmpeg failed (${code}): ${detail}`));
+      }
     });
   });
 }
@@ -6568,7 +6581,7 @@ function studioFxFilters(job, sceneIndex, startLabel) {
     current = label;
   };
   const fx = new Set(Array.isArray(job.fx) ? job.fx : []);
-  if (fx.has('cinematic') || fx.has('dramatic')) apply('huesaturation=saturation=0.14,intensity=-0.05,vignette=PI/5');
+  if (fx.has('cinematic') || fx.has('dramatic')) apply("huesaturation=saturation=0.14:intensity='-0.05',vignette=PI/5");
   if (fx.has('vibrant') || fx.has('cartoon')) apply('huesaturation=saturation=0.3,unsharp=5:5:0.5');
   if (fx.has('noir') || fx.has('matrix')) apply('huesaturation=saturation=-1,colorlevels=romin=0.04:gomax=0.95');
   if (fx.has('vintage') || fx.has('sunset')) apply('colorbalance=rs=0.09:gs=0.03:bs=-0.09,vignette=PI/4');
