@@ -2162,7 +2162,10 @@ video:-webkit-full-screen {
 /* -------------------- Video Studio — clean premium editor ------------------- */
 .studio { --studio-panel-w: 300px; --studio-timeline-h: 32vh; --timeline-head-h: 56px; --studio-clip-scale: 1; position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: #08090b; color: #f4f4f5; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
 .studio[hidden] { display: none; }
-.studio.is-editing .studio-top { display: none; }
+.studio.is-editing .studio-top { height: 38px; flex: 0 0 38px; display: flex; justify-content: flex-start; padding: 0 14px; }
+.studio.is-editing .studio-mark, .studio.is-editing .studio-steps, .studio.is-editing .studio-top-right { display: none; }
+.studio.is-editing .brand-copy strong { font-size: 12px; }
+.studio.is-editing .brand-copy small { font-size: 9px; }
 .studio.is-editing .studio-stage { padding: 8px 10px; gap: 0; }
 .studio.is-editing .studio-preview { border-radius: 10px; }
 .studio.layout-locked .studio-resizer { display: none; }

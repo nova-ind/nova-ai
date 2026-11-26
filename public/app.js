@@ -2405,7 +2405,7 @@ function defaultStudioLayout() {
   return {
     panelWidth: preset.panelWidth,
     timelineHeight: Math.round(window.innerHeight * preset.timelineRatio),
-    panelHidden: true,
+    panelHidden: false,
     locked: false,
     clipScale: 1,
     snap: true,
@@ -2417,7 +2417,7 @@ function defaultStudioLayout() {
 function loadStudioLayout() {
   const fallback = defaultStudioLayout();
   try {
-    const saved = JSON.parse(localStorage.getItem('nova-studio-layout') || '{}');
+    const saved = JSON.parse(localStorage.getItem('nova-studio-layout-v2') || '{}');
     const merged = {
       ...fallback,
       ...saved,
@@ -2432,7 +2432,7 @@ function loadStudioLayout() {
 
 function saveStudioLayout() {
   try {
-    localStorage.setItem('nova-studio-layout', JSON.stringify(studioState.layout));
+    localStorage.setItem('nova-studio-layout-v2', JSON.stringify(studioState.layout));
   } catch {
     /* storage unavailable — layout current session me rehta hai */
   }
