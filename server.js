@@ -708,6 +708,42 @@ function cleanStoryCell(value) {
     .trim();
 }
 
+// Poori video me yahi chehra/banaav rahe — har scene ke image prompt me yahi lock dobara lagta hai.
+function extractCharacterBible(text) {
+  const line = String(text || '')
+    .split(/\r?\n/)
+    .find((item) => !/^\s*\|/.test(item)
+      && /(?:CHARACTER\s+LOCK|CHILD\s+LOCK|MAIN\s+CAST|मुख्य\s+पात्र|पात्र\s+लॉक|किरदार\s+लॉक)/i.test(item));
+  if (!line) return '';
+  const colon = line.indexOf(':');
+  const value = colon >= 0 ? line.slice(colon + 1) : line;
+  return cleanStoryCell(value).slice(0, 600);
+}
+
+function withCharacterBible(prompt, bible) {
+  const text = String(prompt || '').trim();
+  if (!bible || !text) return text;
+  if (text.toLowerCase().includes(bible.slice(0, 60).toLowerCase())) return text;
+  return `${bible}. ${text}`;
+}
+
+function collectDurationSeconds(text) {
+  let max = 0;
+  const candidates = [
+    /(\d+(?:\.\d+)?)\s*(?:min|mins|minute|minutes|मिनट|मिंट|मिनटों)/gi,
+    /(\d+(?:\.\d+)?)\s*(?:sec|secs|second|seconds|सेकंड|सेंकड)/gi,
+  ];
+  for (const pattern of candidates) {
+    for (const match of String(text || '').matchAll(pattern)) {
+      const value = Number(match[1]);
+      if (!Number.isFinite(value)) continue;
+      const seconds = pattern.source.includes('min') ? value * 60 : value;
+      max = Math.max(max, Math.round(seconds));
+    }
+  }
+  return max;
+}
+
 function parseStoryboard(prompt) {
   const text = String(prompt || '');
   const result = {
@@ -718,12 +754,10 @@ function parseStoryboard(prompt) {
     titles: [],
     sceneStarts: [],
     sceneEnds: [],
+    characterBible: extractCharacterBible(text),
   };
-  const minutes = /(\d+(?:\.\d+)?)\s*(?:min|mins|minute|minutes|मिनट|मिंट|मिनटों)/i.exec(text)
-    || /(\d+(?:\.\d+)?)\s*[-\u2011\u2013\u2014\s]*(?:मिनट|मिंट|मिनटों)/i.exec(text);
-  const seconds = /(\d{2,4})\s*(?:sec|secs|second|seconds|सेकंड|सेंकड)/i.exec(text);
-  if (minutes) result.durationSeconds = Math.round(Number(minutes[1]) * 60);
-  if (seconds) result.durationSeconds = Math.max(result.durationSeconds, Number(seconds[1]));
+  // "1 minute" paragraph ya "6 minutes" heading — sabme se longest total maanga jaata hai.
+  result.durationSeconds = collectDurationSeconds(text);
 
   const rows = text.split(/\r?\n/).filter((line) => /^\s*\|/.test(line));
   const scenes = [];
@@ -776,6 +810,9 @@ function parseStoryboard(prompt) {
   }
   const explicitScenes = /(\d+)\s*(?:scenes|scene|दृश्य|दृश्यों)/i.exec(text);
   if (explicitScenes && !result.sceneCount) result.sceneCount = Number(explicitScenes[1]);
+  if (result.characterBible) {
+    result.imagePrompts = result.imagePrompts.map((prompt) => withCharacterBible(prompt, result.characterBible));
+  }
   return result;
 }
 
@@ -800,11 +837,14 @@ async function generateStoryScriptWithModel(job, creds, baseCaptions) {
   const prompt = String(job.prompt || '').trim();
   const duration = Math.max(10, Number(job.durationSeconds) || 60);
   const model = String(process.env.STORY_MODEL || DEFAULT_MODEL || '').trim();
+  const secondsPerScene = Math.max(5, Math.round(duration / count));
+  const targetWords = Math.max(35, Math.min(120, Math.round(secondsPerScene * 2.4)));
   const system = [
     'You are a master short-film screenwriter and narrator.',
     `Write an original cinematic story for a ${duration}-second video, split into exactly ${count} scenes.`,
     'Return ONLY a JSON array of exactly N strings, one spoken narration line per scene.',
-    'Each line: 8-24 words, vivid, natural to speak, emotionally engaging, with hook, buildup, turn and payoff.',
+    `Each line must be about ${targetWords} words so natural speech fills its ${secondsPerScene}-second scene without speeding up or slowing down. Vivid, natural to speak, emotionally engaging, with hook, buildup, turn and payoff.`,
+    'If the user named main characters, describe them with exactly the same appearance words in every line where they appear.',
     'Write in the same language/style as the user idea. Never copy the prompt word-for-word and never add headings, numbers or stage directions.',
   ].join('\n');
   const response = await fetch(`${base}/chat/completions`, {
@@ -817,7 +857,7 @@ async function generateStoryScriptWithModel(job, creds, baseCaptions) {
       model,
       stream: false,
       temperature: 0.9,
-      max_tokens: Math.min(2400, Math.max(600, count * 60)),
+      max_tokens: Math.min(8000, Math.max(1200, count * 160)),
       messages: [
         { role: 'system', content: system },
         { role: 'user', content: `User idea: ${prompt}\n\nGenerate the ${count} narration lines now.` },
@@ -1257,6 +1297,7 @@ async function createMediaJob(payload = {}) {
     audioPath,
     lyrics: String(payload.lyrics || '').slice(0, 12_000),
     imagePrompts: storyboard?.imagePrompts || [],
+    characterBible: storyboard?.characterBible || '',
     storyboardLines: storyboard?.narrationLines || [],
     storyboardTitles: storyboard?.titles || [],
     storyboardStarts: storyboard?.sceneStarts || [],
@@ -2252,7 +2293,7 @@ const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'create_media_job',
-      description: 'Create a resumable video editing job. Use this whenever the user asks for a story video, cartoon video, cinematic clip, meme/funny video, or a video for an MP3 song. Pick ratio 16:9 or 9:16, infer style/fx/transitions from the request, and pass audioPath when a workspace MP3 is provided. The app keeps the job alive across restarts and renders it in the browser.',
+      description: 'Create a resumable video editing job. Use this whenever the user asks for a story video, cartoon video, cinematic clip, meme/funny video, or a video for an MP3 song. Always pass durationSeconds inferred from the request (1 minute=60, 3 minutes=180, 6 minutes=360) and keep it in the prompt too. Pick ratio 16:9 or 9:16, infer style/fx/transitions, and pass audioPath when a workspace MP3 is provided.',
       parameters: {
         type: 'object',
         properties: {
@@ -2270,6 +2311,7 @@ const AGENT_TOOLS = [
           },
           audioPath: { type: 'string' },
           sceneCount: { type: 'number' },
+          durationSeconds: { type: 'number' },
           clipSeconds: { type: 'number' },
           useAiVideo: { type: 'boolean' },
           imageModel: { type: 'string' },
@@ -4444,7 +4486,7 @@ function agentSystem(modes, customSystem = '', root = WORKSPACE, autoMode = true
     'You are an AGENT. Complete the user\'s request end-to-end instead of only explaining how. Use tools whenever the task needs fresh information, files, code execution, or generated images, and keep using them until the task is actually done.',
     'CODE RULE: For any request to create/fix an app, website, code file, script or project, ALWAYS call write_file (and create_folder when needed). Write real complete files into the allowed folder. If the folder is empty, scaffold the whole project. Never only describe or paste code in chat without saving it.',
     'IMAGE RULE: For any image request call generate_image. Prefer provider auto (Bing first, then Cloudflare Flux, then Hugging Face Flux). Never use Pollinations — the user disabled it because of poor quality.',
-    'VIDEO RULE: If the user asks for any video — story, cartoon, cinematic, meme/funny, or a video from an MP3 song — call create_media_job, never just describe it. Infer style (cinematic/cartoon/meme/anime/realistic), fx and transitions from the request. Use ratio 9:16 for reels/stories/short-form and 16:9 for normal video. If the user attached an MP3, pass its workspace audioPath. Default video provider is ltx (free open-source); Pollinations is disabled.',
+    'VIDEO RULE: If the user asks for any video — story, cartoon, cinematic, meme/funny, or a video from an MP3 song — call create_media_job, never just describe it. Convert the requested length into durationSeconds (6 minutes = 360, 5 minutes = 300, 3 minutes = 180) and repeat the same length at the top of the prompt. Never leave durationSeconds unset for a timed request. Infer style (cinematic/cartoon/meme/anime/realistic), fx and transitions. Use ratio 9:16 for reels/stories/short-form and 16:9 for normal video. If the user attached an MP3, pass its workspace audioPath. If the user named main characters, include a CHARACTER LOCK line in the prompt with their exact unchanging appearance. Default video provider is ltx (free open-source); Pollinations is disabled.',
     autoMode
       ? 'AUTO MODE (full permission): The user enabled OpenCode-style auto mode. When asked to run/test a built app, run CMD commands, check git, commit/push or log in to GitHub, call run_command/start_app/test_app/git/github_login directly. Do not ask for confirmation and do not merely print commands.'
       : 'Permission mode: ask before running shell commands, starting apps or pushing to git.',
@@ -5591,12 +5633,12 @@ async function buildTimedNarration(lines, starts, ends, durationSeconds, voice, 
     const lineFile = path.join(directory, `voice-line-${String(index + 1).padStart(2, '0')}.mp3`);
     try {
       await synthesizeNaturalNarration(list[index], voice, lineFile, creds);
-      // Line chhoti ho to scene ke andar hi slowly stretch karo; lambi ho to thoda speed up.
+      // Speed kabhi badalna nahi — bas line ko natural length ka likha hai, yahan sirf chhoti correction.
       const spoken = await probeAudioDuration(lineFile);
       let tempo = '';
       if (spoken > 0 && available > 0) {
-        const factor = Math.max(0.2, Math.min(4, spoken / available));
-        if (Math.abs(factor - 1) > 0.02) tempo = tempoChain(factor);
+        const factor = Math.max(0.9, Math.min(1.1, spoken / available));
+        if (Math.abs(factor - 1) > 0.01) tempo = `atempo=${factor.toFixed(3)},`;
       }
       const delay = Math.round(at * 1000);
       const label = `line${index}`;

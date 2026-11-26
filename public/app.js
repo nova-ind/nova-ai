@@ -202,7 +202,7 @@ const DEFAULT_SETTINGS = {
   tier: 'auto',
   videoRatio: '16:9',
   videoDuration: 5,
-  videoLengthSeconds: 60,
+  videoLengthSeconds: 360,
   videoSceneCount: 'auto',
   songPath: '',
   lyrics: '',
@@ -230,6 +230,11 @@ if (!settings.voice || settings.voice === 'Microsoft Hazel Desktop') settings.vo
 
 // Migrate older/incorrect model IDs and stale toggles from previous versions.
 let needsSettingsSave = false;
+// Purana 1-minute default ab kabhi 6-min story ko chhota nahi karega.
+if (!storedSettings.videoLengthSeconds || Number(settings.videoLengthSeconds) === 60) {
+  settings.videoLengthSeconds = 360;
+  needsSettingsSave = true;
+}
 if (!settings.apiKeys[settings.provider] && settings.apiKey) {
   settings.apiKeys[settings.provider] = settings.apiKey;
   needsSettingsSave = true;
