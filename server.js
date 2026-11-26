@@ -1289,7 +1289,8 @@ async function saveMediaJobs() {
 }
 
 async function updateMediaJob(job, patch) {
-  Object.assign(job, patch, { updatedAt: Date.now() });
+  // Har progress tick + har scene par autosave — app band ho jaye to wahin se resume.
+  Object.assign(job, patch, { autosaveAt: Date.now(), updatedAt: Date.now() });
   await saveMediaJobs().catch(() => {});
 }
 
@@ -1636,14 +1637,32 @@ async function createMediaJob(payload = {}) {
   if (!prompt) throw new Error('Prompt is required.');
   const ratio = payload.ratio === '9:16' ? '9:16' : '16:9';
   const style = String(payload.style || inferMediaStyle(prompt, type)).slice(0, 60);
+  const studio = payload.studio === true;
+  const limitFx = studio ? 24 : 8;
   const fx = (Array.isArray(payload.fx) ? payload.fx : String(payload.fx || '').split(','))
     .map((item) => String(item).trim().toLowerCase())
     .filter(Boolean)
-    .slice(0, 8);
+    .slice(0, limitFx);
   const transitions = (Array.isArray(payload.transitions) ? payload.transitions : String(payload.transitions || '').split(','))
     .map((item) => String(item).trim().toLowerCase())
     .filter(Boolean)
+    .slice(0, limitFx);
+  const visualizers = (Array.isArray(payload.visualizers) ? payload.visualizers : String(payload.visualizers || '').split(','))
+    .map((item) => String(item).trim().toLowerCase())
+    .filter(Boolean)
+    .slice(0, 10);
+  const audioFx = (Array.isArray(payload.audioFx) ? payload.audioFx : String(payload.audioFx || '').split(','))
+    .map((item) => String(item).trim().toLowerCase())
+    .filter(Boolean)
     .slice(0, 8);
+  const sourceAssets = studio ? normalizeStudioAssets(payload.sourceAssets) : [];
+  let bgmPath = null;
+  if (studio && payload.bgmPath) {
+    bgmPath = resolveJobAudioPath(payload.bgmPath);
+    if (bgmPath && !path.isAbsolute(String(payload.bgmPath))) {
+      bgmPath = path.relative(WORKSPACE, bgmPath).replace(/\\/g, '/');
+    }
+  }
 
   let audioPath = null;
   if (payload.audioPath) {
@@ -1654,13 +1673,20 @@ async function createMediaJob(payload = {}) {
   }
 
   const audioDuration = audioPath ? await probeAudioDuration(audioPath) : 0;
+  const sourceVideoDuration = sourceAssets
+    .filter((asset) => asset.kind === 'video')
+    .reduce((sum, asset) => sum + (Number(asset.duration) || 0), 0);
   const storyboard = type === 'story' ? parseStoryboard(prompt) : null;
   const requestedDuration = Number(payload.durationSeconds) || 0;
-  // Storyboard me likha time/scene count user ka asli instruction hai — settings ko override karta hai.
+  // Uploaded MP3 ki asli length hamesha match karegi. User di hui duration next priority.
   const durationSeconds = Math.min(900, Math.max(15,
     audioDuration > 0
       ? Math.round(audioDuration)
-      : storyboard?.durationSeconds || requestedDuration || 60,
+      : requestedDuration > 0
+        ? Math.round(requestedDuration)
+        : sourceVideoDuration > 0
+          ? Math.round(sourceVideoDuration)
+          : storyboard?.durationSeconds || 60,
   ));
   const rawRequestedScenes = Number(payload.sceneCount) || 0;
   // Purane settings me 6 scenes saved ho to 3/5 min ke video me ignore karo — auto count lagao.
@@ -1679,6 +1705,12 @@ async function createMediaJob(payload = {}) {
     style,
     fx: fx.length ? fx : inferMediaFx(prompt),
     transitions: transitions.length ? transitions : inferTransitions(prompt),
+    visualizers,
+    audioFx,
+    studio,
+    sourceAssets,
+    bgmPath,
+    bpm: Math.max(0, Math.round(Number(payload.bpm) || 0)),
     sceneCount,
     manualSceneCount: requestedScenes > 0,
     durationSeconds,
@@ -1712,6 +1744,10 @@ async function createMediaJob(payload = {}) {
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
+
+  if (studio && sourceAssets.some((asset) => asset.kind === 'image' || asset.kind === 'video')) {
+    job.useAiVideo = false;
+  }
 
   mediaJobs.unshift(job);
   await saveMediaJobs();
@@ -1759,11 +1795,16 @@ async function runMediaJob(job) {
       step: 'Story script likhi ja rahi hai — pehle kahani, phir usi ki audio…',
       progress: 10,
     });
-    let captions = splitCaptions(job.prompt, job.sceneCount);
+    const savedStoryLines = Array.isArray(job.storyLines) ? job.storyLines : [];
+    let captions = savedStoryLines.length >= 2
+      ? savedStoryLines.slice(0, job.sceneCount)
+      : splitCaptions(job.prompt, job.sceneCount);
     if (job.type === 'story') {
       if (Array.isArray(job.storyboardLines) && job.storyboardLines.length >= 2) {
         captions = job.storyboardLines.slice(0, job.sceneCount);
         await updateMediaJob(job, { step: `Storyboard ke ${captions.length} scenes mil gaye — unhi par voice aur images…`, progress: 66 });
+      } else if (savedStoryLines.length >= 2) {
+        await updateMediaJob(job, { step: `Saved story mil gayi — ${captions.length} lines wahin se resume…`, progress: 66 });
       } else {
         try {
           captions = await generateStoryScriptWithModel(job, creds, captions);
@@ -1773,7 +1814,7 @@ async function runMediaJob(job) {
           await updateMediaJob(job, { step: `Story model unavailable (${String(err.message || err).slice(0, 90)}) — local script use kar rahe hain…`, progress: 66 });
         }
       }
-    } else {
+    } else if (savedStoryLines.length < 2) {
       captions = buildStoryScript(job, captions);
     }
     const narrationText = captions.map((line) => String(line).trim().replace(/[.!?।]+$/, '')).filter(Boolean).join('. ') + '.';
@@ -1782,6 +1823,8 @@ async function runMediaJob(job) {
     await updateMediaJob(job, {
       storyFile: `media-jobs/${job.id}/story.txt`,
       storyText: captions.join('\n'),
+      storyLines: captions,
+      stage: 'story',
       step: `Story ready — ${captions.length} scenes. Ab audio model se voice ban raha hai…`,
       progress: 68,
     });
@@ -1860,16 +1903,40 @@ async function runMediaJob(job) {
         }
       } catch { /* directory abhi nahi bani ya read fail */ }
     }
-    // Ek image me multiple scenes/collage nahi: har visual beat ka apna prompt aur apni unique image.
-    const imagePool = await collectJobImages(job, sceneImagePrompts, directory);
-    if (imagePool.length !== visualBeats.length) {
-      throw new Error(`Sirf ${imagePool.length}/${visualBeats.length} images bani — duplicate images nahi lagayenge.`);
+    // Studio uploads ko story ke visual beats par distribute karo — AI image tabhi banao jab upload na ho.
+    const visualAssets = (job.sourceAssets || []).filter((asset) => asset.kind === 'image' || asset.kind === 'video');
+    let imagePool = [];
+    if (job.studio && visualAssets.length) {
+      await updateMediaJob(job, {
+        step: `${visualAssets.length} uploaded clips/images ko ${visualBeats.length} beats par arrange kar rahe hain…`,
+        progress: 12,
+      });
+      for (let index = 0; index < visualBeats.length; index += 1) {
+        const asset = visualAssets[index % visualAssets.length];
+        const scene = job.scenes[index] || { index: index + 1 };
+        scene.image = asset.kind === 'image' ? asset.path : null;
+        scene.video = asset.kind === 'video' ? asset.path : null;
+        scene.sourceAsset = asset.name;
+        scene.imagePrompt = visualBeats[index]?.prompt || scene.imagePrompt;
+        job.scenes[index] = scene;
+      }
+      await updateMediaJob(job, {
+        imagePoolCount: visualAssets.length,
+        step: `Timeline ready — ${visualBeats.length} scenes uploaded media se sync hain…`,
+        progress: 13,
+      });
+    } else {
+      // Ek image me multiple scenes/collage nahi: har visual beat ka apna prompt aur apni unique image.
+      imagePool = await collectJobImages(job, sceneImagePrompts, directory);
+      if (imagePool.length !== visualBeats.length) {
+        throw new Error(`Sirf ${imagePool.length}/${visualBeats.length} images bani — duplicate images nahi lagayenge.`);
+      }
+      await updateMediaJob(job, {
+        imagePoolCount: imagePool.length,
+        step: `${imagePool.length} unique images ready — har ek apni narration line ke exact hisse se match karti hai…`,
+        progress: 12,
+      });
     }
-    await updateMediaJob(job, {
-      imagePoolCount: imagePool.length,
-      step: `${imagePool.length} unique images ready — har ek apni narration line ke exact hisse se match karti hai…`,
-      progress: 12,
-    });
 
     // Visual beats already get FFmpeg zoom/pan — extra LTX clips slow aur inconsistent hote hain.
     const useMotion = job.useAiVideo && job.sceneCount <= 8 && !job.analysis && !job.visualBeats?.length;
@@ -1881,7 +1948,8 @@ async function runMediaJob(job) {
       scene.lineIndex = lineIndex;
       scene.caption = captions[lineIndex] || scene.caption;
       scene.imagePrompt = beat?.prompt || job.imagePrompts?.[index] || scene.imagePrompt;
-      if (!scene.image) {
+      scene.status = scene.status || 'pending';
+      if (!scene.image && !scene.video && Array.isArray(imagePool)) {
         await updateMediaJob(job, {
           step: `Scene ${index + 1}/${job.sceneCount}: ${job.style} image ban rahi hai…`,
           progress: 10 + Math.round(((index + 0.3) / job.sceneCount) * 60),
@@ -1890,6 +1958,9 @@ async function runMediaJob(job) {
         const file = `scene-${String(index + 1).padStart(2, '0')}.jpg`;
         await writeFile(path.join(directory, file), bytes);
         scene.image = `media-jobs/${job.id}/${file}`;
+        scene.status = 'image-ready';
+      } else if (!scene.status || scene.status === 'pending') {
+        scene.status = job.studio && scene.video ? 'clip-ready' : 'image-ready';
       }
 
       if (useMotion && !scene.video && !scene.videoError) {
@@ -1911,51 +1982,77 @@ async function runMediaJob(job) {
           const file = `scene-${String(index + 1).padStart(2, '0')}.mp4`;
           await writeFile(path.join(directory, file), bytes);
           scene.video = `media-jobs/${job.id}/${file}`;
+          scene.status = 'ready';
         } catch (err) {
           scene.videoError = String(err.message || err).slice(0, 300);
+          scene.status = scene.image ? 'image-ready' : 'pending';
         }
+      } else if (!scene.videoError) {
+        scene.status = 'ready';
       }
 
       job.scenes[index] = scene;
-      await updateMediaJob(job, { progress: 10 + Math.round(((index + 1) / job.sceneCount) * 60) });
+      await updateMediaJob(job, {
+        progress: 10 + Math.round(((index + 1) / job.sceneCount) * 60),
+        stage: 'assets',
+        completedScenes: job.scenes.filter((item) => ['ready', 'clip-ready', 'image-ready'].includes(item.status)).length,
+        step: `Scene ${index + 1}/${job.sceneCount} saved · ${job.scenes.filter((item) => ['ready', 'clip-ready', 'image-ready'].includes(item.status)).length} ready…`,
+      });
     }
 
     if (cancelledJobs.has(job.id)) throw new Error('Video cancelled.');
-    let narrationPath = null;
-    let ambientPath = null;
-    if (job.narration && !audioPath) {
-      await updateMediaJob(job, { step: 'Natural AI voice se har scene ki story line uske time par boli ja rahi hai…', progress: 72 });
-      try {
-        narrationPath = await buildTimedNarration(
-          captions,
-          job.storyboardStarts,
-          job.storyboardEnds,
-          job.durationSeconds,
-          job.voice,
-          creds,
-          directory,
-        );
-        await updateMediaJob(job, { step: 'Pro natural voice ready — story scene ke saath sync hai…', progress: 73 });
-      } catch (err) {
-        await updateMediaJob(job, { step: `AI voice unavailable (${String(err.message || err).slice(0, 90)}) — local film voice se banana…`, progress: 72 });
+    let narrationPath = job.narrationPath ? resolveJobAudioPath(job.narrationPath) : null;
+    try { if (narrationPath) await access(narrationPath); else narrationPath = null; } catch { narrationPath = null; }
+    let ambientPath = job.ambientPath ? resolveJobAudioPath(job.ambientPath) : null;
+    try { if (ambientPath) await access(ambientPath); else ambientPath = null; } catch { ambientPath = null; }
+
+    if (job.narration && (!audioPath || job.studio)) {
+      if (narrationPath) {
+        await updateMediaJob(job, { stage: 'voice', step: 'Saved voice track mil gayi — dobara nahi bana rahe…', progress: 72 });
+      } else {
+        await updateMediaJob(job, { stage: 'voice', step: 'Natural AI voice se har scene ki story line uske time par boli ja rahi hai…', progress: 72 });
         try {
-          narrationPath = await synthesizeNarration(
-            narrationText,
-            localVoiceName(job.voice),
-            path.join(directory, 'narration.wav'),
+          narrationPath = await buildTimedNarration(
+            captions,
+            job.storyboardStarts,
+            job.storyboardEnds,
+            job.durationSeconds,
+            job.voice,
+            creds,
+            directory,
           );
-        } catch (voiceErr) {
-          await updateMediaJob(job, { step: `Voice skip: ${String(voiceErr.message || voiceErr).slice(0, 120)}` });
+          await updateMediaJob(job, {
+            narrationPath: path.relative(WORKSPACE, narrationPath).replace(/\\/g, '/'),
+            step: 'Pro natural voice ready — story scene ke saath sync hai…',
+            progress: 73,
+          });
+        } catch (err) {
+          await updateMediaJob(job, { step: `AI voice unavailable (${String(err.message || err).slice(0, 90)}) — local film voice se banana…`, progress: 72 });
+          try {
+            narrationPath = await synthesizeNarration(
+              narrationText,
+              localVoiceName(job.voice),
+              path.join(directory, 'narration.wav'),
+            );
+            await updateMediaJob(job, {
+              narrationPath: path.relative(WORKSPACE, narrationPath).replace(/\\/g, '/'),
+            });
+          } catch (voiceErr) {
+            await updateMediaJob(job, { step: `Voice skip: ${String(voiceErr.message || voiceErr).slice(0, 120)}` });
+          }
         }
       }
     }
-    if (!audioPath) {
+    if (!audioPath && job.narration !== false && !ambientPath) {
       try {
         ambientPath = await generateAmbientBed(
           path.join(directory, 'ambient.wav'),
           job.durationSeconds,
           { boundaries: job.visualBeats?.length || captions.length || job.sceneCount || 1 },
         );
+        await updateMediaJob(job, {
+          ambientPath: path.relative(WORKSPACE, ambientPath).replace(/\\/g, '/'),
+        });
       } catch (err) {
         await updateMediaJob(job, { step: `Ambient skip: ${String(err.message || err).slice(0, 100)}` });
       }
@@ -2954,6 +3051,57 @@ const AGENT_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'analyze_media',
+      description: 'REA-style media probe for an uploaded image, video or audio inside the allowed folder. Returns duration, dimensions, fps and codecs so the agent can plan exact scene timing before editing.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_video_studio_project',
+      description: 'One-shot Video Studio agent. Creates a CapCut-style project: writes the story/script, generates narration and images when no uploads are given, applies stacked FFmpeg FX, 58 available transitions, 10 beat visualizers, background music and audio FX, then renders the final MP4 with autosave/resume. Set durationSeconds exactly (180/300/360).',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string' },
+          category: { type: 'string' },
+          durationSeconds: { type: 'number' },
+          ratio: { type: 'string' },
+          sourceAssets: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string' },
+                kind: { type: 'string' },
+                name: { type: 'string' },
+                duration: { type: 'number' },
+              },
+              required: ['path'],
+            },
+          },
+          audioPath: { type: 'string' },
+          bgmPath: { type: 'string' },
+          fx: { type: 'array', items: { type: 'string' } },
+          transitions: { type: 'array', items: { type: 'string' } },
+          visualizers: { type: 'array', items: { type: 'string' } },
+          audioFx: { type: 'array', items: { type: 'string' } },
+          bpm: { type: 'number' },
+          narration: { type: 'boolean' },
+          voice: { type: 'string' },
+        },
+        required: ['prompt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'create_folder',
       description: 'Create a folder inside the allowed root folder.',
       parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
@@ -3066,6 +3214,8 @@ const TOOL_LABELS = {
   generate_image: 'Creating an image…',
   generate_video: 'Creating a short video…',
   create_media_job: 'Starting resumable video project…',
+  create_video_studio_project: 'Video Studio agent — story, FX, timeline aur render…',
+  analyze_media: 'Media probe kar ke timeline plan kar rahe hain…',
   run_command: 'Running CMD command…',
   start_app: 'Starting the built app…',
   test_app: 'Testing the built app…',
@@ -4576,6 +4726,56 @@ async function runTool(name, args, root = WORKSPACE) {
       return await compareApps(args, root);
     }
 
+    if (name === 'analyze_media') {
+      const info = await analyzeStudioMedia(args.path || '');
+      return [
+        `MEDIA ANALYSIS — ${info.name}`,
+        `Kind: ${info.kind || 'unknown'} · ${info.size} bytes`,
+        `Duration: ${info.duration ? `${info.duration.toFixed(2)}s` : 'n/a'}`,
+        info.width ? `Video: ${info.width}x${info.height} @ ${info.fps}` : '',
+        info.videoCodec ? `Video codec: ${info.videoCodec}` : '',
+        info.audioCodec ? `Audio codec: ${info.audioCodec} · ${info.sampleRate || 'n/a'} Hz` : '',
+        `PATH:${info.path}`,
+      ].filter(Boolean).join('\n');
+    }
+
+    if (name === 'create_video_studio_project') {
+      const category = String(args.category || '').toLowerCase().trim();
+      const promptText = String(args.prompt || '').trim();
+      if (!promptText) return 'Error: video prompt required hai.';
+      const duration = Math.min(900, Math.max(15, Number(args.durationSeconds) || 60));
+      const preset = VIDEO_STUDIO_PRESETS.find((item) => category.includes(item.id))
+        || VIDEO_STUDIO_PRESETS.find((item) => category === 'cartoon' && item.id === 'cartoon')
+        || VIDEO_STUDIO_PRESETS[0];
+      const type = /cartoon|anime|comic/.test(category) ? 'cartoon'
+        : /comedy|meme|funny/.test(category) ? 'meme'
+          : /music|song|gaana/.test(category) ? 'song' : 'story';
+      const style = /cartoon|anime|comic/.test(category) ? 'cartoon'
+        : /comedy|meme|funny/.test(category) ? 'meme' : 'cinematic';
+      const job = await createMediaJob({
+        prompt: `${duration} second ${category || 'cinematic'} pro video. ${promptText}`,
+        chatId: args.chatId,
+        type,
+        category,
+        style,
+        studio: true,
+        durationSeconds: duration,
+        ratio: args.ratio === '9:16' ? '9:16' : '16:9',
+        sourceAssets: args.sourceAssets || [],
+        audioPath: args.audioPath || null,
+        bgmPath: args.bgmPath || null,
+        fx: Array.isArray(args.fx) && args.fx.length ? args.fx : preset.fx,
+        transitions: Array.isArray(args.transitions) && args.transitions.length ? args.transitions : preset.transitions,
+        visualizers: Array.isArray(args.visualizers) && args.visualizers.length ? args.visualizers : preset.visualizers,
+        audioFx: args.audioFx || [],
+        bpm: Number(args.bpm) || 0,
+        narration: args.narration !== false,
+        voice: args.voice || '',
+        useAiVideo: false,
+      });
+      return `VIDEO STUDIO STARTED — job ${job.id}. ${job.durationSeconds}s · ${job.sceneCount} scenes · ${(job.fx || []).length} FX · ${(job.transitions || []).length} transitions · ${(job.visualizers || []).length} visualizers. Autosave ON — band karke dobara kholein to yahin se resume hoga. Sidebar me Done/Remaining live dikhega.`;
+    }
+
     if (name === 'create_folder') {
       const dir = safeWorkspacePath(args.path || 'new-folder', root);
       await mkdir(dir, { recursive: true });
@@ -4973,6 +5173,7 @@ async function agentSystem(modes, customSystem = '', root = WORKSPACE, autoMode 
     'CODE RULE: For any request to create/fix an app, website, code file, script or project, ALWAYS call write_file (and create_folder when needed). Write real complete files into the allowed folder. If the folder is empty, scaffold the whole project. Never only describe or paste code in chat without saving it.',
     'IMAGE RULE: For any image request call generate_image. Prefer provider auto (Bing first, then Cloudflare Flux, then Hugging Face Flux). Never use Pollinations — the user disabled it because of poor quality.',
     'VIDEO RULE: If the user asks for any video — story, cartoon, cinematic, meme/funny, or a video from an MP3 song — call create_media_job, never just describe it. Convert the requested length into durationSeconds (6 minutes = 360, 5 minutes = 300, 3 minutes = 180) and repeat the same length at the top of the prompt. Never leave durationSeconds unset for a timed request. Infer style (cinematic/cartoon/meme/anime/realistic), fx and transitions. Use ratio 9:16 for reels/stories/short-form and 16:9 for normal video. If the user attached an MP3, pass its workspace audioPath. If the user named main characters, include a CHARACTER LOCK line in the prompt with their exact unchanging appearance. Default video provider is ltx (free open-source); Pollinations is disabled.',
+    'VIDEO STUDIO RULE: For any request that says "video studio", "pro editor", "CapCut-like", "edit this uploaded video/image/MP3", or asks for stacked FX/transitions/visualizers, call create_video_studio_project instead of plain create_media_job. One command must handle the whole job: first analyze_media for every uploaded path, then create_video_studio_project with exact durationSeconds, category, sourceAssets, audioPath/bgmPath, fx, transitions, 10-type beat visualizers and narration. Never ask the user to choose each effect. The job autosaves every scene; if it already has completed scenes, resuming must continue from the next unfinished scene, never restart from scene 1.',
     autoMode
       ? 'AUTO MODE (full permission): The user enabled OpenCode-style auto mode. When asked to run/test a built app, run CMD commands, check git, commit/push or log in to GitHub, call run_command/start_app/test_app/git/github_login directly. Do not ask for confirmation and do not merely print commands.'
       : 'Permission mode: ask before running shell commands, starting apps or pushing to git.',
@@ -5115,10 +5316,10 @@ async function handleAgent(req, res, key) {
         const results = [];
         for (const call of calls) {
           sse(res, { type: 'tool', name: call.name, label: TOOL_LABELS[call.name] || `Using ${call.name}…`, args: call.args });
-          const toolArgs =
-            call.name === 'create_media_job' && !call.args.chatId && payload.chatId
-              ? { ...call.args, chatId: payload.chatId }
-              : call.args;
+          const needsChatId = ['create_media_job', 'create_video_studio_project'].includes(call.name);
+          const toolArgs = needsChatId && !call.args.chatId && payload.chatId
+            ? { ...call.args, chatId: payload.chatId }
+            : call.args;
           const result = await runTool(call.name, toolArgs, root);
           results.push(`${call.name}: ${result}`);
           for (const fileMatch of result.matchAll(/FILE:(.+)$/gm)) {
@@ -5141,7 +5342,7 @@ async function handleAgent(req, res, key) {
             const match = /(\/api\/imagine\?[^\s]+)/.exec(result);
             if (match) sse(res, { type: 'image', url: match[1] });
           }
-          if (call.name === 'create_media_job') {
+          if (call.name === 'create_media_job' || call.name === 'create_video_studio_project') {
             const match = /\b(mj_[a-z0-9_]+)\b/i.exec(result);
             const job = match ? mediaJobs.find((item) => item.id === match[1]) : null;
             if (job) sse(res, { type: 'media_job', job });
@@ -5508,6 +5709,109 @@ async function probeAudioDuration(inputPath) {
   ], 30_000);
   const value = Number.parseFloat(String(result.out || '').trim().split(/\r?\n/)[0]);
   return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/* ---------------------------- video studio catalog --------------------------- */
+
+const VIDEO_STUDIO_TRANSITIONS = [
+  'fade', 'fadeblack', 'fadewhite', 'fadefast', 'fadeslow', 'fadegrays', 'dissolve',
+  'wipeleft', 'wiperight', 'wipeup', 'wipedown', 'wipetl', 'wipetr', 'wipebl', 'wipebr',
+  'slideleft', 'slideright', 'slideup', 'slidedown', 'smoothleft', 'smoothright',
+  'smoothup', 'smoothdown', 'circleopen', 'circleclose', 'circlecrop', 'rectcrop',
+  'horzopen', 'horzclose', 'vertopen', 'vertclose', 'diagtl', 'diagtr', 'diagbl', 'diagbr',
+  'hlslice', 'hrslice', 'vuslice', 'vdslice', 'hlwind', 'hrwind', 'vuwind', 'vdwind',
+  'hblur', 'pixelize', 'distance', 'radial', 'squeezeh', 'squeezev', 'zoomin',
+  'coverleft', 'coverright', 'coverup', 'coverdown', 'revealleft', 'revealright',
+  'revealup', 'revealdown',
+];
+
+const VIDEO_STUDIO_FX = [
+  'cinematic', 'vibrant', 'noir', 'vintage', 'glow', 'dreamy', 'neon', 'glitch',
+  'filmgrain', 'sharpen', 'softblur', 'mirror', 'chromatic', 'dramatic', 'matrix',
+  'sunset', 'cool', 'vhs', 'pixelate', 'shake', 'vignette', 'fade', 'fastcut', 'slowmo',
+];
+
+const VIDEO_STUDIO_VISUALIZERS = [
+  { id: 'bounce', label: 'Beat bounce' },
+  { id: 'flicker', label: 'Beat flicker' },
+  { id: 'pulse', label: 'Pulse frame' },
+  { id: 'eqbars', label: 'Equalizer bars' },
+  { id: 'orbit', label: 'Orbit dots' },
+  { id: 'glitch', label: 'Glitch slices' },
+  { id: 'sparkle', label: 'Sparkle rain' },
+  { id: 'glowpulse', label: 'Glow pulse' },
+  { id: 'chroma', label: 'Chromatic flash' },
+  { id: 'wavelength', label: 'Wave lines' },
+];
+
+const VIDEO_STUDIO_PRESETS = [
+  { id: 'hollywood', label: 'Hollywood magical', fx: ['cinematic', 'glow', 'sharpen'], transitions: ['zoomin', 'fadeblack', 'dissolve'], visualizers: ['bounce', 'glowpulse'] },
+  { id: 'cartoon', label: 'Cartoon pop', fx: ['vibrant', 'sharpen'], transitions: ['slideleft', 'zoomin', 'circleopen'], visualizers: ['bounce', 'sparkle'] },
+  { id: 'comedy', label: 'Comedy quick-cut', fx: ['vibrant', 'glitch'], transitions: ['fadefast', 'pixelize', 'wipeleft'], visualizers: ['flicker', 'glitch'] },
+  { id: 'science', label: 'Science fiction', fx: ['neon', 'chromatic', 'glow'], transitions: ['radial', 'hblur', 'fadewhite'], visualizers: ['chroma', 'orbit'] },
+  { id: 'emotional', label: 'Emotional story', fx: ['cinematic', 'softblur'], transitions: ['fadeslow', 'dissolve', 'fadeblack'], visualizers: ['pulse'] },
+  { id: 'music', label: 'Music video', fx: ['neon', 'glow', 'chromatic'], transitions: ['wiperight', 'zoomin', 'hlwind'], visualizers: ['eqbars', 'wavelength'] },
+];
+
+function videoStudioCatalog() {
+  return {
+    fx: VIDEO_STUDIO_FX,
+    transitions: VIDEO_STUDIO_TRANSITIONS,
+    visualizers: VIDEO_STUDIO_VISUALIZERS,
+    presets: VIDEO_STUDIO_PRESETS,
+    categories: ['story', 'cartoon', 'comedy', 'science fiction', 'music', 'ad / promo', 'documentary'],
+    ratios: ['16:9', '9:16'],
+    note: 'Sab effects local FFmpeg se render hote hain — koi paid plugin nahi.',
+  };
+}
+
+async function analyzeStudioMedia(filePath) {
+  const abs = resolveJobAudioPath(filePath);
+  if (!abs) throw new Error('File allowed folder ke bahar hai. Pehle Studio me upload karein.');
+  await access(abs);
+  const bin = await ffmpegExecutable('ffprobe');
+  const info = { path: path.relative(WORKSPACE, abs).replace(/\\/g, '/'), name: path.basename(abs), size: (await stat(abs)).size };
+  if (!bin) return { ...info, available: false, reason: 'FFprobe unavailable.' };
+  const result = await runCommand(bin, ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', abs], 30_000);
+  let probe = {};
+  try { probe = JSON.parse(String(result.out || '').trim() || '{}'); } catch { probe = {}; }
+  const video = (probe.streams || []).find((stream) => stream.codec_type === 'video');
+  const audio = (probe.streams || []).find((stream) => stream.codec_type === 'audio');
+  return {
+    ...info,
+    available: true,
+    kind: video ? 'video' : (audio ? 'audio' : 'image'),
+    duration: Number(probe.format?.duration) || 0,
+    width: Number(video?.width) || 0,
+    height: Number(video?.height) || 0,
+    fps: String(video?.avg_frame_rate || '0/1'),
+    videoCodec: video?.codec_name || null,
+    audioCodec: audio?.codec_name || null,
+    sampleRate: Number(audio?.sample_rate) || 0,
+  };
+}
+
+function normalizeStudioAssets(input = []) {
+  const list = Array.isArray(input) ? input : [];
+  return list.map((item) => {
+    const raw = typeof item === 'string' ? item : item?.path;
+    const abs = resolveJobAudioPath(raw);
+    if (!abs) return null;
+    const extension = path.extname(abs).toLowerCase();
+    const requested = String(item?.kind || '').toLowerCase();
+    let kind = requested;
+    if (!['image', 'video', 'audio'].includes(kind)) {
+      if (/\.(png|jpe?g|webp|gif|bmp)$/.test(extension)) kind = 'image';
+      else if (/\.(mp4|mov|mkv|webm|avi|m4v)$/.test(extension)) kind = 'video';
+      else kind = 'audio';
+    }
+    return {
+      kind,
+      path: path.relative(WORKSPACE, abs).replace(/\\/g, '/'),
+      name: String(item?.name || path.basename(abs)).slice(0, 180),
+      duration: Number(item?.duration) || 0,
+    };
+  }).filter(Boolean).slice(0, 60);
 }
 
 function sceneCountForDuration(durationSeconds, bpm = 0, manual = 0) {
@@ -6250,11 +6554,136 @@ async function synthesizeNarration(text, voice, outPath) {
   }
 }
 
+function studioBeatSeconds(bpm) {
+  return Math.max(0.25, 60 / (Number(bpm) > 0 ? Number(bpm) : 120));
+}
+
+function studioFxFilters(job, sceneIndex, startLabel) {
+  const filters = [];
+  let current = startLabel;
+  let sequence = 0;
+  const apply = (chain) => {
+    const label = `s${sceneIndex}f${sequence += 1}`;
+    filters.push(`[${current}]${chain}[${label}]`);
+    current = label;
+  };
+  const fx = new Set(Array.isArray(job.fx) ? job.fx : []);
+  if (fx.has('cinematic') || fx.has('dramatic')) apply('huesaturation=saturation=0.14,intensity=-0.05,vignette=PI/5');
+  if (fx.has('vibrant') || fx.has('cartoon')) apply('huesaturation=saturation=0.3,unsharp=5:5:0.5');
+  if (fx.has('noir') || fx.has('matrix')) apply('huesaturation=saturation=-1,colorlevels=romin=0.04:gomax=0.95');
+  if (fx.has('vintage') || fx.has('sunset')) apply('colorbalance=rs=0.09:gs=0.03:bs=-0.09,vignette=PI/4');
+  if (fx.has('cool')) apply('colorbalance=rs=-0.07:bs=0.1');
+  if (fx.has('neon')) apply('huesaturation=saturation=0.34,chromashift=cbh=4:crh=-4');
+  if (fx.has('chromatic')) apply('chromashift=cbh=6:crh=-6');
+  if (fx.has('sharpen')) apply('unsharp=5:5:0.7');
+  if (fx.has('softblur') || fx.has('dreamy')) apply('gblur=sigma=2.2');
+  if (fx.has('filmgrain') || fx.has('vhs')) apply('noise=alls=5:allf=t+u');
+  if (fx.has('pixelate')) apply('pixelize=pix=32');
+  if (fx.has('vignette')) apply('vignette=PI/4.5');
+  if (fx.has('fade')) apply('colorlevels=romin=0.06:bomin=0.06');
+  if (fx.has('glitch')) {
+    apply(`drawbox=x=0:y='h*0.24':w=w:h=7:color=cyan@0.35:t=fill:enable='gt(mod(t,2.4),2.1)'`);
+    apply(`drawbox=x=0:y='h*0.62':w=w:h=5:color=magenta@0.3:t=fill:enable='gt(mod(t,3.1),2.8)'`);
+  }
+  if (fx.has('glow') || fx.has('dreamy')) {
+    const left = `s${sceneIndex}glowA`;
+    const blurred = `s${sceneIndex}glowB`;
+    const out = `s${sceneIndex}glowOut`;
+    filters.push(`[${current}]split=2[${left}][${blurred}]`);
+    filters.push(`[${blurred}]gblur=sigma=9,huesaturation=saturation=0.25[${blurred}2]`);
+    filters.push(`[${left}][${blurred}2]blend=all_mode=screen:all_opacity=0.24[${out}]`);
+    current = out;
+  }
+  if (fx.has('mirror')) {
+    const left = `s${sceneIndex}mirrorA`;
+    const half = `s${sceneIndex}mirrorB`;
+    const out = `s${sceneIndex}mirrorOut`;
+    filters.push(`[${current}]split=2[${left}][${half}]`);
+    filters.push(`[${half}]crop=iw/2:ih:0:0,hflip[${half}2]`);
+    filters.push(`[${left}][${half}2]overlay=x=w/2:y=0[${out}]`);
+    current = out;
+  }
+  if (fx.has('shake')) {
+    apply(`crop=w='iw*0.94':h='ih*0.94':x='(iw-ow)/2+10*sin(2*PI*t/0.7)':y='(ih-oh)/2+8*cos(2*PI*t/0.55)'`);
+  }
+  if (fx.has('slowmo')) apply('tblend=all_mode=average');
+  if (fx.has('fastcut')) apply('select=not(mod(n\\,2)),setpts=N/FRAME_RATE/TB');
+  return { filters, current, count: sequence };
+}
+
+function studioVisualizerFilters(job, sceneIndex, startLabel, bpm) {
+  const filters = [];
+  const ids = new Set(Array.isArray(job.visualizers) ? job.visualizers : []);
+  if (!ids.size) return { filters, current: startLabel };
+  let current = startLabel;
+  let sequence = 0;
+  const beat = studioBeatSeconds(bpm);
+  const wave = `2*PI*t/${beat.toFixed(3)}`;
+  const apply = (chain) => {
+    const label = `s${sceneIndex}v${sequence += 1}`;
+    filters.push(`[${current}]${chain}[${label}]`);
+    current = label;
+  };
+  if (ids.has('bounce')) {
+    apply(`drawbox=x='w/2-46+46*sin(${wave})':y='h-26':w=92:h=5:color=cyan@0.5:t=fill`);
+  }
+  if (ids.has('flicker')) {
+    apply(`drawbox=x=0:y=0:w=w:h=h:color=white@0.11:t=fill:enable='gt(sin(${wave}),0.72)'`);
+  }
+  if (ids.has('pulse')) {
+    apply(`drawbox=x='w*0.025':y='h*0.045':w='w*0.95':h='h*0.91':color='0x7cf7ff@0.38':t=7:enable='gt(sin(${wave}),0.12)'`);
+  }
+  if (ids.has('eqbars')) {
+    for (let bar = 0; bar < 6; bar += 1) {
+      const phase = `sin(${wave}+${bar * 0.8})`;
+      apply(`drawbox=x='w*${((bar + 1) / 7).toFixed(3)}-7':y='h*0.7':w=14:h='h*(0.04+0.24*abs(${phase}))':color='0xff4fd8@0.42':t=fill`);
+    }
+  }
+  if (ids.has('orbit')) {
+    apply(`drawbox=x='w/2+(w*0.31)*cos(${wave})':y='h/2+(h*0.27)*sin(${wave})':w=16:h=16:color='0xffd166@0.6':t=fill`);
+  }
+  if (ids.has('glitch')) {
+    apply(`drawbox=x=0:y='h*0.2':w=w:h=8:color=cyan@0.38:t=fill:enable='gt(sin(${wave}),0.8)'`);
+    apply(`drawbox=x=0:y='h*0.51':w=w:h=5:color=magenta@0.34:t=fill:enable='gt(sin(${wave}+1.2),0.82)'`);
+  }
+  if (ids.has('sparkle')) {
+    for (let dot = 0; dot < 4; dot += 1) {
+      const phase = `${wave}+${dot * 1.4}`;
+      apply(`drawbox=x='w*(${((dot + 1) / 5).toFixed(2)}+0.08*sin(${phase}))':y='h*(0.2+0.12*cos(${phase}))':w=9:h=9:color=white@0.7:t=fill:enable='gt(sin(${phase}),0.4)'`);
+    }
+  }
+  if (ids.has('glowpulse')) {
+    apply(`drawbox=x='w*0.018':y='h*0.03':w='w*0.964':h='h*0.94':color='0x9ef01a@0.28':t=10:enable='gt(sin(${wave}),0.35)'`);
+  }
+  if (ids.has('chroma')) {
+    apply('chromashift=cbh=5:crh=-5');
+    apply(`drawbox=x=0:y=0:w=w:h=h:color='0x4361ee@0.08':t=fill:enable='gt(sin(${wave}),0.65)'`);
+  }
+  if (ids.has('wavelength')) {
+    for (let line = 0; line < 3; line += 1) {
+      const phase = `${wave}+${line * 2.1}`;
+      apply(`drawbox=x='w/2+(w*0.34)*sin(${phase})':y='h*0.16':w=5:h='h*0.68':color='0x48cae4@0.4':t=fill`);
+    }
+  }
+  return { filters, current, count: sequence };
+}
+
+function studioAudioFx(fxList = []) {
+  const fx = new Set(fxList);
+  const chains = [];
+  if (fx.has('denoise')) chains.push('afftdn');
+  if (fx.has('echo') || fx.has('reverb')) chains.push('aecho=0.8:0.88:60:0.3');
+  if (fx.has('crusher')) chains.push('acrusher=0.5:8:0.6');
+  if (fx.has('crystalizer')) chains.push('crystalizer=2');
+  if (fx.has('compress') || fx.has('punch')) chains.push('acompressor=threshold=-18dB:ratio=3:attack=10:release=120');
+  return chains.length ? `${chains.join(',')},` : '';
+}
+
 async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   const bin = await ffmpegExecutable('ffmpeg');
   if (!bin) throw new Error('FFmpeg available nahi hai — installer reinstall karein.');
-  const scenes = (job.scenes || []).filter((scene) => scene.image);
-  if (!scenes.length) throw new Error('Video ke liye koi scene image nahi mili.');
+  const scenes = (job.scenes || []).filter((scene) => scene.image || scene.video);
+  if (!scenes.length) throw new Error('Video ke liye koi scene media nahi mila.');
 
   const portrait = job.ratio === '9:16';
   const width = portrait ? 720 : 1280;
@@ -6262,7 +6691,7 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   const fps = 24;
   const count = scenes.length;
   const target = Math.min(900, Math.max(5, Number(job.durationSeconds) || count * 5));
-  // Har image apni narration line ke andar ka ek visual beat hai — isliye scene durations equal nahi.
+  // Har visual beat apni narration line ke time par — scene durations equal nahi.
   const rawDurations = scenes.map((scene, index) => {
     const beat = Array.isArray(job.visualBeats) ? job.visualBeats[index] : null;
     const start = Number(beat?.start);
@@ -6273,31 +6702,48 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   const durations = rawDurations.map((value) => (value * target) / rawTotal);
   const minDuration = Math.min(...durations);
   const transition = Math.min(0.8, Math.max(0.2, minDuration / 5));
-  const allowedTransitions = new Set([
+  const legacyTransitions = new Set([
     'fade', 'wipeleft', 'wiperight', 'slideleft', 'slideright', 'circleclose', 'circleopen',
   ]);
-  const requested = String((job.transitions || [])[0] || 'fade').toLowerCase();
-  const transitionName = allowedTransitions.has(requested) ? requested : 'fade';
+  const allowedTransitions = new Set(job.studio ? VIDEO_STUDIO_TRANSITIONS : [...legacyTransitions]);
+  const requestedList = Array.isArray(job.transitions) && job.transitions.length ? job.transitions : ['fade'];
+  const transitionNames = requestedList.map((name) => (
+    allowedTransitions.has(String(name).toLowerCase()) ? String(name).toLowerCase() : 'fade'
+  ));
+  const bpm = Number(job.bpm) || Number(job.analysis?.bpm) || 120;
+  const beatSeconds = studioBeatSeconds(bpm);
+  const bounceFrames = Math.max(4, Math.round(fps * beatSeconds));
   const output = path.join(directory, 'final.mp4');
 
   const args = [];
-  for (let index = 0; index < scenes.length; index += 1) {
-    const image = path.resolve(WORKSPACE, String(scenes[index].image).replace(/\\/g, '/'));
-    if (!pathInAllowedFolders(image)) throw new Error('Scene image allowed folder ke bahar hai.');
+  for (let index = 0; index < count; index += 1) {
+    const scene = scenes[index];
+    const source = scene.video || scene.image;
+    const absolute = path.resolve(WORKSPACE, String(source).replace(/\\/g, '/'));
+    if (!pathInAllowedFolders(absolute)) throw new Error('Scene media allowed folder ke bahar hai.');
     const inputDuration = index < count - 1 ? durations[index] + transition : durations[index];
-    args.push('-loop', '1', '-framerate', String(fps), '-t', inputDuration.toFixed(3), '-i', image);
+    if (scene.video) {
+      args.push('-stream_loop', '-1', '-t', inputDuration.toFixed(3), '-i', absolute);
+    } else {
+      args.push('-loop', '1', '-framerate', String(fps), '-t', inputDuration.toFixed(3), '-i', absolute);
+    }
   }
 
+  let audioIndex = count;
   const audioPath = resolveJobAudioPath(job.audioPath);
-  const songIndex = audioPath ? count : null;
+  const songIndex = audioPath ? audioIndex++ : null;
   if (audioPath) args.push('-i', audioPath);
   const narrationPath = options.narration || null;
-  const voiceIndex = narrationPath ? count + (songIndex === null ? 0 : 1) : null;
+  const voiceIndex = narrationPath ? audioIndex++ : null;
   if (narrationPath) args.push('-i', narrationPath);
   const ambientPath = options.ambient || null;
-  const ambientIndex = ambientPath ? count + (songIndex === null ? 0 : 1) + (voiceIndex === null ? 0 : 1) : null;
+  const ambientIndex = ambientPath ? audioIndex++ : null;
   if (ambientPath) args.push('-i', ambientPath);
-  const silenceIndex = songIndex === null && voiceIndex === null && ambientIndex === null ? count : null;
+  const bgmPath = job.bgmPath ? resolveJobAudioPath(job.bgmPath) : null;
+  const bgmIndex = bgmPath ? audioIndex++ : null;
+  if (bgmPath) args.push('-stream_loop', '-1', '-i', bgmPath);
+  const silenceIndex = songIndex === null && voiceIndex === null && ambientIndex === null && bgmIndex === null
+    ? audioIndex++ : null;
   if (silenceIndex !== null) args.push('-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo');
 
   const filters = [];
@@ -6306,26 +6752,50 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
     const motion = index % 4;
     const zoomIn = `1+0.15*on/${frames}`;
     const zoomOut = `max(1.0,1.15-0.15*on/${frames})`;
-    const z = motion === 1 || motion === 3 ? zoomOut : zoomIn;
-    const centerX = `iw/2-(iw/zoom/2)`;
-    const centerY = `ih/2-(ih/zoom/2)`;
+    const baseZoom = motion === 1 || motion === 3 ? zoomOut : zoomIn;
+    const bounceZoom = `1.02+0.045*abs(sin(2*PI*on/${bounceFrames}))`;
+    const z = job.studio && (job.visualizers || []).includes('bounce') ? bounceZoom : baseZoom;
+    const centerX = 'iw/2-(iw/zoom/2)';
+    const centerY = 'ih/2-(ih/zoom/2)';
     const x = motion === 2
       ? `(iw-iw/zoom)*on/${frames}`
       : (motion === 3 ? `(iw-iw/zoom)*(1-on/${frames})` : centerX);
-    const y = motion >= 2 ? `(ih-ih/zoom)/2` : centerY;
-    filters.push(
-      `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,`
-      + `crop=${width}:${height},setsar=1,hue=s=1.07,`
-      + `zoompan=z='${z}':x='${x}':y='${y}':d=1:s=${width}x${height}:fps=${fps}[v${index}]`,
-    );
+    const y = motion >= 2 ? '(ih-ih/zoom)/2' : centerY;
+    const label = `s${index}base`;
+    if (scenes[index].video) {
+      filters.push(
+        `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,`
+        + `crop=${width}:${height},setsar=1,fps=${fps},trim=duration=${durations[index].toFixed(3)},`
+        + `setpts=PTS-STARTPTS[${label}]`,
+      );
+    } else {
+      filters.push(
+        `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,`
+        + `crop=${width}:${height},setsar=1,hue=s=1.07,`
+        + `zoompan=z='${z}':x='${x}':y='${y}':d=1:s=${width}x${height}:fps=${fps},`
+        + `trim=duration=${durations[index].toFixed(3)},setpts=PTS-STARTPTS[${label}]`,
+      );
+    }
+    let tail = label;
+    if (job.studio) {
+      const fx = studioFxFilters(job, index, tail);
+      filters.push(...fx.filters);
+      tail = fx.current;
+      const visual = studioVisualizerFilters(job, index, tail, bpm);
+      filters.push(...visual.filters);
+      tail = visual.current;
+    }
+    scenes[index].renderLabel = tail;
   }
-  let current = 'v0';
+
+  let current = scenes[0].renderLabel;
   let xfadeOffset = 0;
   for (let index = 1; index < count; index += 1) {
     const label = `x${index}`;
+    const name = transitionNames[(index - 1) % transitionNames.length];
     xfadeOffset += durations[index - 1];
     filters.push(
-      `[${current}][v${index}]xfade=transition=${transitionName}:duration=${transition.toFixed(3)}`
+      `[${current}][${scenes[index].renderLabel}]xfade=transition=${name}:duration=${transition.toFixed(3)}`
       + `:offset=${xfadeOffset.toFixed(3)}[${label}]`,
     );
     current = label;
@@ -6333,18 +6803,24 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   filters.push(`[${current}]fade=t=in:st=0:d=0.5,fade=t=out:st=${(target - 0.6).toFixed(3)}:d=0.6[vout]`);
 
   const audioStreams = [];
+  const audioFx = studioAudioFx(job.audioFx || []);
   if (songIndex !== null) {
-    audioStreams.push(`[${songIndex}:a]volume=0.62,apad=pad_dur=${target.toFixed(3)}[song]`);
+    audioStreams.push(`[${songIndex}:a]${audioFx}volume=${bgmIndex !== null ? 0.5 : 0.62},apad=pad_dur=${target.toFixed(3)}[song]`);
   }
   if (voiceIndex !== null) {
     audioStreams.push(
-      `[${voiceIndex}:a]highpass=f=90,acompressor=threshold=-18dB:ratio=3:attack=10:release=120,`
+      `[${voiceIndex}:a]${audioFx}highpass=f=90,acompressor=threshold=-18dB:ratio=3:attack=10:release=120,`
       + `volume=1.18,apad=pad_dur=${target.toFixed(3)}[voice]`,
     );
   }
   if (ambientIndex !== null) {
     audioStreams.push(
       `[${ambientIndex}:a]lowpass=f=5000,volume=0.18,apad=pad_dur=${target.toFixed(3)}[ambient]`,
+    );
+  }
+  if (bgmIndex !== null) {
+    audioStreams.push(
+      `[${bgmIndex}:a]lowpass=f=7000,volume=0.2,apad=pad_dur=${target.toFixed(3)}[bgm]`,
     );
   }
   if (silenceIndex !== null) {
@@ -6354,8 +6830,9 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   if (songIndex !== null) audioLabels.push('[song]');
   if (voiceIndex !== null) audioLabels.push('[voice]');
   if (ambientIndex !== null) audioLabels.push('[ambient]');
+  if (bgmIndex !== null) audioLabels.push('[bgm]');
   if (silenceIndex !== null) audioLabels.push('[silence]');
-  filters.push(audioStreams.join(';'));
+  if (audioStreams.length) filters.push(audioStreams.join(';'));
   if (audioLabels.length > 1) {
     filters.push(
       `${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=first:`
@@ -6379,8 +6856,11 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
 
   await updateMediaJob(job, {
     status: 'rendering',
+    stage: 'render',
     progress: 75,
-    step: `FFmpeg final render — ${count} scenes · ${Math.round(target)}s · ${transitionName}`,
+    completedScenes: count,
+    step: `Final render — ${count} scenes · ${Math.round(target)}s · ${transitionNames.join('/')}`
+      + (job.studio ? ` · ${(job.fx || []).length} FX · ${(job.visualizers || []).length} visualizers` : ''),
   });
   await runFfmpegCommand(
     bin,
@@ -6388,16 +6868,18 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
     target,
     (progress) => updateMediaJob(job, {
       progress: 75 + Math.round(progress * 0.24),
-      step: `FFmpeg render… ${progress}%`,
+      step: `Render ${progress}% — timeline autosave ho rahi hai…`,
     }),
     job.id,
   );
   const info = await stat(output);
   if (!info.size) throw new Error('Final video ban nahi paya.');
+  for (const scene of job.scenes || []) scene.status = 'done';
   await updateMediaJob(job, {
     status: 'done',
+    stage: 'done',
     progress: 100,
-    step: 'Ready',
+    step: 'Ready · autosaved',
     output: path.relative(WORKSPACE, output).replace(/\\/g, '/'),
     outputUrl: `/api/file?path=${encodeURIComponent(output)}`,
     error: null,
@@ -6775,6 +7257,43 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/api/media-models') {
       return await handleMediaModels(req, res);
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/video-studio/catalog') {
+      return sendJson(res, 200, videoStudioCatalog());
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/video-studio/analyze') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      try {
+        return sendJson(res, 200, await analyzeStudioMedia(payload.path || ''));
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Media analyze nahi hua.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/video-studio/render') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      try {
+        const job = await createMediaJob({ ...payload, studio: true });
+        mediaTtsCredentials.set(job.id, {
+          key: apiKeyFrom(req),
+          baseUrl: baseUrlFrom(req),
+        });
+        return sendJson(res, 201, job);
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Studio render shuru nahi hua.' });
+      }
     }
 
     if (req.method === 'GET' && url.pathname === '/api/media-jobs') {

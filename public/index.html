@@ -39,6 +39,10 @@
         <nav class="chat-list" id="chatList" aria-label="Chat history"></nav>
 
         <div class="sidebar-foot">
+          <button class="foot-btn" id="studioBtn" title="Video Studio — AI video editor" aria-label="Open Video Studio">
+            <svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="3" /><path d="M17 10l4-2v8l-4-2M7 10l3 2-3 2" /></svg>
+            <span>Video Studio</span>
+          </button>
           <button class="foot-btn" id="folderBtn" title="Choose coding folder" aria-label="Choose coding folder">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
             <span id="folderBtnText">Coding folder</span>
@@ -66,6 +70,9 @@
           <div class="topbar-title" id="topbarTitle">Nova</div>
 
           <div class="topbar-right">
+            <button class="icon-btn" id="topStudioBtn" title="Video Studio" aria-label="Video Studio">
+              <svg viewBox="0 0 24 24"><rect x="3" y="5" width="14" height="14" rx="3" /><path d="M17 10l4-2v8l-4-2M7 10l3 2-3 2" /></svg>
+            </button>
             <span class="key-state" id="keyState">
               <span class="dot" id="statusDot"></span>
               <span id="keyLabel">Checking key…</span>
@@ -178,6 +185,115 @@
         </footer>
       </main>
     </div>
+
+    <section class="studio" id="studio" hidden aria-label="Nova Video Studio">
+      <header class="studio-top">
+        <div class="studio-brand">
+          <span class="studio-mark">N</span>
+          <div><strong>Video Studio</strong><small>Smart AI editor · autosave on</small></div>
+        </div>
+        <nav class="studio-steps" id="studioSteps">
+          <button class="studio-step active" data-stage="create"><b>1</b> Create</button>
+          <button class="studio-step" data-stage="edit"><b>2</b> Edit</button>
+          <button class="studio-step" data-stage="export"><b>3</b> Export</button>
+        </nav>
+        <div class="studio-top-right">
+          <span class="studio-save" id="studioSave">Ready</span>
+          <button class="icon-btn" id="studioClose" title="Close Video Studio" aria-label="Close Video Studio">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="studio-body">
+        <aside class="studio-panel studio-left">
+          <div class="studio-panel-head">
+            <h3>Media</h3>
+            <button class="studio-mini" id="studioUpload">+ Import</button>
+            <input id="studioFiles" type="file" multiple hidden accept="image/*,video/*,audio/*,.mp3,.wav,.m4a,.mp4,.mov,.webm" />
+          </div>
+          <p class="studio-hint">Images, videos ya MP3 drop karein. Har file automatically analyze hoti hai.</p>
+          <div class="studio-media-list" id="studioMediaList"><p class="studio-hint">Abhi koi file nahi.</p></div>
+
+          <div class="studio-panel-head"><h3>Idea</h3></div>
+          <textarea id="studioPrompt" class="studio-textarea" rows="4" placeholder="Jaise: 5 minute cartoon video, Aarav aur Mera ke bare me, magical forest me adventure"></textarea>
+          <div class="studio-field-grid">
+            <label>Category<select id="studioCategory"></select></label>
+            <label>Duration<select id="studioDuration">
+              <option value="60">1 minute</option>
+              <option value="180">3 minutes</option>
+              <option value="300">5 minutes</option>
+              <option value="360" selected>6 minutes</option>
+              <option value="600">10 minutes</option>
+            </select></label>
+            <label>Ratio<select id="studioRatio"><option value="16:9">16:9 wide</option><option value="9:16">9:16 reels</option></select></label>
+            <label>Voice<select id="studioVoice">
+              <option value="auto">Auto natural</option>
+              <option value="male">Male</option>
+              <option value="female">Female</option>
+              <option value="child">Child</option>
+            </select></label>
+          </div>
+          <label class="studio-check"><input type="checkbox" id="studioNarration" checked /> Story voice-over · narration</label>
+          <button class="studio-ghost" id="studioAgentBtn">✨ Nova agent se sab auto set karein</button>
+        </aside>
+
+        <main class="studio-center">
+          <div class="studio-preview" id="studioPreviewWrap">
+            <video id="studioPreview" controls playsinline preload="metadata"></video>
+            <div class="studio-preview-empty" id="studioPreviewEmpty">
+              <strong>Preview</strong>
+              <span>Render ke baad final video yahan chalega</span>
+            </div>
+          </div>
+          <div class="studio-status">
+            <div class="studio-status-row">
+              <strong id="studioStage">Ready</strong>
+              <span id="studioStepText">Video banane ke liye idea likho ya files import karein.</span>
+            </div>
+            <div class="studio-progress"><i id="studioProgress"></i></div>
+            <div class="studio-status-row small">
+              <span id="studioCounts">0 scenes · 0 done</span>
+              <span id="studioEta">Estimate ~2 min</span>
+            </div>
+          </div>
+          <div class="studio-timeline-head">
+            <h3>Timeline <span id="studioSceneCount"></span></h3>
+            <button class="studio-mini" id="studioResumeBtn" hidden>Resume remaining</button>
+          </div>
+          <div class="studio-timeline" id="studioTimeline"><div class="studio-hint">Scene timeline yahan dikhogi.</div></div>
+          <div class="studio-log" id="studioLog">
+            <div class="studio-log-col"><h4>Done</h4><div id="studioDone"><span class="studio-hint">—</span></div></div>
+            <div class="studio-log-col"><h4>Remaining</h4><div id="studioRemaining"><span class="studio-hint">—</span></div></div>
+          </div>
+        </main>
+
+        <aside class="studio-panel studio-right">
+          <div class="studio-panel-head"><h3>Inspector</h3><span class="studio-pill" id="studioPresetName">Hollywood magical</span></div>
+          <label>Preset<select id="studioPreset"></select></label>
+          <label>Transition<select id="studioTransition"></select></label>
+          <label>BPM <input id="studioBpm" type="number" min="0" max="220" value="0" placeholder="Auto" /></label>
+          <div class="studio-group">
+            <h4>FX <small id="studioFxCount">0 selected</small></h4>
+            <div class="studio-chips" id="studioFx"></div>
+          </div>
+          <div class="studio-group">
+            <h4>Transitions <small id="studioTransitionCount">0 selected</small></h4>
+            <div class="studio-chips" id="studioTransitions"></div>
+          </div>
+          <div class="studio-group">
+            <h4>Visualizers <small>beat sync · 10</small></h4>
+            <div class="studio-chips" id="studioVisualizers"></div>
+          </div>
+          <div class="studio-group">
+            <h4>Audio FX</h4>
+            <div class="studio-chips" id="studioAudioFx"></div>
+          </div>
+          <button class="studio-primary" id="studioRender">🚀 Create pro video</button>
+          <p class="studio-hint" id="studioRenderNote">Sab kaam local FFmpeg + Nova AI karega. Autosave har tick par.</p>
+        </aside>
+      </div>
+    </section>
 
     <div class="modal" id="scheduleModal" hidden>
       <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="scheduleTitle">

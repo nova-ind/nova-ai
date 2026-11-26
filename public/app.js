@@ -4,6 +4,18 @@ const DELETED_JOBS_KEY = 'nova.deletedJobs.v1';
 const DELETED_CHATS_KEY = 'nova.deletedChats.v1';
 const deletedChatIds = new Set(readJson(DELETED_CHATS_KEY, []).map(String));
 
+const studioState = {
+  assets: [],
+  catalog: null,
+  preset: 'hollywood',
+  fx: new Set(['cinematic', 'glow']),
+  transitions: new Set(['zoomin', 'fadeblack']),
+  visualizers: new Set(['bounce', 'glowpulse']),
+  audioFx: new Set(),
+  jobId: null,
+  timer: null,
+};
+
 const $ = (id) => document.getElementById(id);
 
 const els = {
@@ -52,6 +64,46 @@ const els = {
   folderList: $('folderList'),
   folderBtn: $('folderBtn'),
   folderBtnText: $('folderBtnText'),
+  studioBtn: $('studioBtn'),
+  topStudioBtn: $('topStudioBtn'),
+  studio: $('studio'),
+  studioClose: $('studioClose'),
+  studioSteps: $('studioSteps'),
+  studioUpload: $('studioUpload'),
+  studioFiles: $('studioFiles'),
+  studioMediaList: $('studioMediaList'),
+  studioPrompt: $('studioPrompt'),
+  studioCategory: $('studioCategory'),
+  studioDuration: $('studioDuration'),
+  studioRatio: $('studioRatio'),
+  studioVoice: $('studioVoice'),
+  studioNarration: $('studioNarration'),
+  studioAgentBtn: $('studioAgentBtn'),
+  studioPreview: $('studioPreview'),
+  studioPreviewEmpty: $('studioPreviewEmpty'),
+  studioSave: $('studioSave'),
+  studioStage: $('studioStage'),
+  studioStepText: $('studioStepText'),
+  studioProgress: $('studioProgress'),
+  studioCounts: $('studioCounts'),
+  studioEta: $('studioEta'),
+  studioTimeline: $('studioTimeline'),
+  studioSceneCount: $('studioSceneCount'),
+  studioResumeBtn: $('studioResumeBtn'),
+  studioDone: $('studioDone'),
+  studioRemaining: $('studioRemaining'),
+  studioPreset: $('studioPreset'),
+  studioPresetName: $('studioPresetName'),
+  studioTransition: $('studioTransition'),
+  studioBpm: $('studioBpm'),
+  studioFx: $('studioFx'),
+  studioFxCount: $('studioFxCount'),
+  studioTransitions: $('studioTransitions'),
+  studioTransitionCount: $('studioTransitionCount'),
+  studioVisualizers: $('studioVisualizers'),
+  studioAudioFx: $('studioAudioFx'),
+  studioRender: $('studioRender'),
+  studioRenderNote: $('studioRenderNote'),
   ffmpegBtn: $('ffmpegBtn'),
   ffmpegModal: $('ffmpegModal'),
   closeFfmpeg: $('closeFfmpeg'),
@@ -2266,6 +2318,459 @@ function inferVideoTransitions(prompt) {
   return list.length ? list : ['fade', 'zoom'];
 }
 
+/* ------------------------- CapCut-style video studio ----------------------- */
+
+function openStudio() {
+  els.studio.hidden = false;
+  studioState.jobId = studioState.jobId || (mediaJobs.find((job) => job.studio)?.id || null);
+  loadStudioCatalog();
+  renderStudioAssets();
+  renderStudioDashboard();
+  clearInterval(studioState.timer);
+  studioState.timer = setInterval(() => {
+    loadMediaJobs();
+    renderStudioDashboard();
+  }, 1500);
+}
+
+function closeStudio() {
+  els.studio.hidden = true;
+  clearInterval(studioState.timer);
+  studioState.timer = null;
+}
+
+async function loadStudioCatalog() {
+  if (studioState.catalog) {
+    renderStudioControls();
+    return;
+  }
+  try {
+    const response = await fetch('/api/video-studio/catalog');
+    if (!response.ok) return;
+    studioState.catalog = await response.json();
+    renderStudioControls();
+  } catch {
+    /* offline — built-in fallback below */
+  }
+}
+
+function studioFallbackCatalog() {
+  return {
+    fx: ['cinematic', 'vibrant', 'noir', 'vintage', 'glow', 'dreamy', 'neon', 'glitch', 'filmgrain', 'sharpen', 'mirror', 'chromatic', 'pixelate', 'shake', 'vignette'],
+    transitions: ['fade', 'fadeblack', 'dissolve', 'zoomin', 'wipeleft', 'wiperight', 'slideleft', 'slideright', 'circleopen', 'circleclose', 'radial', 'pixelize', 'hblur'],
+    visualizers: [
+      { id: 'bounce', label: 'Beat bounce' }, { id: 'flicker', label: 'Beat flicker' },
+      { id: 'pulse', label: 'Pulse frame' }, { id: 'eqbars', label: 'Equalizer bars' },
+      { id: 'orbit', label: 'Orbit dots' }, { id: 'glitch', label: 'Glitch slices' },
+      { id: 'sparkle', label: 'Sparkle rain' }, { id: 'glowpulse', label: 'Glow pulse' },
+      { id: 'chroma', label: 'Chromatic flash' }, { id: 'wavelength', label: 'Wave lines' },
+    ],
+    presets: [
+      { id: 'hollywood', label: 'Hollywood magical', fx: ['cinematic', 'glow'], transitions: ['zoomin', 'fadeblack'], visualizers: ['bounce', 'glowpulse'] },
+      { id: 'cartoon', label: 'Cartoon pop', fx: ['vibrant', 'sharpen'], transitions: ['slideleft', 'zoomin'], visualizers: ['bounce', 'sparkle'] },
+      { id: 'comedy', label: 'Comedy quick-cut', fx: ['vibrant', 'glitch'], transitions: ['fadefast', 'pixelize'], visualizers: ['flicker', 'glitch'] },
+      { id: 'science', label: 'Science fiction', fx: ['neon', 'chromatic'], transitions: ['radial', 'hblur'], visualizers: ['chroma', 'orbit'] },
+      { id: 'music', label: 'Music video', fx: ['neon', 'glow'], transitions: ['wiperight', 'zoomin'], visualizers: ['eqbars', 'wavelength'] },
+    ],
+    categories: ['story', 'cartoon', 'comedy', 'science fiction', 'music', 'ad / promo', 'documentary'],
+  };
+}
+
+function fillStudioSelect(select, values, selected) {
+  if (!select) return;
+  select.replaceChildren();
+  for (const value of values) {
+    const option = document.createElement('option');
+    option.value = typeof value === 'string' ? value : value.id;
+    option.textContent = typeof value === 'string' ? value : value.label;
+    select.append(option);
+  }
+  if (selected && values.some((value) => (typeof value === 'string' ? value : value.id) === selected)) {
+    select.value = selected;
+  }
+}
+
+function studioChips(container, values, selectedSet, group) {
+  if (!container) return;
+  container.replaceChildren();
+  for (const entry of values) {
+    const id = typeof entry === 'string' ? entry : entry.id;
+    const label = typeof entry === 'string' ? entry : entry.label;
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = `studio-chip${selectedSet.has(id) ? ' on' : ''}`;
+    chip.textContent = label;
+    chip.title = `${group}: ${label}`;
+    chip.addEventListener('click', () => {
+      if (selectedSet.has(id)) selectedSet.delete(id);
+      else selectedSet.add(id);
+      chip.classList.toggle('on', selectedSet.has(id));
+      if (group === 'fx') els.studioFxCount.textContent = `${selectedSet.size} selected`;
+      if (group === 'transitions') els.studioTransitionCount.textContent = `${selectedSet.size} selected`;
+    });
+    container.append(chip);
+  }
+}
+
+function renderStudioControls() {
+  const catalog = studioState.catalog || studioFallbackCatalog();
+  fillStudioSelect(els.studioCategory, catalog.categories, els.studioCategory.value || 'cartoon');
+  fillStudioSelect(els.studioPreset, catalog.presets || [], studioState.preset);
+  fillStudioSelect(els.studioTransition, catalog.transitions, 'zoomin');
+  studioChips(els.studioFx, catalog.fx, studioState.fx, 'fx');
+  studioChips(els.studioTransitions, catalog.transitions, studioState.transitions, 'transitions');
+  studioChips(els.studioVisualizers, catalog.visualizers, studioState.visualizers, 'visualizers');
+  studioChips(els.studioAudioFx, ['compress', 'echo', 'reverb', 'denoise', 'crusher', 'crystalizer'], studioState.audioFx, 'audioFx');
+  els.studioFxCount.textContent = `${studioState.fx.size} selected`;
+  els.studioTransitionCount.textContent = `${studioState.transitions.size} selected`;
+  if (els.studioTransition.value && !studioState.transitions.has(els.studioTransition.value)) {
+    els.studioTransition.value = [...studioState.transitions][0] || catalog.transitions[0];
+  }
+  applyStudioPreset(studioState.preset);
+}
+
+function applyStudioPreset(id) {
+  const catalog = studioState.catalog || studioFallbackCatalog();
+  const preset = (catalog.presets || []).find((item) => item.id === id);
+  if (!preset) return;
+  studioState.preset = id;
+  studioState.fx = new Set(preset.fx || []);
+  studioState.transitions = new Set(preset.transitions || []);
+  studioState.visualizers = new Set(preset.visualizers || []);
+  els.studioPresetName.textContent = preset.label;
+  studioChips(els.studioFx, catalog.fx, studioState.fx, 'fx');
+  studioChips(els.studioTransitions, catalog.transitions, studioState.transitions, 'transitions');
+  studioChips(els.studioVisualizers, catalog.visualizers, studioState.visualizers, 'visualizers');
+  els.studioFxCount.textContent = `${studioState.fx.size} selected`;
+  els.studioTransitionCount.textContent = `${studioState.transitions.size} selected`;
+}
+
+function studioAssetKind(file) {
+  const type = String(file.type || '');
+  const name = String(file.name || '').toLowerCase();
+  if (type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp)$/.test(name)) return 'image';
+  if (type.startsWith('video/') || /\.(mp4|mov|webm|mkv|avi|m4v)$/.test(name)) return 'video';
+  return 'audio';
+}
+
+function renderStudioAssets() {
+  const list = els.studioMediaList;
+  list.replaceChildren();
+  if (!studioState.assets.length) {
+    const hint = document.createElement('p');
+    hint.className = 'studio-hint';
+    hint.textContent = 'Abhi koi file nahi.Import se image/video/audio daalein.';
+    list.append(hint);
+    return;
+  }
+  studioState.assets.forEach((asset, index) => {
+    const row = document.createElement('div');
+    row.className = 'studio-media-item';
+    const thumb = document.createElement(asset.kind === 'video' ? 'video' : (asset.kind === 'image' ? 'img' : 'div'));
+    if (asset.kind === 'image' || asset.kind === 'video') {
+      thumb.src = `/api/file?path=${encodeURIComponent(asset.path)}`;
+      if (asset.kind === 'video') { thumb.muted = true; thumb.preload = 'metadata'; }
+    } else {
+      thumb.textContent = '🎵';
+      thumb.style.cssText = 'display:grid;place-items:center;font-size:20px';
+    }
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = asset.name || `asset-${index + 1}`;
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    sub.textContent = `${asset.kind}${asset.duration ? ` · ${asset.duration.toFixed(1)}s` : ''}${analysisText(asset)}`;
+    meta.append(name, sub);
+    const role = document.createElement('select');
+    for (const value of ['scene', 'voice', 'bgm']) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value === 'scene' ? 'Scene' : value === 'voice' ? 'Voice' : 'BGM';
+      role.append(option);
+    }
+    role.value = asset.role || (asset.kind === 'audio' ? 'voice' : 'scene');
+    role.addEventListener('change', () => { asset.role = role.value; });
+    row.append(thumb, meta, role);
+    list.append(row);
+  });
+}
+
+function analysisText(asset) {
+  if (!asset.analysis) return '';
+  const info = asset.analysis;
+  if (info.width) return ` · ${info.width}x${info.height}`;
+  if (info.audioCodec) return ` · ${info.audioCodec}`;
+  return '';
+}
+
+async function importStudioFiles(files) {
+  const items = [...(files || [])];
+  if (!items.length) return;
+  for (const file of items) {
+    toast(`Studio me import ho raha hai: ${file.name}`);
+    try {
+      const response = await fetch('/api/media-upload', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-file-name': encodeURIComponent(file.name),
+        },
+        body: file,
+      });
+      const uploaded = await response.json().catch(() => ({}));
+      if (!response.ok || !uploaded.path) throw new Error(uploaded.error || 'Upload failed');
+      const kind = studioAssetKind(file);
+      const asset = {
+        path: uploaded.path,
+        name: uploaded.name || file.name,
+        kind,
+        role: kind === 'audio' ? 'voice' : 'scene',
+        size: uploaded.size,
+      };
+      try {
+        const analysisResponse = await fetch('/api/video-studio/analyze', {
+          method: 'POST',
+          headers: apiHeaders(),
+          body: JSON.stringify({ path: uploaded.path }),
+        });
+        if (analysisResponse.ok) asset.analysis = await analysisResponse.json();
+      } catch { /* analysis optional */ }
+      asset.duration = Number(asset.analysis?.duration) || 0;
+      studioState.assets.push(asset);
+    } catch (err) {
+      toast(err.message || `${file.name} import nahi hua`);
+    }
+  }
+  renderStudioAssets();
+  toast(`${items.length} file(s) studio me ready`);
+}
+
+function studioPayload() {
+  const prompt = els.studioPrompt.value.trim();
+  const hasSceneAssets = studioState.assets.some((asset) => asset.role === 'scene');
+  if (!prompt && !hasSceneAssets) {
+    toast('Idea likho ya kam se kam ek image/video import karo');
+    return null;
+  }
+  const category = els.studioCategory.value || 'story';
+  const voice = els.studioVoice.value || 'auto';
+  const voiceText = { male: 'male', female: 'female', child: 'child', auto: '' }[voice] || '';
+  const voiceAsset = studioState.assets.find((asset) => asset.role === 'voice');
+  if (voiceAsset) els.studioNarration.checked = true;
+  return {
+    prompt: prompt || `Create a professional ${category} video from the uploaded media with cinematic editing.`,
+    chatId: activeChat()?.id,
+    studio: true,
+    category,
+    type: /cartoon|anime|comic/.test(category) ? 'cartoon'
+      : /comedy|meme|funny/.test(category) ? 'meme'
+        : /music|song|gaana/.test(category) ? 'song' : 'story',
+    style: /cartoon|anime|comic/.test(category) ? 'cartoon' : 'cinematic',
+    durationSeconds: Number(els.studioDuration.value) || 60,
+    ratio: els.studioRatio.value || '16:9',
+    sourceAssets: studioState.assets.filter((asset) => asset.role === 'scene')
+      .map((asset) => ({ path: asset.path, kind: asset.kind, name: asset.name, duration: asset.duration })),
+    audioPath: voiceAsset?.path || null,
+    bgmPath: studioState.assets.find((asset) => asset.role === 'bgm')?.path || null,
+    fx: [...studioState.fx],
+    transitions: [...studioState.transitions],
+    visualizers: [...studioState.visualizers],
+    audioFx: [...studioState.audioFx],
+    bpm: Number(els.studioBpm.value) || 0,
+    narration: els.studioNarration.checked,
+    voice: voiceText,
+    useAiVideo: false,
+    imageProvider: settings.imageProvider || DEFAULT_SETTINGS.imageProvider,
+    imageModel: settings.mediaModels.image,
+  };
+}
+
+async function renderStudioVideo() {
+  const payload = studioPayload();
+  if (!payload) return;
+  els.studioRender.disabled = true;
+  els.studioRender.textContent = 'Creating… timeline autosave on';
+  els.studioRenderNote.textContent = 'Story, beats, voice, images, FX, visualizers aur render — sab chal rahe hain.';
+  try {
+    const response = await fetch('/api/video-studio/render', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.id) throw new Error(data.error || 'Studio job shuru nahi hua');
+    studioState.jobId = data.id;
+    applyJobUpdate(data);
+    renderStudioDashboard();
+    toast('Pro video ban raha hai — sidebar me progress dekhein');
+  } catch (err) {
+    els.studioRenderNote.textContent = err.message || 'Render start failed';
+    toast(err.message || 'Render start failed');
+  } finally {
+    els.studioRender.disabled = false;
+    els.studioRender.textContent = '🚀 Create pro video';
+  }
+}
+
+function studioDoneScenes(job) {
+  const statuses = new Set(['done', 'ready', 'clip-ready', 'image-ready']);
+  return (job?.scenes || []).filter((scene) => statuses.has(scene.status)).length;
+}
+
+function studioStageLabel(stage, status) {
+  const labels = {
+    story: 'Story ready',
+    assets: 'Building scenes',
+    voice: 'Voice generation',
+    render: 'Final FFmpeg render',
+    done: 'Ready',
+  };
+  if (status === 'error') return 'Paused · error';
+  if (status === 'awaiting-render') return 'Waiting for render';
+  return labels[stage] || 'Queued';
+}
+
+function renderStudioDashboard() {
+  if (!els.studio || els.studio.hidden) return;
+  const jobs = mediaJobs.filter((job) => job.studio || job.id === studioState.jobId);
+  const job = jobs.find((item) => item.id === studioState.jobId) || jobs[0];
+  if (!job) {
+    els.studioStage.textContent = 'Ready';
+    els.studioStepText.textContent = 'Video banane ke liye idea likho ya files import karein.';
+    els.studioProgress.style.width = '0%';
+    els.studioCounts.textContent = '0 scenes · 0 done';
+    els.studioTimeline.innerHTML = '<div class="studio-hint">Scene timeline yahan dikhogi.</div>';
+    els.studioDone.innerHTML = '<span class="studio-hint">—</span>';
+    els.studioRemaining.innerHTML = '<span class="studio-hint">—</span>';
+    els.studioSave.textContent = 'Autosave on';
+    els.studioResumeBtn.hidden = true;
+    return;
+  }
+  studioState.jobId = job.id;
+  const scenes = job.scenes || [];
+  const done = studioDoneScenes(job);
+  const progress = Math.max(0, Math.min(100, Number(job.progress) || 0));
+  els.studioStage.textContent = studioStageLabel(job.stage, job.status);
+  els.studioStepText.textContent = job.step || job.error || '';
+  els.studioProgress.style.width = `${progress}%`;
+  els.studioCounts.textContent = `${scenes.length || job.sceneCount || 0} scenes · ${done} done · ${Math.round(progress)}%`;
+  const remaining = Math.max(0, (scenes.length || job.sceneCount || 0) - done);
+  const minutes = job.status === 'done' ? 0
+    : Math.max(1, Math.ceil(remaining * 0.18 + (Number(job.durationSeconds) || 60) / 45));
+  els.studioEta.textContent = job.status === 'done'
+    ? 'Finished'
+    : `Estimate ~${minutes} min remaining`;
+  els.studioSave.textContent = job.autosaveAt
+    ? `Autosaved ${new Date(job.autosaveAt).toLocaleTimeString()}`
+    : 'Autosave on';
+
+  els.studioTimeline.replaceChildren();
+  if (!scenes.length) {
+    const hint = document.createElement('div');
+    hint.className = 'studio-hint';
+    hint.textContent = 'Scenes banate hi yahan live dikhenge.';
+    els.studioTimeline.append(hint);
+  }
+  scenes.forEach((scene, index) => {
+    const node = document.createElement('div');
+    const isDone = ['done', 'ready', 'clip-ready', 'image-ready'].includes(scene.status);
+    node.className = `studio-scene${isDone ? ' done' : ''}${job.status === 'rendering' && index === scenes.length - 1 ? ' active' : ''}`;
+    const title = document.createElement('b');
+    title.textContent = `Scene ${index + 1}`;
+    const caption = document.createElement('span');
+    caption.textContent = scene.caption || scene.imagePrompt || '—';
+    const state = document.createElement('em');
+    state.textContent = isDone ? '✓ ready' : (scene.status || 'queued');
+    node.append(title, caption, state);
+    els.studioTimeline.append(node);
+  });
+  els.studioSceneCount.textContent = scenes.length ? `· ${done}/${scenes.length} ready` : '';
+
+  const stageOrder = ['story', 'assets', 'voice', 'render'];
+  const stageIndex = Math.max(0, stageOrder.indexOf(job.stage || 'story'));
+  const doneStages = job.status === 'done' ? stageOrder : stageOrder.slice(0, stageIndex);
+  const waitStages = job.status === 'done' ? [] : stageOrder.slice(stageIndex);
+  renderStudioPills(els.studioDone, [
+    ...doneStages.map((stage) => `${stage} ✓`),
+    ...scenes.map((scene, index) => ({ scene, index }))
+      .filter(({ scene }) => ['done', 'ready', 'clip-ready', 'image-ready'].includes(scene.status))
+      .map(({ index }) => `S${index + 1}`),
+  ], 'ok');
+  renderStudioPills(els.studioRemaining, [
+    ...waitStages,
+    ...scenes.map((scene, index) => ({ scene, index }))
+      .filter(({ scene }) => !['done', 'ready', 'clip-ready', 'image-ready'].includes(scene.status))
+      .map(({ index }) => `S${index + 1}`),
+  ], 'wait');
+
+  els.studioResumeBtn.hidden = !['error', 'awaiting-render'].includes(job.status);
+  if (job.outputUrl && els.studioPreview.dataset.job !== job.id) {
+    els.studioPreview.src = job.outputUrl;
+    els.studioPreview.dataset.job = job.id;
+    els.studioPreviewEmpty.hidden = true;
+    if (els.studioPreview.dataset.controls !== '1') {
+      els.studioPreview.parentElement.append(playerControls(els.studioPreview, job.id));
+      els.studioPreview.dataset.controls = '1';
+    }
+  }
+}
+
+function renderStudioPills(container, items, className) {
+  if (!container) return;
+  container.replaceChildren();
+  const shown = items.slice(-18);
+  if (!shown.length) {
+    const hint = document.createElement('span');
+    hint.className = 'studio-hint';
+    hint.textContent = '—';
+    container.append(hint);
+    return;
+  }
+  for (const item of shown) {
+    const pill = document.createElement('span');
+    pill.className = `studio-log-pill ${className}`;
+    pill.textContent = item;
+    container.append(pill);
+  }
+}
+
+async function resumeStudioJob() {
+  const job = mediaJobs.find((item) => item.id === studioState.jobId);
+  if (!job) return;
+  try {
+    const response = await fetch(`/api/media-jobs/${encodeURIComponent(job.id)}/retry`, {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Resume nahi hua');
+    applyJobUpdate(data);
+    toast('Same video wahin se resume hoga');
+  } catch (err) {
+    toast(err.message || 'Resume failed');
+  }
+}
+
+function askStudioAgent() {
+  const prompt = els.studioPrompt.value.trim();
+  if (!prompt) {
+    toast('Agent ko ek line instruction do');
+    return;
+  }
+  settings.modes.agent = true;
+  settings.modes.video = false;
+  settings.modes.imagine = false;
+  settings.modes.search = false;
+  settings.modes.think = false;
+  saveSettings();
+  renderModes();
+  closeStudio();
+  send(`Video Studio: ${prompt}. Complete end-to-end with create_video_studio_project — story, FX, transitions, visualizers, autosave aur final MP4 sab handle karo.`);
+}
+
 function findJobMessage(jobId) {
   for (const chat of chats) {
     const message = chat.messages.find((item) => item.kind === 'job' && item.job?.id === jobId);
@@ -4166,6 +4671,44 @@ els.scheduleBtn.addEventListener('click', openSchedule);
 els.botsBtn.addEventListener('click', openBots);
 els.folderBtn.addEventListener('click', chooseCodingFolder);
 els.chooseFolderBtn.addEventListener('click', chooseCodingFolder);
+els.studioBtn.addEventListener('click', openStudio);
+els.topStudioBtn.addEventListener('click', openStudio);
+els.studioClose.addEventListener('click', closeStudio);
+els.studioUpload.addEventListener('click', () => els.studioFiles.click());
+els.studioFiles.addEventListener('change', () => {
+  importStudioFiles(els.studioFiles.files);
+  els.studioFiles.value = '';
+});
+const studioDropZone = els.studio?.querySelector('.studio-left');
+if (studioDropZone) {
+  studioDropZone.addEventListener('dragover', (event) => event.preventDefault());
+  studioDropZone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    importStudioFiles(event.dataTransfer?.files);
+  });
+}
+els.studioPreset.addEventListener('change', () => applyStudioPreset(els.studioPreset.value));
+els.studioTransition.addEventListener('change', () => {
+  const value = els.studioTransition.value;
+  if (value) {
+    studioState.transitions = new Set([value, ...studioState.transitions]);
+    els.studioTransitionCount.textContent = `${studioState.transitions.size} selected`;
+    const catalog = studioState.catalog || studioFallbackCatalog();
+    studioChips(els.studioTransitions, catalog.transitions, studioState.transitions, 'transitions');
+  }
+});
+els.studioRender.addEventListener('click', renderStudioVideo);
+els.studioResumeBtn.addEventListener('click', resumeStudioJob);
+els.studioAgentBtn.addEventListener('click', askStudioAgent);
+els.studioSteps.addEventListener('click', (event) => {
+  const step = event.target.closest('.studio-step');
+  if (!step) return;
+  for (const button of els.studioSteps.querySelectorAll('.studio-step')) button.classList.remove('active');
+  step.classList.add('active');
+  if (step.dataset.stage === 'create') els.studioPrompt.focus();
+  if (step.dataset.stage === 'edit') els.studioTimeline.scrollIntoView({ block: 'center' });
+  if (step.dataset.stage === 'export') els.studioPreviewWrap?.scrollIntoView?.({ block: 'center' });
+});
 els.ffmpegBtn.addEventListener('click', openFfmpeg);
 els.closeFfmpeg.addEventListener('click', closeFfmpeg);
 els.ffmpegModal.addEventListener('click', (event) => {
