@@ -958,6 +958,88 @@ async function generateStoryScriptWithModel(job, creds, baseCaptions) {
   return lines.map((line, index) => line || baseCaptions[index] || `Scene ${index + 1}`);
 }
 
+function fallbackImagePrompts(job, captions) {
+  const bible = String(job.characterBible || '').trim();
+  return captions.map((line) => withCharacterBible(
+    `${String(line || '').trim()} ${job.style ? `${job.style} style, ` : ''}single coherent scene, one illustration, no collage, no panels, no text.`,
+    bible,
+  ));
+}
+
+async function generateImagePromptsWithModel(job, captions, creds) {
+  const key = String(creds?.key || '').trim();
+  if (!key) throw new Error('Image-prompt model key unavailable.');
+  const base = String(creds?.baseUrl || UPSTREAM_BASE).replace(/\/+$/, '');
+  const model = String(process.env.STORYBOARD_MODEL || process.env.STORY_MODEL || DEFAULT_MODEL || '').trim();
+  const lines = captions.map((line) => String(line || '').trim()).filter(Boolean);
+  if (!lines.length) throw new Error('Image prompts ke liye story lines nahi mili.');
+  const count = lines.length;
+  const story = lines.map((line, index) => `Scene ${index + 1}: ${line}`).join('\n');
+  const knownBible = String(job.characterBible || '').trim();
+  const system = [
+    'You are a film storyboard artist. Read the complete story below carefully before writing anything.',
+    `Create exactly ${count} image prompts, one per scene, in the same order as the story.`,
+    'Return ONLY valid JSON in this shape: {"characterBible":"...","imagePrompts":["..."]}.',
+    'characterBible: one English paragraph describing the recurring main characters with exact age, face, hair, clothes and body proportions. State that they must look identical in every image and must never change age.',
+    'Each image prompt: 35-60 English words, cinematic composition, exact setting/action/emotion of that scene, one coherent illustration, no collage, no split panels, no text, no watermark.',
+    'Every prompt that shows a recurring character must repeat the same identity words from characterBible.',
+    'Do not add, skip, reorder or merge scenes. One story line equals one image.',
+  ].join('\n');
+  const user = [
+    knownBible ? `Existing character lock: ${knownBible}` : '',
+    `User idea: ${String(job.prompt || '').slice(0, 4000)}`,
+    `FULL STORY (${count} scenes):\n${story}`,
+    `Return exactly ${count} image prompts now.`,
+  ].filter(Boolean).join('\n\n');
+  const response = await fetch(`${base}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model,
+      stream: false,
+      temperature: 0.35,
+      max_tokens: Math.min(8000, Math.max(1200, count * 140)),
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    }),
+    signal: AbortSignal.timeout(180_000),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Image-prompt model failed (${response.status}): ${detail.slice(0, 180)}`);
+  }
+  const payload = await response.json();
+  const content = payload?.choices?.[0]?.message?.content;
+  const raw = typeof content === 'string' ? content : JSON.stringify(content || '');
+  let parsed = null;
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start !== -1 && end > start) {
+    try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch { parsed = null; }
+  }
+  if (!parsed) {
+    const arrayStart = raw.indexOf('[');
+    const arrayEnd = raw.lastIndexOf(']');
+    if (arrayStart !== -1 && arrayEnd > arrayStart) {
+      try { parsed = { imagePrompts: JSON.parse(raw.slice(arrayStart, arrayEnd + 1)) }; } catch { parsed = null; }
+    }
+  }
+  const rawPrompts = parsed?.imagePrompts || parsed?.prompts || parsed?.images || [];
+  const prompts = Array.isArray(rawPrompts)
+    ? rawPrompts.map((item) => String(typeof item === 'string' ? item : item?.prompt || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+    : [];
+  if (!prompts.length) throw new Error('Model ne image prompts nahi diye.');
+  const characterBible = String(parsed?.characterBible || knownBible || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+  const filled = Array.from({ length: count }, (_, index) => prompts[index] || fallbackImagePrompts(job, [lines[index]])[0])
+    .map((prompt) => withCharacterBible(prompt, characterBible));
+  return { characterBible, imagePrompts: filled };
+}
+
 function buildStoryScript(job, baseCaptions) {
   const count = job.sceneCount;
   const prompt = String(job.prompt || '').trim();
@@ -1212,9 +1294,10 @@ function validImageBytes(bytes) {
   return width >= 256 && height >= 256;
 }
 
-async function collectJobImages(job, captions) {
+async function collectJobImages(job, prompts) {
   const provider = job.imageProvider || DEFAULT_IMAGE_PROVIDER;
-  const prompts = Array.isArray(job.imagePrompts) && job.imagePrompts.length ? job.imagePrompts : captions;
+  const list = Array.isArray(prompts) ? prompts.map((item) => String(item || '').trim()).filter(Boolean) : [];
+  if (!list.length) throw new Error('Image prompts nahi mile — pehle story likhna zaroori hai.');
   const pool = [];
   const usedHashes = new Set();
   const pickUnique = (images) => {
@@ -1227,38 +1310,50 @@ async function collectJobImages(job, captions) {
     }
     return null;
   };
-  const requestUnique = async (text) => {
-    const result = provider === 'auto'
+  const requestUnique = async (text, forceProvider = provider) => {
+    const result = forceProvider === 'auto'
       ? await generateImageSmart(text, { model: job.imageModel, ratio: job.ratio })
-      : await fetchImageResult(text, job.imageModel, provider, job.ratio);
+      : await fetchImageResult(text, job.imageModel, forceProvider, job.ratio);
     return pickUnique(result.images || []);
   };
-  // Har scene ka apna prompt — ek image me multiple scenes/collage nahi banne dete.
-  for (let index = 0; index < job.sceneCount; index += 1) {
-    const scenePrompt = String(prompts[index] || captions[index] || job.prompt || `Scene ${index + 1}`).trim();
-    const fullPrompt = `${scenePrompt}. ${job.style ? `${job.style} style, ` : ''}single coherent scene, one illustration, no collage, no panels, no text.`;
+  // Har story line ka apna prompt aur apni image — exact 1:1, koi duplicate/collage nahi.
+  for (let index = 0; index < list.length; index += 1) {
+    const scenePrompt = list[index];
+    const firstSentence = scenePrompt.split(/(?<=[.!?।])\s+/)[0] || scenePrompt;
+    const variants = [
+      `${scenePrompt}. ${job.style ? `${job.style} style, ` : ''}single coherent scene, one illustration, no collage, no panels, no text.`,
+      `${firstSentence.slice(0, 220)}. ${job.style ? `${job.style} style, ` : ''}single coherent scene, one illustration, no collage, no panels, no text.`,
+      `${scenePrompt.slice(0, 260)}. cinematic composition, one coherent scene, one illustration, no collage, no panels, no text.`,
+    ];
     let chosen = null;
-    try {
-      chosen = await requestUnique(fullPrompt);
-    } catch {
-      // Detailed query fail ho to same scene ki chhoti, cohesive description se dobara try karein.
+    // Ek scene fail ho to usi scene ko dobara banao; kabhi agle scene ki image repeat nahi.
+    for (let attempt = 0; attempt < 6 && !chosen; attempt += 1) {
+      const text = variants[Math.min(attempt, variants.length - 1)];
       try {
-        const firstSentence = scenePrompt.split(/(?<=[.!?।])\s+/)[0] || scenePrompt;
-        const retryText = provider === 'stock'
-          ? cleanStockQuery(scenePrompt, 1)
-          : `${firstSentence.slice(0, 160)}. single coherent scene, one illustration, no collage, no panels, no text.`;
-        chosen = await requestUnique(retryText);
+        chosen = await requestUnique(text);
       } catch {
         chosen = null;
       }
+      if (chosen) break;
+      if (attempt === 3 && provider !== 'auto' && provider !== 'stock') {
+        try {
+          chosen = await requestUnique(text, 'auto');
+        } catch {
+          chosen = null;
+        }
+      }
+      if (!chosen) await sleep(1200);
     }
-    pool.push(chosen || null);
+    if (!chosen) {
+      throw new Error(`Scene ${index + 1}/${list.length} ki unique image nahi bani. Bing/login check karke dobara try karein.`);
+    }
+    pool.push(chosen);
     await updateMediaJob(job, {
-      step: `${job.imageProvider === 'stock' ? 'Stock' : 'Bing'} se scene ${index + 1}/${job.sceneCount} ki image check ho gayi…`,
-      progress: 10 + Math.round(((index + 1) / Math.max(1, job.sceneCount)) * 55),
+      step: `${provider === 'stock' ? 'Stock' : 'Bing'} se scene ${index + 1}/${list.length} ki image ready — story line se match…`,
+      progress: 10 + Math.round(((index + 1) / list.length) * 55),
     });
   }
-  return pool.filter(Boolean);
+  return pool;
 }
 
 async function generateVideoSmart(prompt, options = {}) {
@@ -1461,21 +1556,57 @@ async function runMediaJob(job) {
       progress: 68,
     });
 
-    const sceneImagePrompts = Array.isArray(job.imagePrompts) && job.imagePrompts.length
-      ? job.imagePrompts
-      : captions;
+    const exactSceneCount = Math.max(1, captions.length);
+    if (job.sceneCount !== exactSceneCount) {
+      await updateMediaJob(job, {
+        sceneCount: exactSceneCount,
+        step: `Story ki ${captions.length} lines hain — utne hi scenes aur images banenge…`,
+      });
+    }
+    let sceneImagePrompts = Array.isArray(job.imagePrompts)
+      ? job.imagePrompts.slice(0, exactSceneCount)
+      : [];
+    if (sceneImagePrompts.length !== exactSceneCount) {
+      await updateMediaJob(job, {
+        step: `Poori story padh kar ${exactSceneCount} scene ke image prompts bana rahe hain — har line ke liye ek image…`,
+        progress: 69,
+      });
+      try {
+        const generated = await generateImagePromptsWithModel(job, captions, creds);
+        sceneImagePrompts = generated.imagePrompts;
+        await updateMediaJob(job, {
+          characterBible: generated.characterBible,
+          imagePrompts: sceneImagePrompts,
+          step: `Story ke hisaab se ${sceneImagePrompts.length} image prompts ready — characters locked…`,
+        });
+      } catch (err) {
+        sceneImagePrompts = fallbackImagePrompts(job, captions);
+        await updateMediaJob(job, {
+          imagePrompts: sceneImagePrompts,
+          step: `Image-prompt model unavailable (${String(err.message || err).slice(0, 90)}) — story lines se exact prompts bana diye…`,
+        });
+      }
+    }
+    if (job.characterBible) {
+      sceneImagePrompts = sceneImagePrompts.map((prompt) => withCharacterBible(prompt, job.characterBible));
+    }
+    sceneImagePrompts = Array.from({ length: exactSceneCount }, (_, index) => sceneImagePrompts[index] || fallbackImagePrompts(job, [captions[index]])[0]);
     await updateMediaJob(job, {
+      sceneCount: exactSceneCount,
+      imagePrompts: sceneImagePrompts,
       step: job.imageProvider === 'stock'
-        ? 'Har scene ke liye alag copyright-free stock image dhoondh rahe hain (Openverse CC0/PDM)…'
-        : 'Bing se har scene ki alag image ready kar rahe hain — har image check ho rahi hai…',
+        ? 'Har story line ke liye alag copyright-free stock image dhoondh rahe hain (Openverse CC0/PDM)…'
+        : 'Har story line ke liye alag Bing image ban rahi hai — exact 1 line = 1 image…',
       progress: 9,
     });
-    // Ek image me multiple scenes/collage nahi: har scene ka apna prompt aur apni image.
+    // Ek image me multiple scenes/collage nahi: har scene ka apna prompt aur apni unique image.
     const imagePool = await collectJobImages(job, sceneImagePrompts);
-    if (!imagePool.length) throw new Error('Video ke liye koi valid image nahi mili. Provider change karke dobara try karein.');
+    if (imagePool.length !== exactSceneCount) {
+      throw new Error(`Sirf ${imagePool.length}/${exactSceneCount} images bani — duplicate images nahi lagayenge.`);
+    }
     await updateMediaJob(job, {
       imagePoolCount: imagePool.length,
-      step: `${imagePool.length} valid images mil gayi — alag-alag scenes me laga rahe hain…`,
+      step: `${imagePool.length} unique images ready — har ek apni story line se match karti hai…`,
       progress: 12,
     });
 
@@ -1490,7 +1621,7 @@ async function runMediaJob(job) {
           step: `Scene ${index + 1}/${job.sceneCount}: ${job.style} image ban rahi hai…`,
           progress: 10 + Math.round(((index + 0.3) / job.sceneCount) * 60),
         });
-        const bytes = imagePool[index % imagePool.length];
+        const bytes = imagePool[index];
         const file = `scene-${String(index + 1).padStart(2, '0')}.jpg`;
         await writeFile(path.join(directory, file), bytes);
         scene.image = `media-jobs/${job.id}/${file}`;
