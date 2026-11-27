@@ -2260,6 +2260,8 @@ video:-webkit-full-screen {
 .tool-icon:hover { background: #1c1f23; color: #fff; }
 .tool-icon.on { color: #fff; background: #2a2e34; }
 .tool-icon:disabled { opacity: .3; cursor: default; }
+.studio-scene.selected, .studio-beat.selected { border-color: #f0c674; box-shadow: 0 0 0 2px rgba(240,198,116,.55) inset; }
+.audio-track.selected { box-shadow: 0 0 0 2px rgba(240,198,116,.5) inset; background: #191509; }
 .tool-icon svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .tool-icon.track-toggle { width: auto; grid-auto-flow: column; gap: 3px; padding: 0 5px; }
 .tool-icon.track-toggle b { font-size: 8.5px; font-weight: 600; }

@@ -19,6 +19,9 @@ const studioState = {
   audio: null,
   audioPath: '',
   audioBar: null,
+  selection: new Set(),
+  clipboard: readJson('nova.studio.clipboard.v1', []),
+  lastSelected: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -106,6 +109,10 @@ const els = {
   studioNextFrame: $('studioNextFrame'),
   studioSplit: $('studioSplit'),
   studioSnap: $('studioSnap'),
+  studioSelectAll: $('studioSelectAll'),
+  studioCopyClip: $('studioCopyClip'),
+  studioPasteClip: $('studioPasteClip'),
+  studioDeleteClip: $('studioDeleteClip'),
   studioZoomOut: $('studioZoomOut'),
   studioZoomFit: $('studioZoomFit'),
   studioZoomIn: $('studioZoomIn'),
@@ -2772,6 +2779,286 @@ function watchStudioExport(jobId, outputUrl, label) {
   }, 1500);
 }
 
+const STUDIO_CLIPBOARD_KEY = 'nova.studio.clipboard.v1';
+
+function currentStudioJob() {
+  return mediaJobs.find((item) => item.id === studioState.jobId)
+    || mediaJobs.find((item) => item.studio)
+    || null;
+}
+
+function studioClipKey(track, index) {
+  return `${track}:${index}`;
+}
+
+function applyStudioSelection() {
+  document.querySelectorAll('#studio .timeline-dock [data-track][data-index]').forEach((node) => {
+    node.classList.toggle('selected', studioState.selection.has(studioClipKey(node.dataset.track, node.dataset.index)));
+  });
+  const count = studioState.selection.size;
+  if (els.studioCopyClip) els.studioCopyClip.disabled = count === 0;
+  if (els.studioDeleteClip) els.studioDeleteClip.disabled = count === 0;
+  if (els.studioPasteClip) els.studioPasteClip.disabled = !(studioState.clipboard || []).length;
+}
+
+function selectStudioClip(track, index, event = {}) {
+  const key = studioClipKey(track, index);
+  const selection = studioState.selection;
+  if (event.shiftKey && studioState.lastSelected) {
+    const [lastTrack, lastIndexRaw] = String(studioState.lastSelected).split(':');
+    const lastIndex = Number(lastIndexRaw);
+    if (lastTrack === track && Number.isFinite(lastIndex)) {
+      for (let i = Math.min(lastIndex, index); i <= Math.max(lastIndex, index); i += 1) {
+        selection.add(studioClipKey(track, i));
+      }
+    } else {
+      selection.add(key);
+    }
+  } else if (event.ctrlKey || event.metaKey) {
+    if (selection.has(key)) selection.delete(key);
+    else selection.add(key);
+  } else {
+    selection.clear();
+    selection.add(key);
+  }
+  studioState.lastSelected = key;
+  applyStudioSelection();
+}
+
+function handleStudioTrackClick(event, track) {
+  const clip = event.target.closest(`[data-track="${track}"][data-index]`);
+  if (!clip) {
+    studioState.selection.clear();
+    applyStudioSelection();
+    return;
+  }
+  selectStudioClip(track, Number(clip.dataset.index), event);
+  if (!(event.ctrlKey || event.metaKey || event.shiftKey)) {
+    studioSeekTo(Number(clip.dataset.start) || 0);
+  }
+}
+
+function selectAllStudioClips() {
+  const job = currentStudioJob();
+  if (!job) {
+    toast('Pehle Studio me video banayein');
+    return;
+  }
+  studioState.selection.clear();
+  for (const [index, scene] of (job.scenes || []).entries()) {
+    studioState.selection.add(studioClipKey('video', index));
+    if (scene.image || scene.video) studioState.selection.add(studioClipKey('image', index));
+  }
+  if (job.narrationPath || job.audioPath || job.ambientPath) studioState.selection.add('audio:0');
+  applyStudioSelection();
+  toast(`${studioState.selection.size} clips select`);
+}
+
+function copyStudioSelection() {
+  const job = currentStudioJob();
+  if (!job || !studioState.selection.size) {
+    toast('Pehle clip select karein');
+    return;
+  }
+  const items = [];
+  for (const key of studioState.selection) {
+    const [track, indexRaw] = String(key).split(':');
+    const index = Number(indexRaw);
+    if (track === 'audio') {
+      const source = job.narrationPath || job.audioPath || job.ambientPath || '';
+      if (!source) continue;
+      items.push({
+        track: 'audio',
+        source,
+        kind: job.narrationPath ? 'narration' : (job.audioPath ? 'audio' : 'ambient'),
+      });
+      continue;
+    }
+    const scene = job.scenes?.[index];
+    if (!scene) continue;
+    const beat = JSON.parse(JSON.stringify(job.visualBeats?.[index] || {}));
+    if (track === 'video') {
+      items.push({ track: 'video', scene: JSON.parse(JSON.stringify(scene)), beat });
+    } else if (scene.image || scene.video) {
+      items.push({
+        track: 'image',
+        scene: {
+          image: scene.image || null,
+          video: track === 'image' && scene.image ? null : (scene.video || null),
+          imagePrompt: scene.imagePrompt || '',
+          caption: scene.caption || '',
+          status: 'image-ready',
+        },
+        beat,
+      });
+    }
+  }
+  if (!items.length) {
+    toast('Selected clips copy nahi hue');
+    return;
+  }
+  studioState.clipboard = items;
+  try { localStorage.setItem(STUDIO_CLIPBOARD_KEY, JSON.stringify(items)); } catch { /* storage full */ }
+  applyStudioSelection();
+  toast(`${items.length} clip copy`);
+}
+
+async function patchStudioJob(jobId, patch) {
+  const response = await fetch(`/api/media-jobs/${encodeURIComponent(jobId)}/patch`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Timeline edit save nahi hua');
+  return data;
+}
+
+function evenStudioBeats(beats, durationSeconds) {
+  const total = Math.max(1, beats.length);
+  const duration = Number(durationSeconds) || 60;
+  return beats.map((beat, index) => ({
+    ...beat,
+    lineIndex: Number.isFinite(Number(beat?.lineIndex)) ? Number(beat.lineIndex) : index,
+    start: (duration * index) / total,
+    end: (duration * (index + 1)) / total,
+  }));
+}
+
+async function pasteStudioClips() {
+  const job = currentStudioJob();
+  const items = studioState.clipboard || [];
+  if (!job) {
+    toast('Pehle Studio me video banayein');
+    return;
+  }
+  if (!items.length) {
+    toast('Clipboard khaali hai — pehle copy karein');
+    return;
+  }
+  const scenes = JSON.parse(JSON.stringify(job.scenes || []));
+  const beats = JSON.parse(JSON.stringify(job.visualBeats || []));
+  const prompts = JSON.parse(JSON.stringify(job.imagePrompts || []));
+  const duration = Number(job.durationSeconds) || 60;
+  const current = Number(els.studioPreview?.currentTime) || Number(studioState.audio?.currentTime) || 0;
+  let at = Math.max(0, Math.min(scenes.length, Math.round((current / duration) * scenes.length)));
+  const patch = {};
+  for (const item of items) {
+    if (item.track === 'audio') {
+      if (!item.source) continue;
+      if (item.kind === 'narration') patch.narrationPath = item.source;
+      else if (item.kind === 'audio') patch.audioPath = item.source;
+      else patch.ambientPath = item.source;
+      continue;
+    }
+    const scene = JSON.parse(JSON.stringify(item.scene || {}));
+    scene.index = at + 1;
+    scene.status = item.track === 'image' ? 'image-ready' : (scene.status || 'ready');
+    if (item.track === 'image') scene.video = null;
+    scenes.splice(at, 0, scene);
+    beats.splice(at, 0, JSON.parse(JSON.stringify(item.beat || { prompt: scene.imagePrompt || '' })));
+    prompts.splice(at, 0, scene.imagePrompt || '');
+    at += 1;
+  }
+  patch.scenes = scenes;
+  patch.visualBeats = evenStudioBeats(beats, duration);
+  patch.imagePrompts = prompts;
+  patch.sceneCount = scenes.length;
+  patch.status = 'awaiting-render';
+  patch.progress = 75;
+  patch.outputUrl = null;
+  patch.output = null;
+  patch.step = `${items.length} clip paste ho gaye — final render dobara karein`;
+  try {
+    await patchStudioJob(job.id, patch);
+    await loadMediaJobs();
+    studioState.selection.clear();
+    studioState.lastSelected = null;
+    applyStudioSelection();
+    toast(`${items.length} clip paste ho gaye`);
+  } catch (error) {
+    toast(error?.message || 'Paste fail ho gaya');
+  }
+}
+
+async function deleteStudioSelection() {
+  const job = currentStudioJob();
+  if (!job || !studioState.selection.size) {
+    toast('Pehle delete ke liye clip select karein');
+    return;
+  }
+  const scenes = JSON.parse(JSON.stringify(job.scenes || []));
+  const beats = JSON.parse(JSON.stringify(job.visualBeats || []));
+  const prompts = JSON.parse(JSON.stringify(job.imagePrompts || []));
+  const videoIndices = new Set();
+  const imageIndices = new Set();
+  const patch = {};
+  for (const key of studioState.selection) {
+    const [track, indexRaw] = String(key).split(':');
+    const index = Number(indexRaw);
+    if (track === 'video' && Number.isInteger(index)) videoIndices.add(index);
+    else if (track === 'image' && Number.isInteger(index)) imageIndices.add(index);
+    else if (track === 'audio') {
+      patch.narrationPath = null;
+      patch.audioPath = null;
+      patch.ambientPath = null;
+    }
+  }
+  for (const index of imageIndices) {
+    if (videoIndices.has(index) || !scenes[index]) continue;
+    scenes[index].image = null;
+    if (!scenes[index].video) videoIndices.add(index);
+  }
+  for (const index of [...videoIndices].sort((a, b) => b - a)) {
+    scenes.splice(index, 1);
+    beats.splice(index, 1);
+    prompts.splice(index, 1);
+  }
+  patch.scenes = scenes;
+  patch.visualBeats = evenStudioBeats(beats, job.durationSeconds);
+  patch.imagePrompts = prompts;
+  patch.sceneCount = scenes.length;
+  patch.status = 'awaiting-render';
+  patch.progress = 75;
+  patch.outputUrl = null;
+  patch.output = null;
+  patch.step = 'Timeline edit hua — final render dobara karein';
+  try {
+    await patchStudioJob(job.id, patch);
+    await loadMediaJobs();
+    studioState.selection.clear();
+    studioState.lastSelected = null;
+    applyStudioSelection();
+    toast('Selected clips delete ho gaye');
+  } catch (error) {
+    toast(error?.message || 'Delete fail ho gaya');
+  }
+}
+
+function handleStudioKey(event) {
+  if (!els.studio || els.studio.hidden) return;
+  const tag = String(event.target?.tagName || '');
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return;
+  const mod = event.ctrlKey || event.metaKey;
+  const key = String(event.key || '').toLowerCase();
+  if (mod && key === 'a') {
+    event.preventDefault();
+    selectAllStudioClips();
+  } else if (mod && key === 'c') {
+    event.preventDefault();
+    copyStudioSelection();
+  } else if (mod && key === 'v') {
+    event.preventDefault();
+    pasteStudioClips();
+  } else if (event.key === 'Delete' || event.key === 'Backspace') {
+    event.preventDefault();
+    deleteStudioSelection();
+  } else if (event.key === 'Escape') {
+    studioState.selection.clear();
+    applyStudioSelection();
+  }
+}
+
 function setupStudioTimeline() {
   if (studioState.timelineReady) return;
   studioState.timelineReady = true;
@@ -2798,17 +3085,19 @@ function setupStudioTimeline() {
     const ratio = studioClamp((event.clientX - rect.left - 92) / usable, 0, 1);
     studioSeekTo(ratio * duration);
   });
-  for (const track of [els.studioTimeline, els.studioImageTimeline]) {
-    track?.addEventListener('click', (event) => {
-      const clip = event.target.closest('[data-start]');
-      if (clip) studioSeekTo(Number(clip.dataset.start) || 0);
-    });
-  }
+  els.studioTimeline?.addEventListener('click', (event) => handleStudioTrackClick(event, 'video'));
+  els.studioImageTimeline?.addEventListener('click', (event) => handleStudioTrackClick(event, 'image'));
   els.studioAudioTrack?.addEventListener('click', (event) => {
+    handleStudioTrackClick(event, 'audio');
     const rect = els.studioAudioTrack.getBoundingClientRect();
     const ratio = studioClamp((event.clientX - rect.left - 92) / Math.max(1, rect.width - 92), 0, 1);
     studioSeekTo(ratio * studioVideoDuration());
   });
+  els.studioSelectAll?.addEventListener('click', selectAllStudioClips);
+  els.studioCopyClip?.addEventListener('click', copyStudioSelection);
+  els.studioPasteClip?.addEventListener('click', pasteStudioClips);
+  els.studioDeleteClip?.addEventListener('click', deleteStudioSelection);
+  document.addEventListener('keydown', handleStudioKey);
   els.studioExportBtn?.addEventListener('click', exportStudioMedia);
   els.studioMuteVideo?.addEventListener('click', () => toggleStudioTrack('video'));
   els.studioMuteImage?.addEventListener('click', () => toggleStudioTrack('image'));
@@ -3238,6 +3527,7 @@ function renderStudioDashboard() {
     els.studioRemaining.innerHTML = '<span class="studio-hint">—</span>';
     els.studioSave.textContent = 'Autosave on';
     els.studioResumeBtn.hidden = true;
+    applyStudioSelection();
     return;
   }
   studioState.jobId = job.id;
@@ -3269,6 +3559,8 @@ function renderStudioDashboard() {
     const node = document.createElement('div');
     const isDone = ['done', 'ready', 'clip-ready', 'image-ready'].includes(scene.status);
     node.className = `studio-scene${isDone ? ' done' : ''}${job.status === 'rendering' && index === scenes.length - 1 ? ' active' : ''}`;
+    node.dataset.track = 'video';
+    node.dataset.index = String(index);
     const source = scene.image || scene.video;
     if (source) {
       const thumb = document.createElement(scene.image ? 'img' : 'video');
@@ -3301,6 +3593,7 @@ function renderStudioDashboard() {
   renderStudioAudioTrack(job);
   renderStudioRuler(Number(job.durationSeconds) || studioVideoDuration());
   updateStudioPlayhead();
+  applyStudioSelection();
   els.studioSceneCount.textContent = scenes.length ? `· ${done}/${scenes.length} ready` : '';
 
   const stageOrder = ['story', 'assets', 'voice', 'render'];
@@ -3380,7 +3673,10 @@ function renderStudioAudioTrack(job) {
 function renderStudioImageTimeline(job, scenes) {
   if (!els.studioImageTimeline) return;
   els.studioImageTimeline.replaceChildren();
-  if (!scenes.length) {
+  const beats = scenes
+    .map((scene, index) => ({ scene, index }))
+    .filter(({ scene }) => Boolean(scene.image || scene.video));
+  if (!beats.length) {
     const hint = document.createElement('div');
     hint.className = 'studio-hint';
     hint.textContent = 'Image beats yahan dikhenge.';
@@ -3388,12 +3684,14 @@ function renderStudioImageTimeline(job, scenes) {
     return;
   }
   const duration = Number(job.durationSeconds) || 60;
-  scenes.forEach((scene, index) => {
+  for (const { scene, index } of beats) {
     const beat = job.visualBeats?.[index];
     const start = Number.isFinite(Number(beat?.start)) ? Number(beat.start) : (duration / scenes.length) * index;
     const end = Number.isFinite(Number(beat?.end)) ? Number(beat.end) : start + duration / scenes.length;
     const node = document.createElement('div');
     node.className = 'studio-beat';
+    node.dataset.track = 'image';
+    node.dataset.index = String(index);
     node.dataset.start = String(start);
     const image = scene.image || scene.video;
     if (image) {
@@ -3406,7 +3704,7 @@ function renderStudioImageTimeline(job, scenes) {
     label.textContent = `${index + 1} · ${formatStudioClock(end - start)}`;
     node.append(label);
     els.studioImageTimeline.append(node);
-  });
+  }
 }
 
 function renderStudioPills(container, items, className) {

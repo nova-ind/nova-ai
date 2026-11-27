@@ -318,6 +318,19 @@
               <svg viewBox="0 0 24 24"><path d="M6 4v8a6 6 0 0 0 12 0V4h-4v8a2 2 0 0 1-4 0V4z" /></svg>
             </button>
             <span class="tool-sep"></span>
+            <button class="tool-icon" id="studioSelectAll" type="button" title="Select all clips (Ctrl+A)" aria-label="Select all clips">
+              <svg viewBox="0 0 24 24"><path d="M5 4h4v4H5zM15 4h4v4h-4zM5 16h4v4H5zM15 16h4v4h-4zM9 6h6M9 18h6" /></svg>
+            </button>
+            <button class="tool-icon" id="studioCopyClip" type="button" title="Copy selected clips (Ctrl+C)" aria-label="Copy selected clips" disabled>
+              <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
+            </button>
+            <button class="tool-icon" id="studioPasteClip" type="button" title="Paste at playhead (Ctrl+V)" aria-label="Paste clips" disabled>
+              <svg viewBox="0 0 24 24"><path d="M9 4h6v4H9zM6 6h2v4h8V6h2v14H6z" /></svg>
+            </button>
+            <button class="tool-icon" id="studioDeleteClip" type="button" title="Delete selected clips (Delete)" aria-label="Delete selected clips" disabled>
+              <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v6M14 11v6" /></svg>
+            </button>
+            <span class="tool-sep"></span>
             <button class="tool-icon track-toggle" id="studioMuteVideo" type="button" title="Mute video track" aria-label="Mute video track">
               <svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zM17 9l4 6M21 9l-4 6" /></svg><b>V</b>
             </button>
@@ -395,7 +408,7 @@
         </div>
         <div class="timeline-track timeline-track--audio">
           <div class="track-head"><strong>Audio</strong><small>A1</small></div>
-          <div class="audio-track" id="studioAudioTrack"><div class="audio-wave"><i></i></div><span class="audio-empty">Voice track story ke baad yahan aayega…</span></div>
+          <div class="audio-track" id="studioAudioTrack" data-track="audio" data-index="0"><div class="audio-wave"><i></i></div><span class="audio-empty">Voice track story ke baad yahan aayega…</span></div>
         </div>
         <div class="playhead" id="studioPlayhead"></div>
         <div class="studio-log" id="studioLog">

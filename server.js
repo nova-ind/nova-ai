@@ -7442,7 +7442,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    const mediaJobMatch = /^\/api\/media-jobs\/([^/]+)(?:\/(render|error|status|retry))?$/.exec(url.pathname);
+    const mediaJobMatch = /^\/api\/media-jobs\/([^/]+)(?:\/(render|error|status|retry|patch))?$/.exec(url.pathname);
     if (mediaJobMatch) {
       const job = mediaJobs.find((item) => item.id === mediaJobMatch[1]);
       if (!job) return sendJson(res, 404, { error: 'Media job not found.' });
@@ -7501,6 +7501,37 @@ const server = http.createServer(async (req, res) => {
           step: String(payload.step || job.step).slice(0, 300),
           progress: Math.max(0, Math.min(100, Number(payload.progress) || 0)),
         });
+        return sendJson(res, 200, job);
+      }
+
+      if (req.method === 'POST' && mediaJobMatch[2] === 'patch') {
+        // Timeline editing — select/copy/paste/delete ke baad yahin autosave hota hai.
+        if (mediaRunning.has(job.id)) {
+          return sendJson(res, 409, { error: 'Job abhi chal raha hai — edit tabhi karein jab render ruk gaya ho.' });
+        }
+        let payload;
+        try {
+          payload = JSON.parse((await readBody(req)) || '{}');
+        } catch {
+          return sendJson(res, 400, { error: 'Invalid JSON body.' });
+        }
+        const patch = {};
+        for (const key of ['scenes', 'visualBeats', 'imagePrompts', 'lineImagePrompts']) {
+          if (Array.isArray(payload[key])) patch[key] = payload[key].slice(0, 500);
+        }
+        for (const key of ['audioPath', 'narrationPath', 'ambientPath', 'output', 'outputUrl', 'step']) {
+          if (key in payload) patch[key] = payload[key] == null ? null : String(payload[key]).slice(0, 2000);
+        }
+        if ('sceneCount' in payload) {
+          patch.sceneCount = Math.max(0, Math.min(500, Number(payload.sceneCount) || 0));
+        }
+        if ('progress' in payload) {
+          patch.progress = Math.max(0, Math.min(100, Number(payload.progress) || 0));
+        }
+        if (['done', 'awaiting-render', 'error', 'assets'].includes(payload.status)) {
+          patch.status = payload.status;
+        }
+        await updateMediaJob(job, patch);
         return sendJson(res, 200, job);
       }
 
