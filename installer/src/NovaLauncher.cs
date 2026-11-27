@@ -45,17 +45,9 @@ namespace NovaDesktop
     internal sealed class MainForm : Form
     {
         private readonly NotifyIcon trayIcon;
-        private readonly Panel topBar;
         private readonly Panel loadingOverlay;
-        private readonly PictureBox logoBox;
-        private readonly Label titleLabel;
-        private readonly Label statusLabel;
         private readonly Label loadingLabel;
         private readonly WebView2 webView;
-        private readonly Button bingButton;
-        private readonly Button browserButton;
-        private readonly Button restartButton;
-        private readonly Button exitButton;
         private readonly string appDir;
         private readonly string logPath;
         private readonly object logLock = new object();
@@ -112,58 +104,6 @@ namespace NovaDesktop
             loadingOverlay.Controls.Add(loadingLabel);
             Controls.Add(loadingOverlay);
 
-            topBar = new Panel();
-            topBar.Dock = DockStyle.Top;
-            topBar.Height = 64;
-            topBar.BackColor = Color.FromArgb(12, 13, 15);
-
-            logoBox = new PictureBox();
-            logoBox.Size = new Size(34, 34);
-            logoBox.Location = new Point(12, 15);
-            logoBox.SizeMode = PictureBoxSizeMode.Zoom;
-            logoBox.BackColor = Color.Transparent;
-            try
-            {
-                Stream resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("NovaLogo.png");
-                if (resource != null)
-                {
-                    logoBox.Image = Image.FromStream(resource);
-                }
-            }
-            catch
-            {
-                // Installer icon still carries the same logo if the embedded PNG is unavailable.
-            }
-
-            titleLabel = new Label();
-            titleLabel.Text = string.Empty;
-            titleLabel.Visible = false;
-
-            statusLabel = new Label();
-            statusLabel.Text = "Starting local service…";
-            statusLabel.Location = new Point(56, 22);
-            statusLabel.Size = new Size(420, 20);
-            statusLabel.ForeColor = Color.FromArgb(150, 156, 164);
-
-            bingButton = MakeButton("Bing Login", 690);
-            bingButton.Size = new Size(96, 36);
-            browserButton = MakeButton("Browser", 800);
-            restartButton = MakeButton("Restart", 940);
-            exitButton = MakeButton("Exit", 1080);
-            bingButton.Click += BingButton_Click;
-            browserButton.Click += BrowserButton_Click;
-            restartButton.Click += RestartButton_Click;
-            exitButton.Click += ExitButton_Click;
-
-            topBar.Controls.Add(logoBox);
-            topBar.Controls.Add(titleLabel);
-            topBar.Controls.Add(statusLabel);
-            topBar.Controls.Add(bingButton);
-            topBar.Controls.Add(browserButton);
-            topBar.Controls.Add(restartButton);
-            topBar.Controls.Add(exitButton);
-            Controls.Add(topBar);
-
             trayIcon = new NotifyIcon();
             trayIcon.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             trayIcon.Text = "Nova AI";
@@ -172,6 +112,7 @@ namespace NovaDesktop
             trayIcon.ContextMenu = new ContextMenu(new[]
             {
                 new MenuItem("Open Nova", TrayIcon_DoubleClick),
+                new MenuItem("Open in browser", BrowserButton_Click),
                 new MenuItem("Bing login", BingButton_Click),
                 new MenuItem("Restart service", RestartButton_Click),
                 new MenuItem("-"),
@@ -193,21 +134,6 @@ namespace NovaDesktop
             StartWorker(false);
         }
 
-        private Button MakeButton(string text, int x)
-        {
-            Button button = new Button();
-            button.Text = text;
-            button.Location = new Point(x, 13);
-            button.Size = new Size(78, 36);
-            button.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            button.FlatStyle = FlatStyle.Flat;
-            button.FlatAppearance.BorderColor = Color.FromArgb(70, 72, 76);
-            button.BackColor = Color.FromArgb(24, 25, 27);
-            button.ForeColor = Color.FromArgb(240, 240, 240);
-            button.Cursor = Cursors.Hand;
-            return button;
-        }
-
         private void WebView_CoreWebView2InitializationCompleted(object sender, CoreWebView2InitializationCompletedEventArgs e)
         {
             if (!e.IsSuccess)
@@ -223,17 +149,6 @@ namespace NovaDesktop
             webView.CoreWebView2.ProcessFailed += (s, failed) =>
             {
                 WriteLog("WebView2 process failed — app window recover kar raha hai.");
-                try
-                {
-                    BeginInvoke(new MethodInvoker(() =>
-                    {
-                        statusLabel.Text = "App window recover ho raha hai…";
-                    }));
-                }
-                catch
-                {
-                    // Form already closing.
-                }
             };
             webViewReady = true;
             TryNavigate();
@@ -260,7 +175,6 @@ namespace NovaDesktop
                         normalWindowState = WindowState;
                         normalBorderStyle = FormBorderStyle;
                         videoFullscreen = true;
-                        topBar.Visible = false;
                         FormBorderStyle = FormBorderStyle.None;
                         WindowState = FormWindowState.Maximized;
                         webView.BringToFront();
@@ -270,7 +184,6 @@ namespace NovaDesktop
                         videoFullscreen = false;
                         WindowState = normalWindowState;
                         FormBorderStyle = normalBorderStyle;
-                        topBar.Visible = true;
                     }
                 }));
             }
@@ -396,7 +309,6 @@ namespace NovaDesktop
             if (e.IsSuccess)
             {
                 loadingOverlay.Visible = false;
-                statusLabel.Text = "Ready";
             }
         }
 
@@ -405,7 +317,6 @@ namespace NovaDesktop
             WriteLog("WebView2 unavailable: " + message);
             webViewReady = false;
             loadingOverlay.Visible = false;
-            statusLabel.Text = "App browser unavailable — browser fallback";
             if (!webViewFailedShown)
             {
                 webViewFailedShown = true;
@@ -433,7 +344,6 @@ namespace NovaDesktop
             }
 
             loadingOverlay.Visible = false;
-            statusLabel.Text = "Ready";
         }
 
         private void StartWorker(bool restart)
@@ -443,7 +353,7 @@ namespace NovaDesktop
                 return;
             }
 
-            statusLabel.Text = restart ? "Restarting local service…" : "Starting local service…";
+            WriteLog(restart ? "Restarting local service." : "Starting local service.");
             loadingOverlay.Visible = true;
             loadingLabel.Text = restart ? "Service restart ho raha hai…" : "Shuru ho raha hai…";
             // Restart par page reload mat karein — video job chalte hue refresh loop ban jata tha.
@@ -511,7 +421,6 @@ namespace NovaDesktop
             {
                 serverReady = false;
                 loadingOverlay.Visible = false;
-                statusLabel.Text = "Startup failed";
                 WriteLog("ERROR: " + e.Error.Message);
                 MessageBox.Show(this, e.Error.Message, "Nova AI", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -639,7 +548,7 @@ namespace NovaDesktop
 
         private void RestartAfterCrash()
         {
-            statusLabel.Text = "Service restarted automatically…";
+            WriteLog("Service restarted automatically.");
             StartWorker(true);
         }
 
@@ -772,7 +681,6 @@ namespace NovaDesktop
                     }
                 }
 
-                statusLabel.Text = "Bing login tab opened — ek baar sign in karein";
                 trayIcon.ShowBalloonTip(3000, "Nova AI", "Bing login tab opened. Sign in once; profile save ho jayega.", ToolTipIcon.Info);
             }
             catch (Exception error)
