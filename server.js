@@ -1580,6 +1580,9 @@ function validImageBytes(bytes) {
   let width = 0;
   let height = 0;
   if (isPng) {
+    // Truncated PNG me IEND chunk nahi hota — aise hi file FFmpeg ko tod deti hai.
+    const iend = bytes.lastIndexOf('IEND');
+    if (iend < 0 || bytes.length - iend > 16) return false;
     width = bytes.readUInt32BE(16);
     height = bytes.readUInt32BE(20);
   } else if (isWebp) {
@@ -1592,6 +1595,8 @@ function validImageBytes(bytes) {
       height = bytes.readUInt16LE(28) & 0x3fff;
     }
   } else {
+    // JPEG ka EOI marker (FFD9) last bytes me hona chahiye — warna file adhoori hai.
+    if (bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) return false;
     for (let offset = 2; offset + 9 < bytes.length;) {
       if (bytes[offset] !== 0xff) { offset += 1; continue; }
       const marker = bytes[offset + 1];
