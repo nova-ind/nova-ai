@@ -1643,23 +1643,25 @@ async function collectJobImages(job, prompts, directory = null, onImage = null) 
       `${firstSentence.slice(0, 220)}. ${movieLook}${job.style ? `${job.style} style, ` : ''}single coherent scene, ${frameWord}, no collage, no panels, no text.`,
       `${scenePrompt.slice(0, 260)}. ${movieLook}cinematic composition, one coherent scene, ${frameWord}, no collage, no panels, no text.`,
     ];
-    const file = directory
-      ? path.join(directory, `scene-${String(index + 1).padStart(2, '0')}.jpg`)
-      : null;
+    const baseName = `scene-${String(index + 1).padStart(2, '0')}`;
+    let file = null;
     let chosen = null;
     // Retry par pehle se bani image reuse karo — itni mehnat dobara na ho.
-    if (file) {
-      try {
-        await access(file);
-        const bytes = await readFile(file);
-        if (validImageBytes(bytes)) {
+    if (directory) {
+      for (const ext of ['jpg', 'png', 'webp']) {
+        const candidate = path.join(directory, `${baseName}.${ext}`);
+        try {
+          await access(candidate);
+          const bytes = await readFile(candidate);
+          if (!validImageBytes(bytes)) continue;
           const hash = createHash('sha1').update(bytes).digest('hex');
-          if (!usedHashes.has(hash)) {
-            usedHashes.add(hash);
-            chosen = bytes;
-          }
-        }
-      } catch { /* file nahi hai ya corrupt — dobara banayein */ }
+          if (usedHashes.has(hash)) continue;
+          usedHashes.add(hash);
+          chosen = bytes;
+          file = candidate;
+          break;
+        } catch { /* file nahi hai ya corrupt — dobara banayein */ }
+      }
     }
     // Ek scene fail ho to usi scene ko dobara banao; kabhi agle scene ki image repeat nahi.
     // Bing 2 baar fail ho to free fallback providers — poori video rukti nahi.
@@ -1684,7 +1686,13 @@ async function collectJobImages(job, prompts, directory = null, onImage = null) 
     if (!chosen) {
       throw new Error(`Scene ${index + 1}/${list.length} ki unique image nahi bani. Bing/login check karke dobara try karein.`);
     }
-    if (file) await writeFile(file, chosen);
+    // Extension asli bytes se match karo (ChatGPT PNG deta hai) — warna browser/FFmpeg confuse hota hai.
+    if (directory) {
+      const ext = chosen[0] === 0x89 && chosen.toString('ascii', 1, 4) === 'PNG' ? 'png'
+        : (chosen.toString('ascii', 0, 4) === 'RIFF' && chosen.toString('ascii', 8, 12) === 'WEBP' ? 'webp' : 'jpg');
+      file = path.join(directory, `${baseName}.${ext}`);
+      await writeFile(file, chosen);
+    }
     const relative = file ? `media-jobs/${job.id}/${path.basename(file)}` : null;
     pool.push(chosen);
     await updateMediaJob(job, {
@@ -2182,6 +2190,8 @@ async function renderExistingStudioJob(job) {
     status: 'rendering',
     stage: 'render',
     progress: 75,
+    // Browser side render ko rok do — server FFmpeg hi render karega (double render nahi).
+    renderMode: 'server',
     step: 'Saved images + audio track se final video render ho raha hai…',
   });
   assembleVideoWithFfmpeg(job, directory, { narration, ambient }).catch(async (err) => {
@@ -2499,7 +2509,9 @@ async function runMediaJob(job) {
           progress: 65 + Math.round(((index + 0.3) / job.sceneCount) * 5),
         });
         const bytes = imagePool[index];
-        const file = `scene-${String(index + 1).padStart(2, '0')}.jpg`;
+        const ext = bytes[0] === 0x89 && bytes.toString('ascii', 1, 4) === 'PNG' ? 'png'
+          : (bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' ? 'webp' : 'jpg');
+        const file = `scene-${String(index + 1).padStart(2, '0')}.${ext}`;
         await writeFile(path.join(directory, file), bytes);
         scene.image = `media-jobs/${job.id}/${file}`;
         scene.status = 'image-ready';
@@ -4311,6 +4323,10 @@ async function chatGptCookiesFromBrowser() {
 // ChatGPT generation bhi isi dedicated browser me hoti hai — headless me Cloudflare
 // challenge aata hai, isliye visible (but background) profile use hota hai.
 // IMPORTANT: hamesha EK hi tab reuse karo — har image ke liye naya tab nahi khulna chahiye.
+// Active ChatGPT tab track karo — evaluate hamesha ISI tab par chale, taaki
+// ek hi NOVA-AI conversation me image bane (multi-tab bug fix).
+let chatGptActiveTarget = null;
+
 async function chatGptGenTarget(openUrl = '') {
   await ensureChatGptBrowser();
   const response = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/list`, {
@@ -4329,16 +4345,36 @@ async function chatGptGenTarget(openUrl = '') {
         method: 'PUT',
         signal: AbortSignal.timeout(8000),
       });
-      if (created.ok) return created.json();
+      if (created.ok) {
+        chatGptActiveTarget = created.json();
+        return chatGptActiveTarget;
+      }
     } catch {
       /* ignore */
     }
     throw new Error('ChatGPT browser me page nahi mila.');
   }
+  chatGptActiveTarget = preferred;
   if (openUrl && !String(preferred.url || '').includes('/c/')) {
     await cdpCommand(preferred.webSocketDebuggerUrl, 'Page.navigate', { url: openUrl }).catch(() => {});
   }
   return preferred;
+}
+
+// Tab ko exactly NOVA-AI chat par le jao — ek hi tab, wahi conversation.
+async function chatGptEnsureChatUrl(target, url, chatId) {
+  const needle = chatId ? `/c/${chatId}` : 'chatgpt.com';
+  const href = await chatGptGenEvaluate('location.href').catch(() => '');
+  if (!String(href || '').includes(needle)) {
+    await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', { url }).catch(() => {});
+  }
+  const started = Date.now();
+  while (Date.now() - started < 60_000) {
+    const current = await chatGptGenEvaluate('location.href').catch(() => '');
+    if (String(current || '').includes(needle)) return true;
+    await sleep(1000);
+  }
+  return false;
 }
 
 // Duplicate ChatGPT tabs band kar do — sirf ek NOVA-AI tab rahe.
@@ -4348,10 +4384,12 @@ async function closeExtraChatGptTabs(keepId = '') {
       signal: AbortSignal.timeout(5000),
     });
     const targets = await response.json();
-    const pages = targets.filter((item) => item.type === 'page' && item.url.includes('chatgpt.com'));
+    const pages = targets.filter((item) => item.type === 'page'
+      && (item.url.includes('chatgpt.com') || item.url === 'about:blank' || item.url === ''));
     if (pages.length <= 1) return 0;
     const keep = pages.find((item) => item.id === keepId)
       || pages.find((item) => item.url.includes('/c/'))
+      || pages.find((item) => item.url.includes('chatgpt.com'))
       || pages[0];
     let closed = 0;
     for (const page of pages) {
@@ -4370,7 +4408,25 @@ async function closeExtraChatGptTabs(keepId = '') {
 }
 
 async function chatGptGenEvaluate(expression) {
-  const target = await chatGptGenTarget();
+  // Hamesha active NOVA-AI tab par evaluate karo — tab band/naya ho to dobara dhoondo.
+  let target = chatGptActiveTarget;
+  if (target) {
+    try {
+      const list = await (await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/list`, {
+        signal: AbortSignal.timeout(5000),
+      })).json();
+      const alive = list.find((item) => item.id === target.id && item.type === 'page');
+      if (alive) target = alive;
+      else {
+        chatGptActiveTarget = null;
+        target = await chatGptGenTarget();
+      }
+    } catch {
+      /* list fail — current target hi use karo */
+    }
+  } else {
+    target = await chatGptGenTarget();
+  }
   const result = await cdpCommand(target.webSocketDebuggerUrl, 'Runtime.evaluate', {
     expression,
     returnByValue: true,
@@ -4539,6 +4595,11 @@ const CHATGPT_IMAGE_CAPTURE_SCRIPT = (urls) => `(async () => {
     return 'ERROR:' + String(e);
   }
 })()`;
+
+// ChatGPT image bytes page se chunk me aate hain. Chunk size ko 3 se divisible
+// rakhna zaroori hai — warna base64 me '=' padding aa kar decoder pehle chunk
+// pe ruk jata hai aur image truncate ho jati hai.
+const CHATGPT_CHUNK_BYTES = 3 * 174762; // 524286 bytes
 
 const CHATGPT_IMAGE_CHUNK_SCRIPT = (index, offset, size) => `(() => {
   const store = window.__novaImgStore || [];
@@ -4783,9 +4844,11 @@ async function generateChatGptImages(prompt, count = 1) {
       : 'https://chatgpt.com/';
     // SIRF EK TAB — naya tab kabhi nahi khulna chahiye.
     const target = await chatGptGenTarget(url);
-    if (chatId && !String(target.url || '').includes(`/c/${chatId}`)) {
-      await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', { url });
-      await sleep(3000);
+    if (chatId) {
+      // Tab sach me NOVA-AI chat par hai ya nahi — verify karo, warna prompt
+      // homepage par chala jata aur image wahi chat me banti (project switch bug).
+      const onChat = await chatGptEnsureChatUrl(target, url, chatId);
+      if (!onChat) throw new Error('NOVA-AI chat tab nahi khula — ChatGPT login dobara check karein.');
     }
     const ready = await chatGptWaitReady();
     if (!ready) throw new Error('ChatGPT composer nahi mila — login dobara check karein.');
@@ -4815,22 +4878,27 @@ async function generateChatGptImages(prompt, count = 1) {
       const urls = JSON.parse(found);
       const freshImages = [];
       // 1) blob:/data: URLs — bytes page ke andar se hi lo.
-      const localUrls = urls.filter((u) => u.startsWith('blob:') || u.startsWith('data:'));
+      // Sirf jitni images chahiye utni hi capture karo (purani chat images heavy hoti hain).
+      const localUrls = urls.filter((u) => u.startsWith('blob:') || u.startsWith('data:')).slice(-wanted);
       if (localUrls.length) {
         const meta = await chatGptGenEvaluate(CHATGPT_IMAGE_CAPTURE_SCRIPT(localUrls)).catch(() => '');
+        console.log(`[chatgpt] capture meta=${String(meta).slice(0, 300)}`);
         if (meta && !String(meta).startsWith('ERROR:')) {
           const list = JSON.parse(meta);
           for (let index = 0; index < list.length; index += 1) {
             const parts = [];
-            for (let offset = 0; offset < list[index].length; offset += 512 * 1024) {
+            for (let offset = 0; offset < list[index].length; offset += CHATGPT_CHUNK_BYTES) {
               const chunk = await chatGptGenEvaluate(
-                CHATGPT_IMAGE_CHUNK_SCRIPT(index, offset, 512 * 1024),
-              ).catch(() => '');
+                CHATGPT_IMAGE_CHUNK_SCRIPT(index, offset, CHATGPT_CHUNK_BYTES),
+              ).catch((err) => { console.log(`[chatgpt] chunk ${index}@${offset} error: ${err?.message || err}`); return ''; });
               if (!chunk) break;
-              parts.push(chunk);
+              const part = Buffer.from(chunk, 'base64');
+              if (!part.length) break;
+              parts.push(part);
             }
             if (parts.length) {
-              const bytes = Buffer.from(parts.join(''), 'base64');
+              const bytes = Buffer.concat(parts);
+              console.log(`[chatgpt] image ${index} bytes=${bytes.length}/${list[index].length}`);
               if (validImageBytes(bytes)) freshImages.push(bytes);
             }
           }
@@ -8959,14 +9027,13 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (req.method === 'DELETE') {
+        // Active render ko galti se mat delete karo — user ke "cancel" button
+        // hi force header bhejta hai. Isse studio project ka data bacha rehta hai.
+        if (job.status === 'rendering' && String(req.headers['x-nova-force'] || '') !== '1') {
+          return sendJson(res, 409, { error: 'Job abhi render ho raha hai — pehle cancel karein.' });
+        }
         cancelledJobs.add(job.id);
-        // Debug: kaun delete kar raha hai — log rakh lo.
-        await writeFile(
-          path.join(WORKSPACE, 'media-job-deletes.log'),
-          `${new Date().toISOString()} ${job.id} studio=${job.studio ? 1 : 0} assets=${job.assetsOnly ? 1 : 0}`
-          + ` ua=${String(req.headers['user-agent'] || '').slice(0, 90)}\n`,
-          { flag: 'a' },
-        ).catch(() => {});
+        console.log(`[media-job] delete ${job.id} studio=${job.studio ? 1 : 0} assets=${job.assetsOnly ? 1 : 0}`);
         ffmpegChildren.get(job.id)?.kill('SIGKILL');
         mediaJobs = mediaJobs.filter((item) => item.id !== job.id);
         mediaTtsCredentials.delete(job.id);

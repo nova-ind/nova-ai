@@ -2733,9 +2733,8 @@ function updateStudioPlayhead() {
 
 function syncStudioPlayButton() {
   if (!els.studioTimelinePlay) return;
-  const job = currentStudioJob();
-  const projectVideo = Boolean(job?.outputUrl) && Boolean(els.studioPreview?.src);
-  const paused = projectVideo
+  const hasVideo = Boolean(els.studioPreview?.getAttribute('src'));
+  const paused = hasVideo
     ? !els.studioPreview || els.studioPreview.paused
     : !(studioState.audio && !studioState.audio.paused);
   els.studioTimelinePlay.innerHTML = paused
@@ -2759,10 +2758,10 @@ function studioSeekTo(seconds) {
 
 async function toggleStudioPlayback() {
   const job = currentStudioJob();
-  // Current project ka final video hai? Nahi to current project ki voice track.
-  const projectVideo = Boolean(job?.outputUrl) && Boolean(els.studioPreview?.src);
-  const projectAudio = Boolean(studioState.audio);
-  if (!projectVideo && !projectAudio) {
+  // Preview me video loaded hai? Nahi to current project ki voice track.
+  const hasVideo = Boolean(els.studioPreview?.getAttribute('src'));
+  const hasAudio = Boolean(studioState.audio);
+  if (!hasVideo && !hasAudio) {
     // Koi video nahi bana abhi — purana finished video play karo.
     const fallback = mediaJobs.find((item) => item.studio && item.outputUrl);
     if (fallback && els.studioPreview) {
@@ -2770,6 +2769,7 @@ async function toggleStudioPlayback() {
       els.studioPreview.dataset.src = fallback.outputUrl;
       els.studioPreview.dataset.job = fallback.id;
       els.studioPreviewEmpty.hidden = true;
+      studioState.audio?.pause();
       try {
         await els.studioPreview.play();
         syncStudioPlayButton();
@@ -2783,10 +2783,14 @@ async function toggleStudioPlayback() {
     return;
   }
   try {
-    if (projectVideo) {
-      if (els.studioPreview.paused) await els.studioPreview.play();
-      else els.studioPreview.pause();
+    if (hasVideo) {
+      // Video me apni audio hai — narration track pause taaki double audio na chale.
+      if (els.studioPreview.paused) {
+        studioState.audio?.pause();
+        await els.studioPreview.play();
+      } else els.studioPreview.pause();
     } else if (studioState.audio.paused) {
+      els.studioPreview?.pause();
       await studioState.audio.play();
     } else {
       studioState.audio.pause();
@@ -4784,12 +4788,19 @@ function syncMediaJobs(list) {
     }
     const lastTouch = Number(job.updatedAt || job.createdAt || 0);
     if (job.status === 'rendering' && Date.now() - lastTouch > 60_000) {
-      // Page/renderer refresh ke baad rendering status atak jata hai — dobara queue karein.
-      job.status = 'awaiting-render';
-      job.step = 'Render resume…';
-      updateJobStatus(job, 'awaiting-render', 'Render resume…', 75);
+      if (job.renderMode === 'server') {
+        // Server FFmpeg render kar raha hai (ek scene me minutes lagte hain) —
+        // browser render queue karna double render ban jayega.
+        job.step = 'Server render chal raha hai…';
+      } else {
+        // Page/renderer refresh ke baad rendering status atak jata hai — dobara queue karein.
+        job.status = 'awaiting-render';
+        job.step = 'Render resume…';
+        updateJobStatus(job, 'awaiting-render', 'Render resume…', 75);
+      }
     }
-    if (job.status === 'awaiting-render' && job.scenes?.length) queueMediaRender(job);
+    // Server FFmpeg render kar raha hai to browser render queue mat karo (double render nahi).
+    if (job.status === 'awaiting-render' && job.scenes?.length && job.renderMode !== 'server') queueMediaRender(job);
     if ((job.status === 'done' || job.status === 'error') && !notifiedJobs.has(job.id)) {
       notifiedJobs.add(job.id);
       playCompletionSound(job.status === 'done' ? 'done' : 'error');
@@ -4836,7 +4847,10 @@ async function cancelMediaJob(jobId) {
   saveChats();
   renderAll();
   try {
-    await fetch(`/api/media-jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+    await fetch(`/api/media-jobs/${encodeURIComponent(jobId)}`, {
+      method: 'DELETE',
+      headers: { 'x-nova-force': '1' },
+    });
   } catch {
     /* local card already removed */
   }
