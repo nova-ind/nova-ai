@@ -187,6 +187,38 @@
     </div>
 
     <section class="studio" id="studio" hidden aria-label="Nova Video Studio">
+      <nav class="studio-rail" id="studioRail" aria-label="Studio sections">
+        <span class="studio-rail-mark">N</span>
+        <button class="studio-rail-item active" type="button" data-pane="script" title="Script" aria-label="Script">
+          <svg viewBox="0 0 24 24"><path d="M7 3h7l5 5v13H7z" /><path d="M14 3v5h5M10 13h6M10 17h4" /></svg>
+        </button>
+        <button class="studio-rail-item" type="button" data-pane="voiceover" title="Voiceover" aria-label="Voiceover">
+          <svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3z" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></svg>
+        </button>
+        <button class="studio-rail-item" type="button" data-pane="images" title="AI Images" aria-label="AI Images">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.6" /><path d="M4 17l5-5 4 4 3-3 4 4" /></svg>
+        </button>
+        <button class="studio-rail-item" type="button" data-pane="motion" title="Image Motion" aria-label="Image Motion">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h7" /><path d="M17 12l3 3-3 3" /></svg>
+        </button>
+        <button class="studio-rail-item" type="button" data-pane="music" title="Background Music" aria-label="Background Music">
+          <svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><path d="M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM19 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z" /></svg>
+        </button>
+        <button class="studio-rail-item" type="button" data-pane="sfx" title="Sound Effects" aria-label="Sound Effects">
+          <svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 4V5L9 9H5z" /><path d="M17 8c1.5 1.6 1.5 6.4 0 8" /></svg>
+        </button>
+        <button class="studio-rail-item" type="button" data-pane="editing" title="Editing" aria-label="Editing">
+          <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 12h3M11 12h9M4 17h8M16 17h4" /><circle cx="16" cy="7" r="2" /><circle cx="9" cy="12" r="2" /><circle cx="14" cy="17" r="2" /></svg>
+        </button>
+        <button class="studio-rail-item" type="button" data-pane="thumbnail" title="Thumbnail" aria-label="Thumbnail">
+          <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.6" /><path d="M4 17l5-4 3 2.5 3-2.5 5 4" /></svg>
+        </button>
+        <span class="studio-rail-gap"></span>
+        <button class="studio-rail-item studio-rail-item--gpt" type="button" id="studioRailChatGpt" title="Login with ChatGPT" aria-label="Login with ChatGPT">
+          <svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 1 1-3.2-6.4M21 4v5h-5" /></svg>
+        </button>
+      </nav>
+
       <header class="studio-top">
         <div class="studio-brand">
           <span class="studio-mark">N</span>
@@ -198,6 +230,42 @@
           <button class="studio-step" data-stage="export">Export</button>
         </nav>
         <div class="studio-top-right">
+          <div class="timeline-tools studio-export-tools">
+            <button class="tool-icon" id="studioExportBtn" type="button" title="Export video or MP3" aria-label="Export video or MP3">
+              <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 17v3h14v-3" /></svg>
+            </button>
+            <select class="export-select" id="studioExportFormat" title="Export format" aria-label="Export format">
+              <option value="video">Video</option>
+              <option value="mp3">MP3</option>
+            </select>
+            <select class="export-select" id="studioExportResolution" title="Export resolution" aria-label="Export resolution">
+              <option value="120p">120p</option>
+              <option value="240p">240p</option>
+              <option value="360p">360p</option>
+              <option value="480p">480p</option>
+              <option value="720p" selected>720p</option>
+              <option value="1080p">1080p</option>
+              <option value="1440p">1440p</option>
+              <option value="4k">4K</option>
+            </select>
+            <select class="export-select" id="studioExportQuality" title="Export quality" aria-label="Export quality">
+              <option value="draft">Draft</option>
+              <option value="standard" selected>Standard</option>
+              <option value="high">High</option>
+              <option value="max">Max</option>
+            </select>
+            <span class="tool-sep"></span>
+            <button class="mini-tool" id="studioLayoutBtn" type="button">Layout</button>
+            <button class="mini-tool" id="studioLockBtn" type="button">Lock UI</button>
+            <button class="mini-tool" id="studioExitBtn" type="button">Exit</button>
+            <div class="layout-menu" id="studioLayoutMenu" hidden>
+              <button type="button" data-layout="focus">Focus player</button>
+              <button type="button" data-layout="balanced">Balanced</button>
+              <button type="button" data-layout="timeline">Long timeline</button>
+              <button type="button" id="studioTogglePanel">Hide panel</button>
+              <button type="button" id="studioResetLayout">Reset layout</button>
+            </div>
+          </div>
           <button class="icon-btn" id="studioClose" title="Close Video Studio" aria-label="Close Video Studio">
             <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
           </button>
@@ -206,7 +274,37 @@
 
       <div class="studio-workspace">
         <aside class="studio-panel studio-left">
-          <section class="panel-section">
+          <div class="studio-panel-tabs" id="studioPanelTabs" role="tablist" aria-label="Studio tools">
+            <button class="studio-tab active" type="button" data-pane="import" title="Import media" aria-label="Import media">
+              <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" /></svg>
+            </button>
+            <button class="studio-tab" type="button" data-pane="script" title="Text & story" aria-label="Text and story">
+              <svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h9" /></svg>
+            </button>
+            <button class="studio-tab" type="button" data-pane="voiceover" title="Text to audio" aria-label="Text to audio">
+              <svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zM17 9l4 6M21 9l-4 6" /></svg>
+            </button>
+            <button class="studio-tab" type="button" data-pane="images" title="Text to image" aria-label="Text to image">
+              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.6" /><path d="M4 17l5-5 4 4 3-3 4 4" /></svg>
+            </button>
+            <button class="studio-tab" type="button" data-pane="editing" title="FX & look" aria-label="FX and look">
+              <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.6L18 9l-4.2 1.4L12 15l-1.8-4.6L6 9l4.2-1.4L12 3zM18 15l.9 2.3L21 18l-2.1.7L18 21l-.9-2.3L15 18l2.1-.7L18 15z" /></svg>
+            </button>
+            <button class="studio-tab" type="button" data-pane="editing" title="Transitions" aria-label="Transitions">
+              <svg viewBox="0 0 24 24"><path d="M3 8h12l-3-3M21 16H9l3 3" /></svg>
+            </button>
+            <button class="studio-tab" type="button" data-pane="motion" title="Text to video" aria-label="Text to video">
+              <svg viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2" /><path d="M16 10l5-3v10l-5-3z" /></svg>
+            </button>
+            <span class="studio-tab-gap"></span>
+            <button class="studio-tab studio-tab--gpt" type="button" id="studioChatGptBtn" title="Login with ChatGPT" aria-label="Login with ChatGPT">
+              <svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 1 1-3.2-6.4M21 4v5h-5" /></svg>
+              <span class="studio-tab-badge" id="studioChatGptBadge">GPT</span>
+            </button>
+          </div>
+
+          <div class="studio-panel-body" id="studioPanelBody">
+          <section class="panel-section studio-pane" data-pane="import">
             <div class="section-head"><span class="eyebrow">Source</span><button class="text-btn" id="studioUpload">+ Import</button></div>
             <button class="drop-box" id="studioDrop" type="button">
               <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" /></svg>
@@ -217,13 +315,45 @@
             <div class="studio-media-list" id="studioMediaList"></div>
           </section>
 
-          <section class="panel-section">
+          <section class="panel-section studio-pane" data-pane="voiceover">
+            <div class="section-head"><span class="eyebrow">Text to audio</span><span class="studio-pill" id="studioTtsState">Voice first</span></div>
+            <textarea id="studioTtsText" class="studio-textarea" rows="4" placeholder="Apni story ya script yahan paste karein…"></textarea>
+            <div class="tts-controls">
+              <label class="mini-field"><span>Voice</span><select id="studioTtsVoice">
+                <option value="auto">Natural</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="child">Child</option>
+              </select></label>
+              <button class="tts-btn" id="studioTtsBtn" type="button">Generate audio</button>
+            </div>
+            <audio class="studio-tts-audio" id="studioTtsAudio" controls hidden></audio>
+            <p class="help" id="studioTtsNote">Pehle story ki audio banayein — phir images aur final video.</p>
+          </section>
+
+          <section class="panel-section studio-pane" data-pane="images">
+            <div class="section-head"><span class="eyebrow">Text to image</span><span class="studio-pill" id="studioImageState">Ready</span></div>
+            <textarea id="studioImageText" class="studio-textarea" rows="3" placeholder="Scene description — har line ka apna image banega…"></textarea>
+            <div class="tts-controls">
+              <label class="mini-field"><span>Scenes</span><select id="studioImageCount">
+                <option value="auto" selected>Auto</option>
+                <option value="3">3</option>
+                <option value="6">6</option>
+                <option value="9">9</option>
+                <option value="12">12</option>
+              </select></label>
+              <button class="tts-btn" id="studioImageBtn" type="button">Generate images</button>
+            </div>
+            <div class="studio-image-progress" id="studioImageProgress" hidden><span class="track"><i id="studioImageProgressBar"></i></span><span id="studioImageProgressText">0 images</span></div>
+            <p class="help" id="studioImageNote">Audio ban jaye to yahan scene likh kar images banayein — ek ek karke timeline me aa jayenge.</p>
+            <button class="studio-login" id="studioChatGptLoginBtn" type="button"><span class="dot"></span><span id="studioChatGptLabel">Login with ChatGPT</span></button>
+            <p class="help" id="studioChatGptNote">ChatGPT account se images — Nova-AI chat me har image, character same.</p>
+          </section>
+
+          <section class="panel-section studio-pane" data-pane="script">
             <div class="section-head"><span class="eyebrow">Idea</span></div>
             <textarea id="studioPrompt" class="studio-textarea" rows="3" placeholder="Describe your video in one line…"></textarea>
             <button class="studio-agent" id="studioAgentBtn" type="button"><span>✦</span> Nova plans the whole video</button>
-          </section>
-
-          <section class="panel-section">
             <div class="field-row">
               <label>Category<select id="studioCategory"></select></label>
               <label>Length<select id="studioDuration">
@@ -246,24 +376,58 @@
             <label class="studio-check"><input type="checkbox" id="studioNarration" checked /> Narration</label>
           </section>
 
-          <section class="panel-section">
-            <div class="section-head"><span class="eyebrow">Look</span><span class="studio-pill" id="studioPresetName">Hollywood</span></div>
+          <section class="panel-section studio-pane" data-pane="editing">
+            <div class="section-head"><span class="eyebrow">Editing · FX & look</span><span class="studio-pill" id="studioPresetName">Hollywood</span></div>
             <div class="preset-grid" id="studioPresetGrid"></div>
             <select id="studioPreset" hidden></select>
-            <details class="studio-details">
-              <summary>Fine-tune <span id="studioFxCount">2 FX</span></summary>
-              <label class="mini-field"><span>Transition</span><select id="studioTransition"></select></label>
-              <label class="mini-field"><span>BPM</span><input id="studioBpm" type="number" min="0" max="220" value="0" placeholder="Auto" /></label>
-              <div class="studio-group"><h4>FX</h4><div class="studio-chips" id="studioFx"></div></div>
-              <div class="studio-group"><h4>Transitions <small id="studioTransitionCount"></small></h4><div class="studio-chips" id="studioTransitions"></div></div>
-              <div class="studio-group"><h4>Visualizers</h4><div class="studio-chips" id="studioVisualizers"></div></div>
-              <div class="studio-group"><h4>Audio FX</h4><div class="studio-chips" id="studioAudioFx"></div></div>
-            </details>
+            <label class="mini-field"><span>Transition</span><select id="studioTransition"></select></label>
+            <label class="mini-field"><span>BPM</span><input id="studioBpm" type="number" min="0" max="220" value="0" placeholder="Auto" /></label>
+            <div class="studio-group"><h4>FX <small id="studioFxCount">2 FX</small></h4><div class="studio-chips" id="studioFx"></div></div>
+            <div class="studio-group"><h4>Transitions <small id="studioTransitionCount">fade</small></h4><div class="studio-chips" id="studioTransitions"></div></div>
+            <div class="studio-group"><h4>Visualizers</h4><div class="studio-chips" id="studioVisualizers"></div></div>
+          </section>
+
+          <section class="panel-section studio-pane" data-pane="music">
+            <div class="section-head"><span class="eyebrow">Background Music</span><span class="studio-pill" id="studioMusicState">Ready</span></div>
+            <p class="help">Background track import karke role <b>BGM</b> set karo — final video me voice ke neeche soft bed ki tarah mix hoga.</p>
+            <button class="tts-btn studio-block-btn" id="studioMusicImport" type="button">Import music</button>
+            <input id="studioMusicFiles" type="file" multiple hidden accept="audio/*,.mp3,.wav,.m4a,.aac" />
+            <div class="studio-media-list" id="studioMusicList"></div>
+          </section>
+
+          <section class="panel-section studio-pane" data-pane="sfx">
+            <div class="section-head"><span class="eyebrow">Sound Effects</span><span class="studio-pill" id="studioSfxState">Ready</span></div>
+            <div class="studio-group"><h4>Audio FX</h4><div class="studio-chips" id="studioAudioFx"></div></div>
+            <p class="help" id="studioSfxNote">Reverb, echo, compressor, denoise — voice aur music par ek click me apply.</p>
+          </section>
+
+          <section class="panel-section studio-pane" data-pane="thumbnail">
+            <div class="section-head"><span class="eyebrow">Thumbnail</span><span class="studio-pill" id="studioThumbState">Ready</span></div>
+            <textarea id="studioThumbText" class="studio-textarea" rows="2" placeholder="Thumbnail kya dikhaye — jaise 'Meera phool ke saath, cinematic glow'…"></textarea>
+            <button class="tts-btn studio-block-btn" id="studioThumbBtn" type="button">Generate thumbnail</button>
+            <div class="studio-thumb-preview" id="studioThumbPreview" hidden><img id="studioThumbImage" alt="Thumbnail preview" /></div>
+            <p class="help" id="studioThumbNote">Thumbnail image banti hai — export ke liye ready.</p>
+          </section>
+
+          <section class="panel-section studio-pane" data-pane="motion">
+            <div class="section-head"><span class="eyebrow">Text to video · Image Motion</span><span class="studio-pill" id="studioVideoState">Ready</span></div>
+            <textarea id="studioVideoText" class="studio-textarea" rows="3" placeholder="Clip ka description — jaise 'car slow motion road pe drive karti hai'…"></textarea>
+            <div class="tts-controls">
+              <label class="mini-field"><span>Clip</span><select id="studioVideoDuration">
+                <option value="4">4 sec</option>
+                <option value="5" selected>5 sec</option>
+                <option value="8">8 sec</option>
+              </select></label>
+              <button class="tts-btn" id="studioVideoBtn" type="button">Generate clip</button>
+            </div>
+            <div class="studio-media-list" id="studioVideoList"></div>
+            <p class="help" id="studioVideoNote">Banayi clip turant timeline me clip ke roop me jud jaati hai.</p>
           </section>
 
           <div class="render-dock">
             <button class="studio-primary" id="studioRender" type="button">Create video <span>→</span></button>
             <p id="studioRenderNote">Story, voice, images, FX and render — handled automatically.</p>
+          </div>
           </div>
         </aside>
 
@@ -350,41 +514,6 @@
             <button class="tool-icon" id="studioZoomIn" type="button" title="Zoom in timeline" aria-label="Zoom in timeline">
               <svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6" /><path d="M7 10h6M10 7v6M15 15l5 5" /></svg>
             </button>
-            <span class="tool-sep"></span>
-            <button class="tool-icon" id="studioExportBtn" type="button" title="Export video or MP3" aria-label="Export video or MP3">
-              <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 17v3h14v-3" /></svg>
-            </button>
-            <select class="export-select" id="studioExportFormat" title="Export format" aria-label="Export format">
-              <option value="video">Video</option>
-              <option value="mp3">MP3</option>
-            </select>
-            <select class="export-select" id="studioExportResolution" title="Export resolution" aria-label="Export resolution">
-              <option value="120p">120p</option>
-              <option value="240p">240p</option>
-              <option value="360p">360p</option>
-              <option value="480p">480p</option>
-              <option value="720p" selected>720p</option>
-              <option value="1080p">1080p</option>
-              <option value="1440p">1440p</option>
-              <option value="4k">4K</option>
-            </select>
-            <select class="export-select" id="studioExportQuality" title="Export quality" aria-label="Export quality">
-              <option value="draft">Draft</option>
-              <option value="standard" selected>Standard</option>
-              <option value="high">High</option>
-              <option value="max">Max</option>
-            </select>
-            <span class="tool-sep"></span>
-            <button class="mini-tool" id="studioLayoutBtn" type="button">Layout</button>
-            <button class="mini-tool" id="studioLockBtn" type="button">Lock UI</button>
-            <button class="mini-tool" id="studioExitBtn" type="button">Exit</button>
-            <div class="layout-menu" id="studioLayoutMenu" hidden>
-              <button type="button" data-layout="focus">Focus player</button>
-              <button type="button" data-layout="balanced">Balanced</button>
-              <button type="button" data-layout="timeline">Long timeline</button>
-              <button type="button" id="studioTogglePanel">Hide panel</button>
-              <button type="button" id="studioResetLayout">Reset layout</button>
-            </div>
           </div>
           <div class="timeline-actions">
             <span class="timecode" id="studioTimecode">00:00</span>
@@ -686,6 +815,7 @@
             <label for="imageProviderSelect">Image provider</label>
             <select id="imageProviderSelect">
               <option value="auto">Auto · best free first</option>
+              <option value="chatgpt">ChatGPT Go · Nova-AI chat (login)</option>
               <option value="bing">Bing Image Creator · free</option>
               <option value="cloudflare">Cloudflare Flux · free</option>
               <option value="huggingface">Hugging Face Flux · free</option>
@@ -860,6 +990,12 @@
           <label for="browserLoginBtn">Chrome login <span class="value">ek baar · phir hamesha saved</span></label>
           <button class="ghost-btn" id="browserLoginBtn" type="button">Open login tabs in Chrome</button>
           <p class="help">Bing/Microsoft account ek hi baar sign-in karein. Ye tabs Nova ke apne Chrome profile (`workspace/.browser-profile`) me khulte hain — server restart ke baad bhi login rehta hai. Login complete karke tab band kar sakte hain.</p>
+        </div>
+
+        <div class="field" id="chatGptLoginField">
+          <label for="chatGptLoginBtn">ChatGPT <span class="value">Nova-AI chat · image generation</span></label>
+          <button class="ghost-btn" id="chatGptLoginBtn" type="button">Open ChatGPT login in Chrome</button>
+          <p class="help" id="chatGptStatusText">ChatGPT Go account se images — Nova ke apne Chrome profile me ek baar sign-in karein. Uske baad har image usi persistent “Nova-AI” chat me banti hai, character same rehta hai.</p>
         </div>
 
         <div class="field" id="bingSyncField">

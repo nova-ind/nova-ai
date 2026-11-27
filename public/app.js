@@ -19,6 +19,7 @@ const studioState = {
   audio: null,
   audioPath: '',
   audioBar: null,
+  storyAudio: null,
   selection: new Set(),
   clipboard: readJson('nova.studio.clipboard.v1', []),
   lastSelected: null,
@@ -82,6 +83,47 @@ const els = {
   studioFiles: $('studioFiles'),
   studioMediaList: $('studioMediaList'),
   studioPrompt: $('studioPrompt'),
+  studioTtsText: $('studioTtsText'),
+  studioTtsVoice: $('studioTtsVoice'),
+  studioTtsBtn: $('studioTtsBtn'),
+  studioTtsAudio: $('studioTtsAudio'),
+  studioTtsNote: $('studioTtsNote'),
+  studioTtsState: $('studioTtsState'),
+  studioImageText: $('studioImageText'),
+  studioImageCount: $('studioImageCount'),
+  studioImageBtn: $('studioImageBtn'),
+  studioImageNote: $('studioImageNote'),
+  studioImageState: $('studioImageState'),
+  studioImageProgress: $('studioImageProgress'),
+  studioImageProgressText: $('studioImageProgressText'),
+  studioImageProgressBar: $('studioImageProgressBar'),
+  studioPanelTabs: $('studioPanelTabs'),
+  studioRail: $('studioRail'),
+  studioRailChatGpt: $('studioRailChatGpt'),
+  studioMusicImport: $('studioMusicImport'),
+  studioMusicFiles: $('studioMusicFiles'),
+  studioMusicList: $('studioMusicList'),
+  studioMusicState: $('studioMusicState'),
+  studioThumbText: $('studioThumbText'),
+  studioThumbBtn: $('studioThumbBtn'),
+  studioThumbState: $('studioThumbState'),
+  studioThumbNote: $('studioThumbNote'),
+  studioThumbPreview: $('studioThumbPreview'),
+  studioThumbImage: $('studioThumbImage'),
+  studioChatGptBtn: $('studioChatGptBtn'),
+  studioChatGptLoginBtn: $('studioChatGptLoginBtn'),
+  studioChatGptLabel: $('studioChatGptLabel'),
+  studioChatGptNote: $('studioChatGptNote'),
+  studioChatGptBadge: $('studioChatGptBadge'),
+  studioVideoText: $('studioVideoText'),
+  studioVideoDuration: $('studioVideoDuration'),
+  studioVideoBtn: $('studioVideoBtn'),
+  studioVideoState: $('studioVideoState'),
+  studioVideoList: $('studioVideoList'),
+  studioVideoNote: $('studioVideoNote'),
+  chatGptLoginBtn: $('chatGptLoginBtn'),
+  chatGptStatusText: $('chatGptStatusText'),
+  studioVideoNote: $('studioVideoNote'),
   studioCategory: $('studioCategory'),
   studioDuration: $('studioDuration'),
   studioRatio: $('studioRatio'),
@@ -3161,10 +3203,13 @@ function openStudio() {
   els.studio.hidden = false;
   els.studio.classList.add('is-editing');
   setupStudioLayoutControls();
+  setupStudioPanelTabs();
   setupStudioTimeline();
+  loadChatGptStatus();
   studioState.jobId = studioState.jobId || (mediaJobs.find((job) => job.studio)?.id || null);
   loadStudioCatalog();
   renderStudioAssets();
+  renderStudioMusicList();
   renderStudioDashboard();
   clearInterval(studioState.timer);
   studioState.timer = setInterval(() => {
@@ -3379,50 +3424,464 @@ function analysisText(asset) {
   return '';
 }
 
+async function uploadStudioAsset(file, role = null) {
+  const response = await fetch('/api/media-upload', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/octet-stream',
+      'x-file-name': encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  const uploaded = await response.json().catch(() => ({}));
+  if (!response.ok || !uploaded.path) throw new Error(uploaded.error || 'Upload failed');
+  const kind = studioAssetKind(file);
+  const asset = {
+    path: uploaded.path,
+    name: uploaded.name || file.name,
+    kind,
+    role: role || (kind === 'audio' ? 'voice' : 'scene'),
+    size: uploaded.size,
+  };
+  try {
+    const analysisResponse = await fetch('/api/video-studio/analyze', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ path: uploaded.path }),
+    });
+    if (analysisResponse.ok) asset.analysis = await analysisResponse.json();
+  } catch { /* analysis optional */ }
+  asset.duration = Number(asset.analysis?.duration) || 0;
+  studioState.assets.push(asset);
+  return asset;
+}
+
 async function importStudioFiles(files) {
   const items = [...(files || [])];
   if (!items.length) return;
   for (const file of items) {
     toast(`Studio me import ho raha hai: ${file.name}`);
     try {
-      const response = await fetch('/api/media-upload', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/octet-stream',
-          'x-file-name': encodeURIComponent(file.name),
-        },
-        body: file,
-      });
-      const uploaded = await response.json().catch(() => ({}));
-      if (!response.ok || !uploaded.path) throw new Error(uploaded.error || 'Upload failed');
-      const kind = studioAssetKind(file);
-      const asset = {
-        path: uploaded.path,
-        name: uploaded.name || file.name,
-        kind,
-        role: kind === 'audio' ? 'voice' : 'scene',
-        size: uploaded.size,
-      };
-      try {
-        const analysisResponse = await fetch('/api/video-studio/analyze', {
-          method: 'POST',
-          headers: apiHeaders(),
-          body: JSON.stringify({ path: uploaded.path }),
-        });
-        if (analysisResponse.ok) asset.analysis = await analysisResponse.json();
-      } catch { /* analysis optional */ }
-      asset.duration = Number(asset.analysis?.duration) || 0;
-      studioState.assets.push(asset);
+      await uploadStudioAsset(file);
     } catch (err) {
       toast(err.message || `${file.name} import nahi hua`);
     }
   }
   renderStudioAssets();
+  renderStudioMusicList();
   toast(`${items.length} file(s) studio me ready`);
 }
 
+async function importStudioMusic(files) {
+  const items = [...(files || [])];
+  if (!items.length) return;
+  for (const file of items) {
+    try {
+      await uploadStudioAsset(file, 'bgm');
+    } catch (err) {
+      toast(err.message || `${file.name} import nahi hua`);
+    }
+  }
+  renderStudioAssets();
+  renderStudioMusicList();
+  if (els.studioMusicState) els.studioMusicState.textContent = 'Ready';
+  toast('Background music set ho gaya');
+}
+
+function renderStudioMusicList() {
+  const list = els.studioMusicList;
+  if (!list) return;
+  list.replaceChildren();
+  const tracks = studioState.assets.filter((asset) => asset.role === 'bgm');
+  if (!tracks.length) {
+    const hint = document.createElement('p');
+    hint.className = 'studio-hint';
+    hint.textContent = 'Abhi koi background music nahi.';
+    list.append(hint);
+    return;
+  }
+  tracks.forEach((asset) => {
+    const row = document.createElement('div');
+    row.className = 'studio-media-item';
+    const thumb = document.createElement('div');
+    thumb.textContent = '🎵';
+    thumb.style.cssText = 'display:grid;place-items:center;font-size:20px';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = asset.name || 'bgm';
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    sub.textContent = `Background music${asset.duration ? ` · ${asset.duration.toFixed(1)}s` : ''}`;
+    meta.append(name, sub);
+    row.append(thumb, meta);
+    list.append(row);
+  });
+}
+
+// Thumbnail: ek alag cinematic cover image banao.
+async function generateStudioThumbnail() {
+  const text = String(els.studioThumbText?.value || '').trim()
+    || String(els.studioPrompt?.value || '').trim()
+    || String(els.studioTtsText?.value || '').trim().slice(0, 200);
+  if (text.length < 4) {
+    toast('Thumbnail description likho');
+    els.studioThumbText?.focus();
+    return;
+  }
+  if (els.studioThumbBtn) {
+    els.studioThumbBtn.disabled = true;
+    els.studioThumbBtn.textContent = 'Creating…';
+  }
+  if (els.studioThumbState) els.studioThumbState.textContent = 'Creating…';
+  try {
+    const response = await fetch('/api/video-studio/thumbnail', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        text,
+        ratio: els.studioRatio?.value || '16:9',
+        imageProvider: settings.imageProvider || DEFAULT_SETTINGS.imageProvider,
+        imageModel: settings.mediaModels.image,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.url) throw new Error(data.error || 'Thumbnail nahi bani');
+    if (els.studioThumbImage) els.studioThumbImage.src = data.url;
+    if (els.studioThumbPreview) els.studioThumbPreview.hidden = false;
+    if (els.studioThumbState) els.studioThumbState.textContent = 'Ready';
+    if (els.studioThumbNote) els.studioThumbNote.textContent = 'Thumbnail ready — export ke liye hai.';
+    toast('Thumbnail ready');
+  } catch (error) {
+    if (els.studioThumbState) els.studioThumbState.textContent = 'Failed';
+    if (els.studioThumbNote) els.studioThumbNote.textContent = error?.message || 'Thumbnail nahi bani — dobara try karein.';
+    toast(error?.message || 'Thumbnail nahi bani');
+  } finally {
+    if (els.studioThumbBtn) {
+      els.studioThumbBtn.disabled = false;
+      els.studioThumbBtn.textContent = 'Generate thumbnail';
+    }
+  }
+}
+
+async function generateStudioAudio() {
+  const text = String(els.studioTtsText?.value || '').trim();
+  if (text.length < 10) {
+    toast('Pehle story ya script likhein');
+    els.studioTtsText?.focus();
+    return;
+  }
+  if (text.length > 14_000) {
+    toast('Story 14,000 characters se lambi hai — thoda chhota karein');
+    return;
+  }
+  const voice = els.studioTtsVoice?.value || 'auto';
+  if (els.studioTtsBtn) {
+    els.studioTtsBtn.disabled = true;
+    els.studioTtsBtn.textContent = 'Generating…';
+  }
+  if (els.studioTtsState) els.studioTtsState.textContent = 'Generating…';
+  if (els.studioTtsNote) els.studioTtsNote.textContent = 'Neural voice story ki audio bana rahi hai…';
+  try {
+    const response = await fetch('/api/video-studio/text-to-audio', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ text, voice }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.path) throw new Error(data.error || 'Story audio nahi bani');
+    const duration = Number(data.duration) || 0;
+    studioState.storyAudio = {
+      path: data.path,
+      url: data.url || `/api/file?path=${encodeURIComponent(data.path)}`,
+      duration,
+      voice,
+      text,
+    };
+    if (els.studioTtsAudio) {
+      els.studioTtsAudio.src = studioState.storyAudio.url;
+      els.studioTtsAudio.hidden = false;
+      els.studioTtsAudio.load();
+    }
+    if (els.studioTtsState) els.studioTtsState.textContent = duration ? formatStudioClock(duration) : 'Audio ready';
+    if (els.studioTtsNote) {
+      els.studioTtsNote.textContent = `Audio ready${duration ? ` · ${formatStudioClock(duration)}` : ''} — Create video par ye voice track use hogi.`;
+    }
+    if (els.studioPrompt && !els.studioPrompt.value.trim()) els.studioPrompt.value = text;
+    if (els.studioVoice) els.studioVoice.value = voice;
+    if (els.studioNarration) els.studioNarration.checked = true;
+    if (els.studioRenderNote) els.studioRenderNote.textContent = 'Story audio ready — ab Create video se images aur final video banayein.';
+    toast(`Story audio ready${duration ? ` · ${formatStudioClock(duration)}` : ''}`);
+  } catch (error) {
+    if (els.studioTtsState) els.studioTtsState.textContent = 'Failed';
+    if (els.studioTtsNote) els.studioTtsNote.textContent = error?.message || 'Story audio nahi bani — dobara try karein.';
+    toast(error?.message || 'Story audio nahi bani');
+  } finally {
+    if (els.studioTtsBtn) {
+      els.studioTtsBtn.disabled = false;
+      els.studioTtsBtn.textContent = 'Generate audio';
+    }
+  }
+}
+
+// Text to video: ek short AI clip banao aur turant timeline me jod do.
+async function generateStudioVideoClip() {
+  const text = String(els.studioVideoText?.value || '').trim();
+  if (text.length < 5) {
+    toast('Clip description likho');
+    els.studioVideoText?.focus();
+    return;
+  }
+  const duration = Number(els.studioVideoDuration?.value) || 5;
+  if (els.studioVideoBtn) {
+    els.studioVideoBtn.disabled = true;
+    els.studioVideoBtn.textContent = 'Creating…';
+  }
+  if (els.studioVideoState) els.studioVideoState.textContent = 'Creating…';
+  if (els.studioVideoNote) els.studioVideoNote.textContent = 'AI clip ban raha hai…';
+  try {
+    const response = await fetch('/api/video-studio/text-to-video', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        text,
+        duration,
+        jobId: studioState.jobId || null,
+        storyAudioPath: studioState.storyAudio?.path || null,
+        ratio: els.studioRatio?.value || '16:9',
+        style: /cartoon|anime|comic/.test(els.studioCategory?.value || '') ? 'cartoon' : 'cinematic',
+        videoModel: settings.mediaModels.video,
+        imageProvider: settings.imageProvider || DEFAULT_SETTINGS.imageProvider,
+        chatId: activeChat()?.id,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.jobId) throw new Error(data.error || 'Clip nahi bani');
+    studioState.jobId = data.jobId;
+    if (els.studioVideoState) els.studioVideoState.textContent = 'Ready';
+    if (els.studioVideoNote) els.studioVideoNote.textContent = 'Clip ready — timeline me aa gayi.';
+    if (els.studioVideoList) {
+      const item = document.createElement('div');
+      item.className = 'studio-media-item';
+      const video = document.createElement('video');
+      video.src = data.url || '';
+      video.muted = true;
+      video.preload = 'metadata';
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = text.slice(0, 48);
+      const sub = document.createElement('span');
+      sub.className = 'sub';
+      sub.textContent = `AI clip · ${duration}s`;
+      meta.append(name, sub);
+      item.append(video, meta);
+      els.studioVideoList.prepend(item);
+    }
+    await loadMediaJobs();
+    renderStudioDashboard();
+    toast('Clip ban gayi — timeline me jud gayi');
+  } catch (error) {
+    if (els.studioVideoState) els.studioVideoState.textContent = 'Failed';
+    if (els.studioVideoNote) els.studioVideoNote.textContent = error?.message || 'Clip nahi bani — dobara try karein.';
+    toast(error?.message || 'Clip nahi bani');
+  } finally {
+    if (els.studioVideoBtn) {
+      els.studioVideoBtn.disabled = false;
+      els.studioVideoBtn.textContent = 'Generate clip';
+    }
+  }
+}
+
+// Compact icon tabs + left rail — sirf selected tool ka panel dikhe.
+function selectStudioPane(name) {
+  const tabs = els.studioPanelTabs;
+  if (tabs) {
+    for (const button of tabs.querySelectorAll('.studio-tab[data-pane]')) {
+      button.classList.toggle('active', button.dataset.pane === name);
+    }
+  }
+  const rail = els.studioRail;
+  if (rail) {
+    for (const button of rail.querySelectorAll('.studio-rail-item[data-pane]')) {
+      button.classList.toggle('active', button.dataset.pane === name);
+    }
+  }
+  for (const pane of document.querySelectorAll('.studio-pane')) {
+    pane.classList.toggle('active', pane.dataset.pane === name);
+  }
+}
+
+function setupStudioPanelTabs() {
+  const tabs = els.studioPanelTabs;
+  if (tabs && tabs.dataset.ready !== '1') {
+    tabs.dataset.ready = '1';
+    tabs.addEventListener('click', (event) => {
+      const button = event.target.closest('.studio-tab[data-pane]');
+      if (!button) return;
+      selectStudioPane(button.dataset.pane);
+    });
+  }
+  const rail = els.studioRail;
+  if (rail && rail.dataset.ready !== '1') {
+    rail.dataset.ready = '1';
+    rail.addEventListener('click', (event) => {
+      const button = event.target.closest('.studio-rail-item[data-pane]');
+      if (!button) return;
+      selectStudioPane(button.dataset.pane);
+    });
+  }
+  const active = rail?.querySelector('.studio-rail-item.active') || tabs?.querySelector('.studio-tab.active');
+  selectStudioPane(active?.dataset.pane || 'script');
+}
+
+async function loadChatGptStatus() {
+  try {
+    const response = await fetch('/api/chatgpt-status');
+    const data = await response.json().catch(() => ({}));
+    const connected = Boolean(data.configured);
+    els.studioChatGptBadge?.classList.toggle('on', connected);
+    els.studioRailChatGpt?.classList.toggle('on', connected);
+    if (els.studioChatGptBtn) {
+      els.studioChatGptBtn.classList.toggle('on', connected);
+      els.studioChatGptBtn.title = connected
+        ? `ChatGPT connected — ${data.user?.email || data.user?.name || 'account'}`
+        : 'Login with ChatGPT';
+    }
+    if (els.studioChatGptLoginBtn) {
+      els.studioChatGptLoginBtn.classList.toggle('on', connected);
+      if (els.studioChatGptLabel) {
+        els.studioChatGptLabel.textContent = connected
+          ? `ChatGPT: ${data.user?.email || data.user?.name || 'connected'}`
+          : 'Login with ChatGPT';
+      }
+    }
+    if (els.studioChatGptNote) {
+      els.studioChatGptNote.textContent = connected
+        ? `Connected${data.chatId ? ' · Nova-AI chat ready' : ''} — images isi account se bante hain.`
+        : 'ChatGPT account se images — Nova-AI chat me har image, character same.';
+    }
+    if (els.chatGptStatusText) {
+      els.chatGptStatusText.textContent = connected
+        ? `Connected${data.user?.email ? ` · ${data.user.email}` : ''}${data.chatId ? ' · Nova-AI chat ready' : ''}. Ab images isi ChatGPT account se bante hain.`
+        : 'ChatGPT Go account se images — Nova ke apne Chrome profile me ek baar sign-in karein. Uske baad har image usi persistent “Nova-AI” chat me banti hai, character same rehta hai.';
+    }
+    // ChatGPT connected hai to images usi account se banein — default provider bhi wahi.
+    if (connected && settings.imageProvider !== 'chatgpt') {
+      settings.imageProvider = 'chatgpt';
+      saveSettings();
+      if (els.imageProviderSelect) els.imageProviderSelect.value = 'chatgpt';
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function chatGptLogin() {
+  const button = els.studioChatGptLoginBtn || els.studioChatGptBtn || els.chatGptLoginBtn;
+  if (button) button.disabled = true;
+  const original = button?.textContent;
+  try {
+    const status = await loadChatGptStatus();
+    if (status?.configured) {
+      const response = await fetch('/api/chatgpt-sync', { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'ChatGPT sync nahi hua');
+      await loadChatGptStatus();
+      toast('ChatGPT connected — images Nova-AI chat se aayengi');
+      return;
+    }
+    const response = await fetch('/api/chatgpt-login', { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'ChatGPT login tab nahi khul paaya');
+    toast('Chrome me ChatGPT login karein — Nova wait kar raha hai…');
+    for (let attempt = 0; attempt < 45; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      const sync = await fetch('/api/chatgpt-sync', { method: 'POST' })
+        .then((res) => res.json().catch(() => ({})))
+        .catch(() => ({}));
+      if (sync.configured) {
+        await loadChatGptStatus();
+        toast('ChatGPT login ho gaya — images isi account se bante hain');
+        return;
+      }
+    }
+    toast('Login complete karke button dobara dabao');
+  } catch (error) {
+    toast(error?.message || 'ChatGPT login nahi hua');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      if (original && button === els.studioChatGptLoginBtn) button.textContent = original;
+    }
+  }
+}
+
+// Text to image: scene text se images banao — har image banate hi timeline me aa jayegi.
+async function generateStudioImages() {
+  const text = String(els.studioImageText?.value || '').trim()
+    || String(els.studioTtsText?.value || '').trim()
+    || String(els.studioPrompt?.value || '').trim();
+  if (text.length < 8) {
+    toast('Scene text likho ya story audio wala text use karo');
+    els.studioImageText?.focus();
+    return;
+  }
+  const countValue = String(els.studioImageCount?.value || 'auto');
+  const count = countValue === 'auto' ? 0 : Number(countValue) || 0;
+  if (els.studioImageBtn) {
+    els.studioImageBtn.disabled = true;
+    els.studioImageBtn.textContent = 'Creating…';
+  }
+  if (els.studioImageState) els.studioImageState.textContent = 'Creating…';
+  if (els.studioImageProgress) {
+    els.studioImageProgress.hidden = false;
+    const bar = els.studioImageProgressBar;
+    if (bar) bar.style.width = '4%';
+    if (els.studioImageProgressText) els.studioImageProgressText.textContent = '0 images ready';
+  }
+  if (els.studioImageNote) els.studioImageNote.textContent = 'Images ban rahi hain — ek ek karke timeline me aa jayengi…';
+  try {
+    const response = await fetch('/api/video-studio/text-to-image', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        text,
+        count,
+        storyAudioPath: studioState.storyAudio?.path || null,
+        ratio: els.studioRatio?.value || '16:9',
+        style: /cartoon|anime|comic/.test(els.studioCategory?.value || '') ? 'cartoon' : 'cinematic',
+        imageProvider: settings.imageProvider || DEFAULT_SETTINGS.imageProvider,
+        imageModel: settings.mediaModels.image,
+        voice: els.studioVoice?.value || 'auto',
+        chatId: activeChat()?.id,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.jobId) throw new Error(data.error || 'Images shuru nahi hui');
+    studioState.jobId = data.jobId;
+    if (els.studioRenderNote) els.studioRenderNote.textContent = 'Images ban rahi hain — ban jane par Create video dabayein.';
+    await loadMediaJobs();
+    renderStudioDashboard();
+    toast('Images ban rahe hain — timeline me ek ek karke aayenge');
+  } catch (error) {
+    if (els.studioImageState) els.studioImageState.textContent = 'Failed';
+    if (els.studioImageNote) els.studioImageNote.textContent = error?.message || 'Images nahi bani — dobara try karein.';
+    toast(error?.message || 'Images nahi bani');
+  } finally {
+    if (els.studioImageBtn) {
+      els.studioImageBtn.disabled = false;
+      els.studioImageBtn.textContent = 'Generate images';
+    }
+  }
+}
+
 function studioPayload() {
-  const prompt = els.studioPrompt.value.trim();
+  const storyText = String(els.studioTtsText?.value || '').trim();
+  const prompt = els.studioPrompt.value.trim() || storyText;
   const hasSceneAssets = studioState.assets.some((asset) => asset.role === 'scene');
   if (!prompt && !hasSceneAssets) {
     toast('Idea likho ya kam se kam ek image/video import karo');
@@ -3447,6 +3906,8 @@ function studioPayload() {
     sourceAssets: studioState.assets.filter((asset) => asset.role === 'scene')
       .map((asset) => ({ path: asset.path, kind: asset.kind, name: asset.name, duration: asset.duration })),
     audioPath: voiceAsset?.path || null,
+    storyAudioPath: studioState.storyAudio?.path || null,
+    storyText: storyText || null,
     bgmPath: studioState.assets.find((asset) => asset.role === 'bgm')?.path || null,
     fx: [...studioState.fx],
     transitions: [...studioState.transitions],
@@ -3462,7 +3923,13 @@ function studioPayload() {
 }
 
 async function renderStudioVideo() {
-  const payload = studioPayload();
+  // Pehle se bani images + audio track hain to wahi render karo — naya job nahi.
+  const existing = mediaJobs.find((item) => item.id === studioState.jobId);
+  const reuse = existing && existing.status !== 'done'
+    && (existing.scenes || []).some((scene) => scene.image || scene.video)
+    ? existing
+    : null;
+  const payload = reuse ? { jobId: reuse.id } : studioPayload();
   if (!payload) return;
   els.studioRender.disabled = true;
   els.studioRender.textContent = 'Creating… autosave on';
@@ -3478,7 +3945,7 @@ async function renderStudioVideo() {
     studioState.jobId = data.id;
     applyJobUpdate(data);
     renderStudioDashboard();
-    toast('Pro video ban raha hai — sidebar me progress dekhein');
+    toast(reuse ? 'Saved images + audio se final video render ho raha hai' : 'Pro video ban raha hai — sidebar me progress dekhein');
   } catch (err) {
     els.studioRenderNote.textContent = err.message || 'Render start failed';
     toast(err.message || 'Render start failed');
@@ -3595,6 +4062,24 @@ function renderStudioDashboard() {
   updateStudioPlayhead();
   applyStudioSelection();
   els.studioSceneCount.textContent = scenes.length ? `· ${done}/${scenes.length} ready` : '';
+  if (els.studioImageProgress) {
+    const total = Number(job.sceneCount) || scenes.length || 0;
+    const readyImages = scenes.filter((scene) => scene.image || scene.video).length;
+    if (total || readyImages) {
+      els.studioImageProgress.hidden = false;
+      const bar = els.studioImageProgressBar;
+      const pct = total ? Math.min(100, Math.round((readyImages / total) * 100)) : 0;
+      if (bar) bar.style.width = `${pct}%`;
+      if (els.studioImageProgressText) {
+        els.studioImageProgressText.textContent = job.status === 'done' || job.status === 'awaiting-render'
+          ? `${readyImages} images ready`
+          : `${readyImages}/${total || readyImages} images ready`;
+      }
+      if (els.studioImageState) {
+        els.studioImageState.textContent = ['done', 'awaiting-render'].includes(job.status) ? 'Ready' : 'Creating…';
+      }
+    }
+  }
 
   const stageOrder = ['story', 'assets', 'voice', 'render'];
   const stageIndex = Math.max(0, stageOrder.indexOf(job.stage || 'story'));
@@ -5691,6 +6176,19 @@ els.studioTransition.addEventListener('change', () => {
 els.studioRender.addEventListener('click', renderStudioVideo);
 els.studioResumeBtn.addEventListener('click', resumeStudioJob);
 els.studioAgentBtn.addEventListener('click', askStudioAgent);
+els.studioTtsBtn?.addEventListener('click', generateStudioAudio);
+els.studioImageBtn?.addEventListener('click', generateStudioImages);
+els.studioVideoBtn?.addEventListener('click', generateStudioVideoClip);
+els.studioThumbBtn?.addEventListener('click', generateStudioThumbnail);
+els.studioChatGptBtn?.addEventListener('click', chatGptLogin);
+els.studioChatGptLoginBtn?.addEventListener('click', chatGptLogin);
+els.studioRailChatGpt?.addEventListener('click', chatGptLogin);
+els.chatGptLoginBtn?.addEventListener('click', chatGptLogin);
+els.studioMusicImport?.addEventListener('click', () => els.studioMusicFiles?.click());
+els.studioMusicFiles?.addEventListener('change', () => {
+  importStudioMusic(els.studioMusicFiles.files);
+  els.studioMusicFiles.value = '';
+});
 els.studioSteps.addEventListener('click', (event) => {
   const step = event.target.closest('.studio-step');
   if (!step) return;

@@ -158,6 +158,14 @@ const MIME = {
   '.py': 'text/x-python; charset=utf-8',
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
 };
 
 const UA =
@@ -1395,6 +1403,9 @@ async function fetchImageResult(prompt, model, provider, ratio) {
     }
     return { images: await generateBingImages(prompt), provider: 'bing' };
   }
+  if (provider === 'chatgpt') {
+    return { images: await generateChatGptImages(prompt), provider: 'chatgpt' };
+  }
   if (provider === 'cloudflare') {
     return { images: [await generateCloudflareImage(prompt, model)], provider: 'cloudflare' };
   }
@@ -1428,6 +1439,7 @@ async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'au
 
 function configuredImageProviders() {
   return [
+    ...(chatgptSessionState.configured ? ['chatgpt'] : []),
     ...(!BING_SUPPORTED && imageWorkerConnected() ? ['worker'] : []),
     ...(BING_SUPPORTED ? ['bing'] : []),
     ...(cloudflareAccount && cloudflareToken ? ['cloudflare'] : []),
@@ -1679,7 +1691,18 @@ async function createMediaJob(payload = {}) {
     }
   }
 
+  // Studio me pehle se bani story audio — yahi narration track aur video length banegi.
+  let storyAudioAbs = null;
+  let storyAudioPath = null;
+  if (studio && payload.storyAudioPath) {
+    storyAudioAbs = resolveJobAudioPath(payload.storyAudioPath);
+    if (storyAudioAbs) {
+      storyAudioPath = path.relative(WORKSPACE, storyAudioAbs).replace(/\\/g, '/');
+    }
+  }
+
   const audioDuration = audioPath ? await probeAudioDuration(audioPath) : 0;
+  const storyAudioDuration = storyAudioAbs ? await probeAudioDuration(storyAudioAbs) : 0;
   const sourceVideoDuration = sourceAssets
     .filter((asset) => asset.kind === 'video')
     .reduce((sum, asset) => sum + (Number(asset.duration) || 0), 0);
@@ -1687,13 +1710,15 @@ async function createMediaJob(payload = {}) {
   const requestedDuration = Number(payload.durationSeconds) || 0;
   // Uploaded MP3 ki asli length hamesha match karegi. User di hui duration next priority.
   const durationSeconds = Math.min(900, Math.max(15,
-    audioDuration > 0
-      ? Math.round(audioDuration)
-      : requestedDuration > 0
-        ? Math.round(requestedDuration)
-        : sourceVideoDuration > 0
-          ? Math.round(sourceVideoDuration)
-          : storyboard?.durationSeconds || 60,
+    storyAudioDuration > 0
+      ? Math.round(storyAudioDuration)
+      : audioDuration > 0
+        ? Math.round(audioDuration)
+        : requestedDuration > 0
+          ? Math.round(requestedDuration)
+          : sourceVideoDuration > 0
+            ? Math.round(sourceVideoDuration)
+            : storyboard?.durationSeconds || 60,
   ));
   const rawRequestedScenes = Number(payload.sceneCount) || 0;
   // Purane settings me 6 scenes saved ho to 3/5 min ke video me ignore karo — auto count lagao.
@@ -1723,6 +1748,8 @@ async function createMediaJob(payload = {}) {
     durationSeconds,
     clipSeconds: Math.min(10, Math.max(2, Number(payload.clipSeconds) || 5)),
     audioPath,
+    storyAudioPath,
+    storyAudioText: studio ? String(payload.storyText || '').slice(0, 20_000) : '',
     lyrics: String(payload.lyrics || '').slice(0, 12_000),
     imagePrompts: storyboard?.imagePrompts || [],
     characterBible: storyboard?.characterBible || '',
@@ -1759,6 +1786,316 @@ async function createMediaJob(payload = {}) {
   mediaJobs.unshift(job);
   await saveMediaJobs();
   runMediaJob(job).catch(() => {});
+  return job;
+}
+
+/* ---------------------- Studio: text to image (assets only) ------------------- */
+
+// Studio me sirf images chahiye — audio track already bani hui ho to usi ko jod do.
+async function createStudioImageJob(payload = {}) {
+  const text = String(payload.text || '').trim();
+  if (text.length < 8) throw new Error('Scene text likho (kam se kam ek line).');
+  const id = `mj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const storyAudioAbs = payload.storyAudioPath ? resolveJobAudioPath(payload.storyAudioPath) : null;
+  const audioDuration = storyAudioAbs ? await probeAudioDuration(storyAudioAbs) : 0;
+  const requested = Number(payload.count) || 0;
+  const lineCount = requested > 0
+    ? Math.min(24, Math.max(1, Math.round(requested)))
+    : Math.max(2, Math.min(14, Math.round((audioDuration || 60) / 25)));
+  const storyAudioPath = storyAudioAbs
+    ? path.relative(WORKSPACE, storyAudioAbs).replace(/\\/g, '/')
+    : null;
+  const job = {
+    id,
+    type: 'story',
+    prompt: text.slice(0, 20_000),
+    ratio: payload.ratio === '9:16' ? '9:16' : '16:9',
+    style: String(payload.style || 'cinematic').slice(0, 60),
+    fx: [],
+    transitions: ['fade'],
+    visualizers: [],
+    audioFx: [],
+    studio: true,
+    assetsOnly: true,
+    sourceAssets: [],
+    bgmPath: null,
+    bpm: 0,
+    sceneCount: lineCount,
+    manualSceneCount: requested > 0,
+    durationSeconds: audioDuration > 0 ? Math.round(audioDuration) : 60,
+    clipSeconds: 5,
+    audioPath: null,
+    storyAudioPath,
+    storyAudioText: text.slice(0, 20_000),
+    // Audio turant timeline audio track me dikhe — images bante waqt bhi sun sakte ho.
+    narrationPath: storyAudioPath,
+    lyrics: '',
+    imagePrompts: [],
+    characterBible: '',
+    storyboardLines: [],
+    storyboardStarts: [],
+    storyboardEnds: [],
+    narration: true,
+    voice: String(payload.voice || 'auto').slice(0, 120),
+    analysis: null,
+    useAiVideo: false,
+    imageModel: String(payload.imageModel || DEFAULT_IMAGE_MODEL).slice(0, 120),
+    videoModel: String(payload.videoModel || DEFAULT_VIDEO_MODEL).slice(0, 120),
+    imageProvider: String(payload.imageProvider || DEFAULT_IMAGE_PROVIDER).slice(0, 40),
+    videoProvider: String(payload.videoProvider || DEFAULT_VIDEO_PROVIDER).slice(0, 40),
+    chatId: payload.chatId ? String(payload.chatId).slice(0, 80) : null,
+    status: 'queued',
+    progress: 0,
+    step: 'Image job queue me hai…',
+    scenes: [],
+    output: null,
+    outputUrl: null,
+    error: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  mediaJobs.unshift(job);
+  await saveMediaJobs();
+  runStudioImageJob(job).catch(() => {});
+  return job;
+}
+
+// Har image bante hi scene/timeline me save — user ek ek karke images dekh sakta hai.
+async function runStudioImageJob(job) {
+  try {
+    await updateMediaJob(job, {
+      status: 'assets',
+      stage: 'assets',
+      progress: 5,
+      step: 'Story lines se image prompts bana rahe hain…',
+    });
+    const source = String(job.storyAudioText || job.prompt || '').trim();
+    const captions = splitCaptions(source, job.sceneCount);
+    const creds = mediaTtsCredentials.get(job.id) || {};
+    let lineImages = [];
+    try {
+      const generated = await generateVisualBeatsWithModel(job, captions, creds);
+      lineImages = generated.lineImages;
+      job.characterBible = generated.characterBible || '';
+    } catch {
+      lineImages = captions.map((line, index) => fallbackLineImagePrompts(job, line, job.imagePrompts?.[index]));
+    }
+    lineImages = lineImages.map((images, index) => {
+      const list = Array.isArray(images) && images.length
+        ? images.slice(0, 3)
+        : fallbackLineImagePrompts(job, captions[index], job.imagePrompts?.[index]);
+      return list.map((prompt) => withCharacterBible(prompt, job.characterBible));
+    });
+    const visualBeats = buildVisualBeats(job, captions, lineImages);
+    if (!visualBeats.length) throw new Error('Story se koi image prompt nahi bana.');
+    await updateMediaJob(job, {
+      visualBeats,
+      lineImagePrompts: lineImages,
+      imagePrompts: visualBeats.map((beat) => beat.prompt),
+      characterBible: job.characterBible,
+      sceneCount: visualBeats.length,
+      progress: 12,
+      step: `${visualBeats.length} images ban rahe hain — ek ek karke timeline me aa jayenge…`,
+    });
+    const directory = path.join(WORKSPACE, 'media-jobs', job.id);
+    await mkdir(directory, { recursive: true });
+    await collectJobImages(job, visualBeats.map((beat) => beat.prompt), directory, async (index, relativePath) => {
+      if (!relativePath) return;
+      const beat = visualBeats[index] || {};
+      const lineIndex = Number.isFinite(Number(beat?.lineIndex)) ? Number(beat.lineIndex) : index;
+      const scene = job.scenes[index] || { index: index + 1 };
+      scene.lineIndex = lineIndex;
+      scene.caption = captions[lineIndex] || scene.caption || `Scene ${index + 1}`;
+      scene.imagePrompt = beat.prompt || scene.imagePrompt;
+      scene.image = relativePath;
+      scene.status = 'image-ready';
+      job.scenes[index] = scene;
+      const ready = job.scenes.filter((item) => ['ready', 'clip-ready', 'image-ready'].includes(item.status)).length;
+      await updateMediaJob(job, {
+        scenes: job.scenes,
+        stage: 'assets',
+        completedScenes: ready,
+        progress: 20 + Math.round(((index + 1) / visualBeats.length) * 70),
+        step: `Image ${index + 1}/${visualBeats.length} ready — timeline me aa gayi…`,
+      });
+    });
+    await updateMediaJob(job, {
+      status: 'awaiting-render',
+      stage: 'assets',
+      progress: 95,
+      step: `${visualBeats.length} images + audio track ready — ab Create video dabayein final video ke liye.`,
+    });
+  } catch (err) {
+    await updateMediaJob(job, {
+      status: 'error',
+      error: String(err.message || err).slice(0, 600),
+      step: 'Error',
+    });
+  }
+}
+
+// Thumbnail: ek alag cinematic cover image banao.
+async function createStudioThumbnail(payload = {}) {
+  const text = String(payload.text || '').trim();
+  if (text.length < 4) throw new Error('Thumbnail description likho.');
+  const ratio = payload.ratio === '9:16' ? '9:16' : '16:9';
+  const prompt = `Cinematic video cover thumbnail, one clear focal subject, dramatic light, high contrast, no text, no words, no collage: ${text}`;
+  const result = await fetchImageResult(
+    prompt,
+    payload.imageModel || DEFAULT_IMAGE_MODEL,
+    payload.imageProvider || DEFAULT_IMAGE_PROVIDER,
+    ratio,
+  );
+  const bytes = result.images[0];
+  if (!validImageBytes(bytes)) throw new Error('Thumbnail image valid nahi bani.');
+  const id = `thumb_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const directory = path.join(WORKSPACE, 'media-jobs', 'thumbnails', id);
+  await mkdir(directory, { recursive: true });
+  const file = path.join(directory, 'thumbnail.jpg');
+  await writeFile(file, bytes);
+  return {
+    path: file,
+    url: `/api/file?path=${encodeURIComponent(file)}`,
+    provider: result.provider,
+  };
+}
+
+// Text to video: ek short clip banao aur use turant timeline me jod do.
+async function createStudioVideoClip(payload = {}) {
+  const prompt = String(payload.text || '').trim();
+  if (prompt.length < 5) throw new Error('Clip description likho (kam se kam ek line).');
+  const duration = Math.min(10, Math.max(3, Number(payload.duration) || 5));
+  const ratio = payload.ratio === '9:16' ? '9:16' : '16:9';
+  let job = payload.jobId ? mediaJobs.find((item) => item.id === String(payload.jobId)) : null;
+  if (!job) {
+    const id = `mj_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const storyAudioAbs = payload.storyAudioPath ? resolveJobAudioPath(payload.storyAudioPath) : null;
+    const storyAudioPath = storyAudioAbs
+      ? path.relative(WORKSPACE, storyAudioAbs).replace(/\\/g, '/')
+      : null;
+    job = {
+      id,
+      type: 'story',
+      prompt: prompt.slice(0, 20_000),
+      ratio,
+      style: String(payload.style || 'cinematic').slice(0, 60),
+      fx: [],
+      transitions: ['fade'],
+      visualizers: [],
+      audioFx: [],
+      studio: true,
+      assetsOnly: true,
+      sourceAssets: [],
+      bgmPath: null,
+      bpm: 0,
+      sceneCount: 1,
+      manualSceneCount: true,
+      durationSeconds: duration,
+      clipSeconds: duration,
+      audioPath: null,
+      storyAudioPath,
+      storyAudioText: '',
+      narrationPath: storyAudioPath,
+      lyrics: '',
+      imagePrompts: [],
+      characterBible: '',
+      storyboardLines: [],
+      storyboardStarts: [],
+      storyboardEnds: [],
+      narration: false,
+      voice: '',
+      analysis: null,
+      useAiVideo: true,
+      imageModel: String(payload.imageModel || DEFAULT_IMAGE_MODEL).slice(0, 120),
+      videoModel: String(payload.videoModel || DEFAULT_VIDEO_MODEL).slice(0, 120),
+      imageProvider: String(payload.imageProvider || DEFAULT_IMAGE_PROVIDER).slice(0, 40),
+      videoProvider: 'ltx',
+      chatId: payload.chatId ? String(payload.chatId).slice(0, 80) : null,
+      status: 'queued',
+      progress: 0,
+      step: 'Clip queue me hai…',
+      scenes: [],
+      output: null,
+      outputUrl: null,
+      error: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    mediaJobs.unshift(job);
+    await saveMediaJobs();
+  }
+  await updateMediaJob(job, {
+    status: 'assets',
+    stage: 'assets',
+    progress: 15,
+    step: `AI clip ban raha hai: ${prompt.slice(0, 70)}…`,
+  });
+  const directory = path.join(WORKSPACE, 'media-jobs', job.id);
+  await mkdir(directory, { recursive: true });
+  const bytes = await fetchMediaBytesWithRetry(
+    job,
+    'video',
+    prompt,
+    job.videoModel,
+    duration,
+    job.videoProvider || 'ltx',
+    ratio,
+  );
+  const index = (job.scenes || []).length;
+  const file = `clip-${String(index + 1).padStart(2, '0')}.mp4`;
+  await writeFile(path.join(directory, file), bytes);
+  const relative = `media-jobs/${job.id}/${file}`;
+  const scene = job.scenes[index] || { index: index + 1 };
+  scene.video = relative;
+  scene.caption = prompt.slice(0, 160);
+  scene.status = 'clip-ready';
+  scene.duration = duration;
+  job.scenes[index] = scene;
+  await updateMediaJob(job, {
+    scenes: job.scenes,
+    sceneCount: job.scenes.length,
+    status: 'awaiting-render',
+    stage: 'assets',
+    progress: 80,
+    step: 'Clip ready — timeline me aa gayi.',
+  });
+  return {
+    id: job.id,
+    jobId: job.id,
+    clip: relative,
+    url: `/api/file?path=${encodeURIComponent(path.resolve(directory, file))}`,
+    duration,
+    status: job.status,
+  };
+}
+
+// Saved images se final render — naya job nahi, wahi images aur audio.
+async function renderExistingStudioJob(job) {
+  const bin = await ffmpegExecutable('ffmpeg');
+  if (!bin) {
+    await updateMediaJob(job, {
+      status: 'awaiting-render',
+      progress: 75,
+      step: 'Final video browser me render hona baaki hai…',
+    });
+    return job;
+  }
+  const directory = path.join(WORKSPACE, 'media-jobs', job.id);
+  const narration = job.narrationPath ? resolveJobAudioPath(job.narrationPath) : null;
+  const ambient = job.ambientPath ? resolveJobAudioPath(job.ambientPath) : null;
+  await updateMediaJob(job, {
+    status: 'rendering',
+    stage: 'render',
+    progress: 75,
+    step: 'Saved images + audio track se final video render ho raha hai…',
+  });
+  assembleVideoWithFfmpeg(job, directory, { narration, ambient }).catch(async (err) => {
+    await updateMediaJob(job, {
+      status: 'error',
+      error: String(err.message || err).slice(0, 600),
+      step: 'Error',
+    });
+  });
   return job;
 }
 
@@ -1806,7 +2143,15 @@ async function runMediaJob(job) {
     let captions = savedStoryLines.length >= 2
       ? savedStoryLines.slice(0, job.sceneCount)
       : splitCaptions(job.prompt, job.sceneCount);
-    if (job.type === 'story') {
+    if (job.storyAudioPath) {
+      // User ne pehle story ki audio banayi hai — wahi text, wahi length, wahi narration.
+      const storySource = String(job.storyAudioText || job.prompt || '').trim();
+      captions = splitCaptions(storySource, job.sceneCount);
+      await updateMediaJob(job, {
+        step: `Aapki story audio mil gayi (${Math.round(job.durationSeconds)}s) — ${captions.length} scenes usi narration par ban rahe hain…`,
+        progress: 66,
+      });
+    } else if (job.type === 'story') {
       if (Array.isArray(job.storyboardLines) && job.storyboardLines.length >= 2) {
         captions = job.storyboardLines.slice(0, job.sceneCount);
         await updateMediaJob(job, { step: `Storyboard ke ${captions.length} scenes mil gaye — unhi par voice aur images…`, progress: 66 });
@@ -1914,6 +2259,21 @@ async function runMediaJob(job) {
     // Story ke turant baad natural audio — timeline me images aur audio sath sath dikhte hain.
     let narrationPath = job.narrationPath ? resolveJobAudioPath(job.narrationPath) : null;
     try { if (narrationPath) await access(narrationPath); else narrationPath = null; } catch { narrationPath = null; }
+    if (!narrationPath && job.storyAudioPath) {
+      const storyAudio = resolveJobAudioPath(job.storyAudioPath);
+      try {
+        if (storyAudio) await access(storyAudio);
+        narrationPath = storyAudio || null;
+      } catch { narrationPath = null; }
+      if (narrationPath) {
+        await updateMediaJob(job, {
+          narrationPath: job.storyAudioPath,
+          stage: 'voice',
+          step: 'Aapki banayi story audio narration track hai — dobara voice generate nahi ho rahi…',
+          progress: 19,
+        });
+      }
+    }
     let ambientPath = job.ambientPath ? resolveJobAudioPath(job.ambientPath) : null;
     try { if (ambientPath) await access(ambientPath); else ambientPath = null; } catch { ambientPath = null; }
 
@@ -3779,6 +4139,364 @@ async function generateBingImages(prompt) {
 async function generateBingImage(prompt) {
   const images = await generateBingImages(prompt);
   return images[0];
+}
+
+/* ---------------------- ChatGPT web login + image generation ----------------- */
+
+const CHATGPT_DOMAINS = [/chatgpt\.com$/i, /openai\.com$/i, /oaistatic\.com$/i, /oaiusercontent\.com$/i];
+const CHATGPT_CDP_PORT = Number(process.env.CHATGPT_CDP_PORT || 9225);
+const CHATGPT_BROWSER_PROFILE = path.join(WORKSPACE, '.chatgpt-profile');
+let chatgptQueue = Promise.resolve();
+
+async function chatGptCdpAvailable() {
+  try {
+    const response = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/version`, {
+      signal: AbortSignal.timeout(1200),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ChatGPT login ke liye apna alag visible Chrome profile — Bing/cookie browser se lock nahi hota.
+async function ensureChatGptBrowser() {
+  if (await chatGptCdpAvailable()) return;
+  const executable = await findBrowserExecutable();
+  if (!executable) throw new Error('Chrome or Edge was not found on this PC.');
+  await mkdir(CHATGPT_BROWSER_PROFILE, { recursive: true });
+  for (const lock of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    await rm(path.join(CHATGPT_BROWSER_PROFILE, lock), { force: true }).catch(() => {});
+  }
+  const child = spawn(
+    executable,
+    [
+      `--remote-debugging-port=${CHATGPT_CDP_PORT}`,
+      `--user-data-dir=${CHATGPT_BROWSER_PROFILE}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-session-crashed-bubble',
+      '--hide-crash-restore-bubble',
+      'https://chatgpt.com/',
+    ],
+    { detached: true, stdio: 'ignore', windowsHide: false },
+  );
+  child.unref();
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(400);
+    if (await chatGptCdpAvailable()) return;
+  }
+  throw new Error('ChatGPT browser start hua par debugging port nahi khula.');
+}
+
+async function chatGptTarget(openUrl = '') {
+  await ensureChatGptBrowser();
+  if (openUrl) {
+    const response = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/new?${encodeURIComponent(openUrl)}`, {
+      method: 'PUT',
+      signal: AbortSignal.timeout(8000),
+    });
+    if (response.ok) return response.json();
+  }
+  const response = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/list`, {
+    signal: AbortSignal.timeout(8000),
+  });
+  const targets = await response.json();
+  const target = targets.find((item) => item.type === 'page');
+  if (!target) throw new Error('ChatGPT browser me page nahi mila.');
+  return target;
+}
+
+async function chatGptCookiesFromBrowser() {
+  const target = await chatGptTarget();
+  const result = await cdpCommand(target.webSocketDebuggerUrl, 'Storage.getCookies', {});
+  return (result.cookies || []).filter((item) => {
+    const domain = String(item.domain || '').replace(/^\./, '');
+    return CHATGPT_DOMAINS.some((pattern) => pattern.test(domain));
+  });
+}
+
+function withChatGptLock(task) {
+  const run = chatgptQueue.then(task, task);
+  chatgptQueue = run.catch(() => {});
+  return run;
+}
+
+async function loadChatGptState() {
+  try {
+    const raw = await readFile(CHATGPT_STATE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      configured: false,
+      chatId: null,
+      title: CHATGPT_CHAT_TITLE,
+      cookies: [],
+      user: null,
+      ...parsed,
+    };
+  } catch {
+    return { configured: false, chatId: null, title: CHATGPT_CHAT_TITLE, cookies: [], user: null };
+  }
+}
+
+async function saveChatGptState(state) {
+  await writeFile(CHATGPT_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  chatgptSessionState = {
+    configured: Boolean(state.configured),
+    chatId: state.chatId || null,
+    title: state.title || CHATGPT_CHAT_TITLE,
+  };
+}
+
+function chatGptCookieHeader(cookies) {
+  return (cookies || [])
+    .filter((item) => item?.name && item?.value)
+    .map((item) => `${item.name}=${item.value}`)
+    .join('; ')
+    .slice(0, 12_000);
+}
+
+async function chatGptSessionInfo(cookies) {
+  const header = chatGptCookieHeader(cookies);
+  if (!header) return null;
+  try {
+    const response = await fetch('https://chatgpt.com/api/auth/session', {
+      headers: { cookie: header, 'user-agent': UA, accept: 'application/json' },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) return null;
+    const data = await response.json().catch(() => null);
+    if (!data?.user) return null;
+    return { user: data.user, accessToken: data.accessToken || '' };
+  } catch {
+    return null;
+  }
+}
+
+async function openChatGptLogin() {
+  const target = await chatGptTarget('https://chatgpt.com/');
+  await cdpCommand(target.webSocketDebuggerUrl, 'Page.bringToFront', {}).catch(() => {});
+  return { profile: CHATGPT_BROWSER_PROFILE, url: 'https://chatgpt.com/' };
+}
+
+function chatGptInsertScript(text) {
+  return `(() => {
+    const box = document.querySelector('#prompt-textarea') || document.querySelector('textarea[data-testid="prompt-textarea"]');
+    if (!box) throw new Error('ChatGPT composer not found.');
+    box.focus();
+    if (box.isContentEditable) {
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, ${JSON.stringify(text)});
+    } else {
+      const proto = box.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+      setter.call(box, ${JSON.stringify(text)});
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return true;
+  })()`;
+}
+
+const CHATGPT_SEND_SCRIPT = `(() => {
+  const send = document.querySelector('button[data-testid="send-button"]')
+    || [...document.querySelectorAll('button')].find((b) => /send|submit/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.innerText || '')));
+  if (send && !send.disabled) { send.click(); return 'clicked'; }
+  const box = document.querySelector('#prompt-textarea');
+  if (!box) return 'missing';
+  box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+  return 'enter';
+})()`;
+
+const CHATGPT_IMAGE_SCRIPT = `(() => {
+  const urls = [...new Set([...document.querySelectorAll('img')]
+    .map((i) => i.currentSrc || i.src || '')
+    .filter((u) => u && /^https?:/.test(u) && (u.includes('oaiusercontent.com') || u.includes('backend-anon'))))];
+  if (urls.length) return JSON.stringify(urls.slice(-4));
+  const text = document.body.innerText || '';
+  if (/something went wrong|unable to generate|rate limit|too many requests/i.test(text)) return 'ERROR:' + text.slice(0, 160);
+  return false;
+})()`;
+
+// Hamesha wahi persistent "Nova-AI" chat — har image usi conversation me banti hai (character lock).
+async function ensureChatGptChat(state) {
+  if (state?.chatId) return state.chatId;
+  await ensureImageBrowser();
+  await injectImageBrowserCookies(state.cookies);
+  await imageBrowserTarget('https://chatgpt.com/');
+  await sleep(3000);
+  const ready = await waitForPageValue(
+    `(() => Boolean(document.querySelector('#prompt-textarea, textarea[data-testid="prompt-textarea"]')))()`,
+    90_000,
+    imagePageEvaluate,
+  );
+  if (!ready) throw new Error('ChatGPT page ready nahi hua — login check karein.');
+  const existing = await imagePageEvaluate(`(() => {
+    const links = [...document.querySelectorAll('a[href^="/c/"]')];
+    const title = ${JSON.stringify(CHATGPT_CHAT_TITLE.toLowerCase())};
+    const hit = links.find((a) => (a.innerText || '').trim().toLowerCase().includes(title));
+    return hit ? (hit.getAttribute('href') || '') : '';
+  })()`);
+  if (existing) {
+    const id = String(existing).split('/').filter(Boolean).pop();
+    if (id) return id;
+  }
+  // Naya persistent chat banao aur uska naam Nova-AI rakho.
+  await imagePageEvaluate(chatGptInsertScript('Nova-AI workspace ready.'));
+  await sleep(700);
+  await imagePageEvaluate(CHATGPT_SEND_SCRIPT);
+  const chatId = await waitForPageValue(
+    `(() => (location.pathname.match(/\\/c\\/([a-z0-9-]+)/i) || [])[1] || '')`,
+    90_000,
+    imagePageEvaluate,
+  );
+  if (!chatId) return null;
+  await imagePageEvaluate(`(() => {
+    const title = document.querySelector('[data-testid="conversation-title"]');
+    if (!title) return false;
+    title.click();
+    return true;
+  })()`).catch(() => false);
+  await sleep(600);
+  await imagePageEvaluate(`(() => {
+    const input = document.querySelector('input[data-testid="conversation-title"], input[placeholder*="rename" i]');
+    if (!input) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, ${JSON.stringify(CHATGPT_CHAT_TITLE)});
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+    return true;
+  })()`).catch(() => false);
+  return chatId;
+}
+
+async function syncChatGptLogin() {
+  let cookies = [];
+  let session = null;
+  try {
+    cookies = await chatGptCookiesFromBrowser();
+    session = await chatGptSessionInfo(cookies);
+  } catch {
+    /* ChatGPT browser band ho sakta hai */
+  }
+  if (!session) {
+    try {
+      cookies = await cookiesFromCdpPort(CDP_PORT, CHATGPT_DOMAINS);
+      session = await chatGptSessionInfo(cookies);
+    } catch {
+      /* visible Bing browser me bhi nahi mila */
+    }
+  }
+  if (!session) {
+    try {
+      await ensureCookieBrowser();
+      cookies = await cookiesFromCdpPort(COOKIE_CDP_PORT, CHATGPT_DOMAINS);
+      session = await chatGptSessionInfo(cookies);
+    } catch {
+      /* cookie browser bhi nahi chala */
+    }
+  }
+  const previous = await loadChatGptState();
+  if (!session) {
+    return {
+      configured: Boolean(previous.configured),
+      chatId: previous.chatId || null,
+      title: CHATGPT_CHAT_TITLE,
+      user: previous.user || null,
+    };
+  }
+  const saved = {
+    configured: true,
+    title: CHATGPT_CHAT_TITLE,
+    user: {
+      id: session.user?.id || '',
+      name: session.user?.name || '',
+      email: session.user?.email || '',
+      plan: session.user?.plan_type || session.user?.planType || '',
+    },
+    accessToken: session.accessToken || '',
+    cookies: cookies.map((item) => ({
+      name: item.name,
+      value: item.value,
+      domain: item.domain,
+      path: item.path || '/',
+      secure: Boolean(item.secure),
+      httpOnly: Boolean(item.httpOnly),
+    })),
+    chatId: previous.chatId || null,
+    updatedAt: Date.now(),
+  };
+  await saveChatGptState(saved);
+  try {
+    const chatId = await ensureChatGptChat(saved);
+    if (chatId && chatId !== saved.chatId) {
+      saved.chatId = chatId;
+      await saveChatGptState(saved);
+    }
+  } catch {
+    /* chat baad me ban jayega — login saved hai */
+  }
+  return {
+    configured: true,
+    chatId: saved.chatId || null,
+    title: CHATGPT_CHAT_TITLE,
+    user: saved.user,
+  };
+}
+
+async function generateChatGptImages(prompt) {
+  const state = await loadChatGptState();
+  if (!state.configured || !state.cookies?.length) {
+    throw new Error('ChatGPT login nahi hai — pehle “Login with ChatGPT” dabao.');
+  }
+  return withChatGptLock(async () => {
+    await ensureImageBrowser();
+    await injectImageBrowserCookies(state.cookies);
+    let chatId = state.chatId || null;
+    if (!chatId) {
+      chatId = await ensureChatGptChat(state);
+      if (chatId) {
+        state.chatId = chatId;
+        await saveChatGptState(state);
+      }
+    }
+    const url = chatId ? `https://chatgpt.com/c/${chatId}` : 'https://chatgpt.com/';
+    const target = await imageBrowserTarget(url);
+    await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', { url });
+    await sleep(3500);
+    const ready = await waitForPageValue(
+      `(() => Boolean(document.querySelector('#prompt-textarea, textarea[data-testid="prompt-textarea"]')))()`,
+      90_000,
+      imagePageEvaluate,
+    );
+    if (!ready) throw new Error('ChatGPT composer nahi mila — login dobara check karein.');
+    const message = `Create one single image for this scene. One coherent cinematic frame, no collage, no panels, no text. Scene: ${prompt}`;
+    await imagePageEvaluate(chatGptInsertScript(message));
+    await sleep(700);
+    await imagePageEvaluate(CHATGPT_SEND_SCRIPT);
+    const found = await waitForPageValue(CHATGPT_IMAGE_SCRIPT, 180_000, imagePageEvaluate);
+    if (typeof found === 'string' && found.startsWith('ERROR:')) throw new Error(found.slice(6));
+    if (!found || typeof found !== 'string') throw new Error('ChatGPT ne image return nahi ki.');
+    const urls = JSON.parse(found);
+    const header = chatGptCookieHeader(state.cookies);
+    const settled = await Promise.allSettled(
+      urls.map((imageUrl) =>
+        fetch(imageUrl, {
+          headers: { 'user-agent': UA, ...(header ? { cookie: header } : {}) },
+          signal: AbortSignal.timeout(60_000),
+        }).then(async (response) => {
+          if (!response.ok) throw new Error(`ChatGPT image download failed (${response.status}).`);
+          return Buffer.from(await response.arrayBuffer());
+        }),
+      ),
+    );
+    const images = settled
+      .filter((item) => item.status === 'fulfilled' && validImageBytes(item.value))
+      .map((item) => item.value);
+    if (!images.length) {
+      throw new Error(settled.find((item) => item.status === 'rejected')?.reason?.message || 'ChatGPT image invalid aayi.');
+    }
+    return images;
+  });
 }
 
 async function bingCookiesFromBrowser(openTab = false) {
@@ -6339,6 +7057,47 @@ async function synthesizeEdgeNarration(text, rawVoice, outPath) {
   return outPath;
 }
 
+// Studio: story/script ki poori natural audio pehle banao — yahi narration track final video me jayegi.
+async function createStoryAudio(payload = {}) {
+  const text = String(payload.text || '').replace(/\r\n/g, '\n').trim();
+  if (text.length < 10) throw new Error('Story text bahut chhoti hai.');
+  if (text.length > 20_000) throw new Error('Story 20,000 characters se lambi hai.');
+  const voice = String(payload.voice || 'auto').slice(0, 40);
+  const id = `tts_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const directory = path.join(WORKSPACE, 'media-jobs', id);
+  await mkdir(directory, { recursive: true });
+  let file = path.join(directory, 'story-audio.mp3');
+  try {
+    await synthesizeEdgeNarration(text, voice, file);
+  } catch {
+    // Edge network block ho to Windows ka local neural voice use karo.
+    file = path.join(directory, 'story-audio.wav');
+    await synthesizeNarration(text, localVoiceName(voice), file);
+  }
+  const duration = await probeAudioDuration(file) || await estimateStoryAudioDuration(file);
+  if (!duration) throw new Error('Story audio ki length detect nahi hui.');
+  return {
+    path: file,
+    url: `/api/file?path=${encodeURIComponent(file)}`,
+    duration,
+    voice,
+    characters: text.length,
+  };
+}
+
+// ffprobe installed app me hota hai; dev/test me na ho to size se natural length estimate karo.
+async function estimateStoryAudioDuration(file) {
+  try {
+    const info = await stat(file);
+    if (!info.size) return 0;
+    if (/\.mp3$/i.test(file)) return info.size / 6000; // Edge neural 48 kbps mono
+    if (/\.wav$/i.test(file)) return Math.max(1, (info.size - 44) / 44100); // SAPI 22.05 kHz 16-bit mono
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
 function writePcmWav(outPath, pcm, sampleRate) {
   const rate = Math.min(96000, Math.max(8000, Number(sampleRate) || 24000));
   const header = Buffer.alloc(44);
@@ -7257,6 +8016,41 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/chatgpt-status') {
+      const state = await loadChatGptState();
+      return sendJson(res, 200, {
+        configured: Boolean(state.configured),
+        chatId: state.chatId || null,
+        title: state.title || CHATGPT_CHAT_TITLE,
+        user: state.user || null,
+        updatedAt: state.updatedAt || null,
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/chatgpt-login') {
+      if (!BING_SUPPORTED) {
+        return sendJson(res, 400, { error: 'ChatGPT login sirf local Windows PC par chalega.' });
+      }
+      try {
+        const opened = await openChatGptLogin();
+        return sendJson(res, 200, { ok: true, ...opened });
+      } catch (err) {
+        return sendJson(res, 502, { error: err.message || 'ChatGPT login tab nahi khul paaya.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/chatgpt-sync') {
+      if (!BING_SUPPORTED) {
+        return sendJson(res, 400, { error: 'ChatGPT login sirf local Windows PC par chalega.' });
+      }
+      try {
+        const status = await syncChatGptLogin();
+        return sendJson(res, 200, status);
+      } catch (err) {
+        return sendJson(res, 502, { error: err.message || 'ChatGPT login sync nahi hua.' });
+      }
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/sync-bing-login') {
       if (!BING_SUPPORTED) {
         return sendJson(res, 400, { error: 'Bing login sync sirf local Windows PC se chalega.' });
@@ -7350,6 +8144,74 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/video-studio/text-to-audio') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      try {
+        return sendJson(res, 200, await createStoryAudio(payload));
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Story audio nahi bani.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/video-studio/text-to-image') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      try {
+        const job = await createStudioImageJob(payload);
+        mediaTtsCredentials.set(job.id, {
+          key: apiKeyFrom(req),
+          baseUrl: baseUrlFrom(req),
+        });
+        return sendJson(res, 201, {
+          id: job.id,
+          jobId: job.id,
+          status: job.status,
+          sceneCount: job.sceneCount,
+          durationSeconds: job.durationSeconds,
+          narrationPath: job.narrationPath,
+        });
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Images nahi shuru hui.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/video-studio/thumbnail') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      try {
+        return sendJson(res, 200, await createStudioThumbnail(payload));
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Thumbnail nahi bani.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/video-studio/text-to-video') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      try {
+        return sendJson(res, 201, await createStudioVideoClip(payload));
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Clip nahi bani.' });
+      }
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/video-studio/render') {
       let payload;
       try {
@@ -7358,6 +8220,18 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { error: 'Invalid JSON body.' });
       }
       try {
+        // Pehle se bani images + audio track se final render — naya job nahi.
+        if (payload.jobId) {
+          const existing = mediaJobs.find((item) => item.id === String(payload.jobId));
+          const ready = (existing?.scenes || []).filter((scene) => scene.image || scene.video);
+          if (existing && ready.length) {
+            mediaTtsCredentials.set(existing.id, {
+              key: apiKeyFrom(req),
+              baseUrl: baseUrlFrom(req),
+            });
+            return sendJson(res, 200, await renderExistingStudioJob(existing));
+          }
+        }
         const job = await createMediaJob({ ...payload, studio: true });
         mediaTtsCredentials.set(job.id, {
           key: apiKeyFrom(req),
@@ -7875,6 +8749,13 @@ const server = http.createServer(async (req, res) => {
 await loadJobs();
 await loadAllowedFolders();
 await loadMediaJobs();
+await loadChatGptState().then((state) => {
+  chatgptSessionState = {
+    configured: Boolean(state.configured),
+    chatId: state.chatId || null,
+    title: state.title || CHATGPT_CHAT_TITLE,
+  };
+}).catch(() => {});
 await resumeMediaJobs();
 startImageWorker();
 setInterval(() => {
