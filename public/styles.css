@@ -2341,6 +2341,9 @@ video:-webkit-full-screen {
 .track-head small { color: #5f6268; font-size: 8.5px; }
 .timeline-track--image { flex: 0 0 54px; min-height: 54px; }
 .timeline-track--audio { flex: 0 0 44px; min-height: 44px; border-bottom: 0; }
+/* Multi-track system audio track handle karta hai — legacy row sirf <audio> element
+   ke liye chhupi rehti hai (playback chalu rehta hai). */
+.timeline-track.legacy-audio-track { display: none; }
 .track-muted { opacity: .28; filter: saturate(.35); }
 .playhead { position: absolute; top: var(--timeline-head-h); bottom: 0; left: 92px; width: 1px; background: #e9eaec; pointer-events: none; z-index: 4; opacity: .75; }
 .playhead::before { content: ''; position: absolute; top: 0; left: -4px; width: 9px; height: 9px; border-radius: 2px; background: #e9eaec; }
@@ -2361,6 +2364,61 @@ video:-webkit-full-screen {
 .studio-split-mark::before { content: ''; position: absolute; top: 0; left: -3px; width: 7px; height: 7px; border-radius: 2px; background: #d2a35d; }
 .studio-beat img { width: 100%; height: 100%; object-fit: cover; opacity: .62; }
 .studio-beat span { position: absolute; inset: 0; display: grid; place-items: center; color: #d6d8dc; font-size: 8.5px; text-shadow: 0 1px 3px #000; }
+
+/* ---- Multi-track timeline ---- */
+.timeline-tracks { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.timeline-tracks:empty { display: none; }
+.multi-track { display: flex; align-items: stretch; flex: 0 0 auto; min-height: 54px; border-bottom: 1px solid #1c1e21; }
+.multi-track--video { min-height: 64px; }
+.multi-track--image { min-height: 54px; }
+.multi-track--audio { min-height: 44px; }
+.multi-track--fx, .multi-track--transition { min-height: 38px; }
+.multi-track.muted { opacity: .3; filter: saturate(.35); }
+.multi-track.drop-target { outline: 1px dashed #f0c674; outline-offset: -3px; background: #14120c; }
+.multi-track-head { flex: 0 0 92px; display: flex; flex-direction: column; justify-content: center; gap: 3px; padding: 6px 10px; border-right: 1px solid #1c1e21; }
+.multi-track-head .row { display: flex; align-items: center; gap: 4px; }
+.multi-track-head strong { flex: 1; min-width: 0; overflow: hidden; color: #a9acb2; font-size: 9.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.multi-track-head small { color: #5f6268; font-size: 8px; }
+.mini-track-btn { width: 16px; height: 16px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #62656b; cursor: pointer; }
+.mini-track-btn:hover { background: #1d2025; color: #e9eaec; }
+.mini-track-btn.on { color: #f0c674; }
+.mini-track-btn svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.multi-track-lane { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow-x: auto; padding: 6px 14px; }
+.track-clip { position: relative; flex: 0 0 auto; display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 8px; overflow: hidden; border: 1px solid #282b30; border-radius: 7px; background: #121417; cursor: pointer; }
+.multi-track--video .track-clip { height: 54px; }
+.multi-track--image .track-clip { height: 42px; }
+.multi-track--audio .track-clip { height: 32px; }
+.multi-track--fx .track-clip, .multi-track--transition .track-clip { height: 26px; }
+.track-clip.selected { border-color: #f0c674; box-shadow: 0 0 0 2px rgba(240,198,116,.45) inset; }
+.track-clip img, .track-clip video { width: 44px; height: 100%; object-fit: cover; border-radius: 4px; opacity: .65; }
+.track-clip .clip-name { max-width: 130px; overflow: hidden; color: #d6d8dc; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.track-clip .clip-dur { color: #6d7076; font-size: 8.5px; font-variant-numeric: tabular-nums; }
+.track-clip .clip-del { width: 15px; height: 15px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #62656b; cursor: pointer; opacity: 0; }
+.track-clip:hover .clip-del { opacity: 1; }
+.track-clip .clip-del:hover { background: #3a1d1d; color: #ff9d9d; }
+.track-clip .clip-del svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.track-clip[data-kind="fx"] { border-color: #4a3a5c; background: #171320; }
+.track-clip[data-kind="transition"] { border-color: #3d5568; background: #121a20; }
+.track-clip[data-kind="audio"] { border-color: #2f5544; background: #101a15; }
+.track-clip.audio-drop { border-style: dashed; color: #79cda2; }
+
+.track-add-menu { position: relative; display: inline-flex; }
+.track-add-popover { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; min-width: 168px; padding: 5px; border: 1px solid #282b30; border-radius: 10px; background: #14161a; box-shadow: 0 14px 34px rgba(0,0,0,.6); }
+.track-add-popover[hidden] { display: none; }
+.track-add-popover button { width: 100%; display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-radius: 7px; background: transparent; color: #c9cbd0; font-size: 10.5px; text-align: left; cursor: pointer; }
+.track-add-popover button:hover { background: #202329; color: #f4f4f5; }
+.track-add-popover svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Import panel: draggable assets + delete */
+.studio-media-item { position: relative; }
+.studio-media-item.dragging { opacity: .45; }
+.studio-media-item .asset-del { width: 20px; height: 20px; display: grid; place-items: center; flex: 0 0 auto; border: 1px solid #2b2e33; border-radius: 6px; background: #16181c; color: #85888e; cursor: pointer; }
+.studio-media-item .asset-del:hover { border-color: #5a2b2b; background: #2a1616; color: #ff9d9d; }
+.studio-media-item .asset-del svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.studio-media-item .asset-add { width: 20px; height: 20px; display: grid; place-items: center; flex: 0 0 auto; border: 1px solid #2b2e33; border-radius: 6px; background: #16181c; color: #85888e; cursor: pointer; }
+.studio-media-item .asset-add:hover { border-color: #2f5544; background: #14251d; color: #79cda2; }
+.studio-media-item .asset-add svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.studio-media-item[draggable="true"] { cursor: grab; }
 .audio-track { position: relative; flex: 1; height: 100%; display: flex; align-items: center; gap: 8px; overflow: hidden; padding: 0 14px; cursor: pointer; }
 .audio-track:hover { background: #0f1114; }
 .studio-audio { display: none; }

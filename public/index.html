@@ -207,8 +207,11 @@
         <button class="studio-rail-item" type="button" data-pane="sfx" title="Sound Effects" aria-label="Sound Effects">
           <svg viewBox="0 0 24 24"><path d="M5 9v6h4l5 4V5L9 9H5z" /><path d="M17 8c1.5 1.6 1.5 6.4 0 8" /></svg>
         </button>
-        <button class="studio-rail-item" type="button" data-pane="editing" title="Editing" aria-label="Editing">
-          <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 12h3M11 12h9M4 17h8M16 17h4" /><circle cx="16" cy="7" r="2" /><circle cx="9" cy="12" r="2" /><circle cx="14" cy="17" r="2" /></svg>
+        <button class="studio-rail-item" type="button" data-pane="fx" title="FX & look" aria-label="FX and look">
+          <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.6L18 9l-4.2 1.4L12 15l-1.8-4.6L6 9l4.2-1.4L12 3zM18 15l.9 2.3L21 18l-2.1.7L18 21l-.9-2.3L15 18l2.1-.7L18 15z" /></svg>
+        </button>
+        <button class="studio-rail-item" type="button" data-pane="transitions" title="Transitions" aria-label="Transitions">
+          <svg viewBox="0 0 24 24"><path d="M3 8h12l-3-3M21 16H9l3 3" /></svg>
         </button>
         <button class="studio-rail-item" type="button" data-pane="thumbnail" title="Thumbnail" aria-label="Thumbnail">
           <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.6" /><path d="M4 17l5-4 3 2.5 3-2.5 5 4" /></svg>
@@ -287,10 +290,10 @@
             <button class="studio-tab" type="button" data-pane="images" title="Text to image" aria-label="Text to image">
               <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.6" /><path d="M4 17l5-5 4 4 3-3 4 4" /></svg>
             </button>
-            <button class="studio-tab" type="button" data-pane="editing" title="FX & look" aria-label="FX and look">
+            <button class="studio-tab" type="button" data-pane="fx" title="FX & look" aria-label="FX and look">
               <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.6L18 9l-4.2 1.4L12 15l-1.8-4.6L6 9l4.2-1.4L12 3zM18 15l.9 2.3L21 18l-2.1.7L18 21l-.9-2.3L15 18l2.1-.7L18 15z" /></svg>
             </button>
-            <button class="studio-tab" type="button" data-pane="editing" title="Transitions" aria-label="Transitions">
+            <button class="studio-tab" type="button" data-pane="transitions" title="Transitions" aria-label="Transitions">
               <svg viewBox="0 0 24 24"><path d="M3 8h12l-3-3M21 16H9l3 3" /></svg>
             </button>
             <button class="studio-tab" type="button" data-pane="motion" title="Text to video" aria-label="Text to video">
@@ -337,9 +340,17 @@
             <div class="tts-controls">
               <label class="mini-field"><span>Scenes</span><select id="studioImageCount">
                 <option value="auto" selected>Auto</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
                 <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
                 <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8">8</option>
                 <option value="9">9</option>
+                <option value="10">10</option>
+                <option value="11">11</option>
                 <option value="12">12</option>
               </select></label>
               <button class="tts-btn" id="studioImageBtn" type="button">Generate images</button>
@@ -376,15 +387,19 @@
             <label class="studio-check"><input type="checkbox" id="studioNarration" checked /> Narration</label>
           </section>
 
-          <section class="panel-section studio-pane" data-pane="editing">
-            <div class="section-head"><span class="eyebrow">Editing · FX & look</span><span class="studio-pill" id="studioPresetName">Hollywood</span></div>
+          <section class="panel-section studio-pane" data-pane="fx">
+            <div class="section-head"><span class="eyebrow">FX & look</span><span class="studio-pill" id="studioPresetName">Hollywood</span></div>
             <div class="preset-grid" id="studioPresetGrid"></div>
             <select id="studioPreset" hidden></select>
+            <div class="studio-group"><h4>FX <small id="studioFxCount">2 FX</small></h4><div class="studio-chips" id="studioFx"></div></div>
+            <div class="studio-group"><h4>Visualizers</h4><div class="studio-chips" id="studioVisualizers"></div></div>
+          </section>
+
+          <section class="panel-section studio-pane" data-pane="transitions">
+            <div class="section-head"><span class="eyebrow">Transitions</span><span class="studio-pill" id="studioTransitionCount">fade</span></div>
             <label class="mini-field"><span>Transition</span><select id="studioTransition"></select></label>
             <label class="mini-field"><span>BPM</span><input id="studioBpm" type="number" min="0" max="220" value="0" placeholder="Auto" /></label>
-            <div class="studio-group"><h4>FX <small id="studioFxCount">2 FX</small></h4><div class="studio-chips" id="studioFx"></div></div>
-            <div class="studio-group"><h4>Transitions <small id="studioTransitionCount">fade</small></h4><div class="studio-chips" id="studioTransitions"></div></div>
-            <div class="studio-group"><h4>Visualizers</h4><div class="studio-chips" id="studioVisualizers"></div></div>
+            <div class="studio-group"><h4>All transitions</h4><div class="studio-chips" id="studioTransitions"></div></div>
           </section>
 
           <section class="panel-section studio-pane" data-pane="music">
@@ -495,6 +510,18 @@
               <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v6M14 11v6" /></svg>
             </button>
             <span class="tool-sep"></span>
+            <div class="track-add-menu" id="studioTrackAddMenu">
+              <button class="tool-icon track-add-btn" id="studioAddTrack" type="button" title="Add track" aria-label="Add track" aria-expanded="false">
+                <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+              </button>
+              <div class="track-add-popover" id="studioTrackAddPopover" hidden>
+                <button type="button" data-track-type="video"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2" /><path d="M16 10l5-3v10l-5-3z" /></svg>Video track</button>
+                <button type="button" data-track-type="image"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.6" /><path d="M4 17l5-5 4 4 3-3 4 4" /></svg>Image track</button>
+                <button type="button" data-track-type="audio"><svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13" /><path d="M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM19 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z" /></svg>Audio track</button>
+                <button type="button" data-track-type="fx"><svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.6L18 9l-4.2 1.4L12 15l-1.8-4.6L6 9l4.2-1.4L12 3z" /></svg>FX track</button>
+                <button type="button" data-track-type="transition"><svg viewBox="0 0 24 24"><path d="M3 8h12l-3-3M21 16H9l3 3" /></svg>Transition track</button>
+              </div>
+            </div>
             <button class="tool-icon track-toggle" id="studioMuteVideo" type="button" title="Mute video track" aria-label="Mute video track">
               <svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4zM17 9l4 6M21 9l-4 6" /></svg><b>V</b>
             </button>
@@ -527,15 +554,8 @@
           <div class="timeline-progress"><i id="studioProgress"></i></div>
         </header>
         <div class="timeline-ruler" id="studioRuler"><span>00:00</span><span>00:10</span><span>00:20</span><span>00:30</span><span>00:45</span><span>01:00</span></div>
-        <div class="timeline-track">
-          <div class="track-head"><strong>Video</strong><small>V1</small></div>
-          <div class="studio-timeline" id="studioTimeline"><div class="studio-hint">Scenes will appear as they are built.</div></div>
-        </div>
-        <div class="timeline-track timeline-track--image">
-          <div class="track-head"><strong>Images</strong><small>I1</small></div>
-          <div class="studio-timeline" id="studioImageTimeline"><div class="studio-hint">Image beats appear here.</div></div>
-        </div>
-        <div class="timeline-track timeline-track--audio">
+        <div class="timeline-tracks" id="studioTracks"></div>
+        <div class="timeline-track timeline-track--audio legacy-audio-track">
           <div class="track-head"><strong>Audio</strong><small>A1</small></div>
           <div class="audio-track" id="studioAudioTrack" data-track="audio" data-index="0"><div class="audio-wave"><i></i></div><span class="audio-empty">Voice track story ke baad yahan aayega…</span></div>
         </div>

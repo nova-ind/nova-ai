@@ -142,6 +142,10 @@ const els = {
   studioTimeline: $('studioTimeline'),
   studioImageTimeline: $('studioImageTimeline'),
   studioAudioTrack: $('studioAudioTrack'),
+  studioTracks: $('studioTracks'),
+  studioTrackAddMenu: $('studioTrackAddMenu'),
+  studioTrackAddBtn: $('studioAddTrack'),
+  studioTrackAddPopover: $('studioTrackAddPopover'),
   studioRuler: $('studioRuler'),
   studioPlayhead: $('studioPlayhead'),
   studioTimecode: $('studioTimecode'),
@@ -1583,7 +1587,7 @@ async function removeMediaJobsForChat(chat) {
     if (id) ids.add(id);
   }
   for (const job of mediaJobs) {
-    if (job.chatId === chat.id) ids.add(job.id);
+    if (job.chatId === chat.id && !job.studio) ids.add(job.id);
   }
   // Server me maujud lekin chat se hataaye gaye jobs bhi pakdein — warna poll se wapas aa jate hain.
   try {
@@ -1593,7 +1597,8 @@ async function removeMediaJobsForChat(chat) {
       const response = await fetch('/api/media-jobs', { signal: controller.signal });
       const data = await response.json();
       for (const job of data.jobs || []) {
-        if (job.chatId === chat.id) ids.add(job.id);
+        // Studio project alag hai — chat delete hone se uske images/audio delete nahi hone chahiye.
+        if (job.chatId === chat.id && !job.studio) ids.add(job.id);
       }
     } finally {
       clearTimeout(timeout);
@@ -2728,8 +2733,10 @@ function updateStudioPlayhead() {
 
 function syncStudioPlayButton() {
   if (!els.studioTimelinePlay) return;
-  const paused = els.studioPreview?.src
-    ? (!els.studioPreview || els.studioPreview.paused)
+  const job = currentStudioJob();
+  const projectVideo = Boolean(job?.outputUrl) && Boolean(els.studioPreview?.src);
+  const paused = projectVideo
+    ? !els.studioPreview || els.studioPreview.paused
     : !(studioState.audio && !studioState.audio.paused);
   els.studioTimelinePlay.innerHTML = paused
     ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>'
@@ -2751,13 +2758,32 @@ function studioSeekTo(seconds) {
 }
 
 async function toggleStudioPlayback() {
-  const hasVideo = Boolean(els.studioPreview?.src);
-  if (!hasVideo && !studioState.audio) {
+  const job = currentStudioJob();
+  // Current project ka final video hai? Nahi to current project ki voice track.
+  const projectVideo = Boolean(job?.outputUrl) && Boolean(els.studioPreview?.src);
+  const projectAudio = Boolean(studioState.audio);
+  if (!projectVideo && !projectAudio) {
+    // Koi video nahi bana abhi — purana finished video play karo.
+    const fallback = mediaJobs.find((item) => item.studio && item.outputUrl);
+    if (fallback && els.studioPreview) {
+      els.studioPreview.src = fallback.outputUrl;
+      els.studioPreview.dataset.src = fallback.outputUrl;
+      els.studioPreview.dataset.job = fallback.id;
+      els.studioPreviewEmpty.hidden = true;
+      try {
+        await els.studioPreview.play();
+        syncStudioPlayButton();
+        toast('Purana video play ho raha hai — naya render chal raha hai');
+      } catch (error) {
+        toast(error?.message || 'Playback start nahi hua');
+      }
+      return;
+    }
     toast('Pehle voice track ya final video ready ho');
     return;
   }
   try {
-    if (hasVideo) {
+    if (projectVideo) {
       if (els.studioPreview.paused) await els.studioPreview.play();
       else els.studioPreview.pause();
     } else if (studioState.audio.paused) {
@@ -3144,6 +3170,35 @@ function setupStudioTimeline() {
   els.studioMuteVideo?.addEventListener('click', () => toggleStudioTrack('video'));
   els.studioMuteImage?.addEventListener('click', () => toggleStudioTrack('image'));
   els.studioMuteAudio?.addEventListener('click', () => toggleStudioTrack('audio'));
+
+  // Track add menu — video/image/audio/fx/transition tracks (multiple allowed).
+  els.studioTrackAddBtn?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const popover = els.studioTrackAddPopover;
+    if (!popover) return;
+    popover.hidden = !popover.hidden;
+    els.studioTrackAddBtn?.setAttribute('aria-expanded', String(!popover.hidden));
+  });
+  els.studioTrackAddPopover?.addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-track-type]');
+    if (!button) return;
+    event.stopPropagation();
+    const job = currentStudioJob();
+    if (!job) {
+      toast('Pehle Studio me video banayein — tab track add hoga');
+      return;
+    }
+    const type = button.dataset.trackType;
+    els.studioTrackAddPopover.hidden = true;
+    els.studioTrackAddBtn?.setAttribute('aria-expanded', 'false');
+    await studioTrackAction(job.id, 'add-track', { type });
+  });
+  document.addEventListener('click', (event) => {
+    if (!els.studioTrackAddPopover || els.studioTrackAddPopover.hidden) return;
+    if (event.target.closest('#studioTrackAddMenu')) return;
+    els.studioTrackAddPopover.hidden = true;
+    els.studioTrackAddBtn?.setAttribute('aria-expanded', 'false');
+  });
   syncStudioPlayButton();
 }
 
@@ -3411,9 +3466,91 @@ function renderStudioAssets() {
     }
     role.value = asset.role || (asset.kind === 'audio' ? 'voice' : 'scene');
     role.addEventListener('change', () => { asset.role = role.value; });
-    row.append(thumb, meta, role);
+
+    // Timeline me drag karke daal sakte ho.
+    row.draggable = true;
+    row.addEventListener('dragstart', (event) => {
+      row.classList.add('dragging');
+      event.dataTransfer?.setData('application/x-nova-asset', JSON.stringify({
+        path: asset.path,
+        name: asset.name,
+        kind: asset.kind,
+        duration: asset.duration || 5,
+      }));
+      event.dataTransfer?.setData('text/plain', asset.name || asset.path);
+      event.dataTransfer.effectAllowed = 'copy';
+    });
+    row.addEventListener('dragend', () => row.classList.remove('dragging'));
+
+    const actions = document.createElement('div');
+    actions.className = 'inline-row';
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'asset-add';
+    addBtn.title = 'Timeline me add karo';
+    addBtn.setAttribute('aria-label', 'Timeline me add karo');
+    addBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>';
+    addBtn.addEventListener('click', () => addStudioAssetToTimeline(asset));
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'asset-del';
+    delBtn.title = 'File delete karo';
+    delBtn.setAttribute('aria-label', 'File delete karo');
+    delBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13" /></svg>';
+    delBtn.addEventListener('click', () => deleteStudioAsset(asset));
+    actions.append(addBtn, delBtn);
+
+    row.append(thumb, meta, role, actions);
     list.append(row);
   });
+}
+
+// Import panel se asset ko sahi track me daal do.
+async function addStudioAssetToTimeline(asset) {
+  const job = currentStudioJob();
+  if (!job) {
+    toast('Pehle Studio me video banayein — tab timeline me add hoga');
+    return;
+  }
+  const tracks = studioTrackList(job);
+  const wanted = asset.kind === 'audio' ? 'audio' : asset.kind;
+  let target = tracks.find((track) => track.type === wanted);
+  if (!target) target = tracks.find((track) => track.type === 'video');
+  if (!target) {
+    toast('Track nahi mila');
+    return;
+  }
+  await studioTrackAction(job.id, 'add-clip', {
+    trackId: target.id,
+    kind: asset.kind,
+    label: asset.name || 'Imported clip',
+    path: asset.path,
+    start: 0,
+    duration: Math.max(1, Number(asset.duration) || 5),
+  });
+}
+
+// File delete — disk se bhi hatao aur timeline se.
+async function deleteStudioAsset(asset) {
+  if (!asset?.path) return;
+  const index = studioState.assets.findIndex((item) => item.path === asset.path);
+  if (index >= 0) studioState.assets.splice(index, 1);
+  renderStudioAssets();
+  renderStudioMusicList();
+  try {
+    const response = await fetch('/api/media-upload/delete', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ path: asset.path }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Delete fail');
+    toast(`${asset.name || 'File'} delete ho gayi`);
+    await loadMediaJobs();
+    renderStudioDashboard();
+  } catch (error) {
+    toast(error?.message || 'Delete fail');
+  }
 }
 
 function analysisText(asset) {
@@ -3982,7 +4119,8 @@ function renderStudioDashboard() {
     els.studioStepText.textContent = 'Video banane ke liye idea likho ya files import karein.';
     els.studioProgress.style.width = '0%';
     els.studioCounts.textContent = '0 scenes · 0 done';
-    els.studioTimeline.innerHTML = '<div class="studio-hint">Scene timeline yahan dikhogi.</div>';
+    if (els.studioTracks) els.studioTracks.replaceChildren();
+    if (els.studioTimeline) els.studioTimeline.innerHTML = '<div class="studio-hint">Scene timeline yahan dikhogi.</div>';
     if (els.studioImageTimeline) els.studioImageTimeline.innerHTML = '<div class="studio-hint">Image beats yahan dikhenge.</div>';
     if (els.studioAudioTrack) els.studioAudioTrack.innerHTML = '<div class="audio-wave"><i></i></div><span class="audio-empty">Voice track story ke baad yahan aayega…</span>';
     studioState.audio = null;
@@ -4015,8 +4153,8 @@ function renderStudioDashboard() {
     ? `Autosaved ${new Date(job.autosaveAt).toLocaleTimeString()}`
     : 'Autosave on';
 
-  els.studioTimeline.replaceChildren();
-  if (!scenes.length) {
+  els.studioTimeline?.replaceChildren();
+  if (els.studioTimeline && !scenes.length) {
     const hint = document.createElement('div');
     hint.className = 'studio-hint';
     hint.textContent = 'Scenes banate hi yahan live dikhenge.';
@@ -4054,10 +4192,11 @@ function renderStudioDashboard() {
     time.className = 'clip-time';
     time.textContent = `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')}`;
     node.append(time);
-    els.studioTimeline.append(node);
+    els.studioTimeline?.append(node);
   });
   renderStudioImageTimeline(job, scenes);
   renderStudioAudioTrack(job);
+  renderStudioTracks(job);
   renderStudioRuler(Number(job.durationSeconds) || studioVideoDuration());
   updateStudioPlayhead();
   applyStudioSelection();
@@ -4099,14 +4238,25 @@ function renderStudioDashboard() {
   ], 'wait');
 
   els.studioResumeBtn.hidden = !['error', 'awaiting-render'].includes(job.status);
-  if (job.outputUrl && els.studioPreview.dataset.job !== job.id) {
-    els.studioPreview.src = job.outputUrl;
-    els.studioPreview.dataset.job = job.id;
+  // Preview video — current project ka output, warna last finished video (playable rahe).
+  const previewJob = job.outputUrl
+    ? job
+    : mediaJobs.find((item) => item.studio && item.outputUrl) || null;
+  const previewUrl = previewJob?.outputUrl || '';
+  if (previewUrl && els.studioPreview.dataset.src !== previewUrl) {
+    els.studioPreview.src = previewUrl;
+    els.studioPreview.dataset.src = previewUrl;
+    els.studioPreview.dataset.job = previewJob.id;
     els.studioPreviewEmpty.hidden = true;
     if (els.studioPreview.dataset.controls !== '1') {
-      els.studioPreview.parentElement.append(playerControls(els.studioPreview, job.id));
+      els.studioPreview.parentElement.append(playerControls(els.studioPreview, previewJob.id));
       els.studioPreview.dataset.controls = '1';
     }
+  } else if (!previewUrl) {
+    els.studioPreview.removeAttribute('src');
+    els.studioPreview.dataset.src = '';
+    els.studioPreview.dataset.job = '';
+    els.studioPreviewEmpty.hidden = false;
   }
 }
 
@@ -4192,8 +4342,298 @@ function renderStudioImageTimeline(job, scenes) {
   }
 }
 
-function renderStudioPills(container, items, className) {
+/* ---------------------- Multi-track timeline ------------------------------- */
+
+const STUDIO_TRACK_TYPES = ['video', 'image', 'audio', 'fx', 'transition'];
+const STUDIO_TRACK_PREFIX = { video: 'V', image: 'I', audio: 'A', fx: 'FX', transition: 'T' };
+const STUDIO_TRACK_LABEL = { video: 'Video', image: 'Image', audio: 'Audio', fx: 'FX', transition: 'Transition' };
+
+// Job se track list banao — default 5 tracks (video/image/audio/fx/transition) + user added.
+function studioTrackList(job) {
+  const list = Array.isArray(job?.trackList) ? job.trackList : [];
+  const tracks = list
+    .filter((track) => STUDIO_TRACK_TYPES.includes(track?.type))
+    .map((track, index) => ({
+      id: String(track.id || `tr_${track.type}_${index + 1}`),
+      type: track.type,
+      label: String(track.label || `${STUDIO_TRACK_PREFIX[track.type]}${index + 1}`),
+      muted: Boolean(track.muted),
+      locked: Boolean(track.locked),
+      hidden: Boolean(track.hidden),
+      clips: Array.isArray(track.clips) ? track.clips : [],
+    }));
+  for (const type of STUDIO_TRACK_TYPES) {
+    if (tracks.some((track) => track.type === type)) continue;
+    const count = tracks.filter((track) => track.type === type).length + 1;
+    tracks.push({
+      id: `tr_${type}_${count}`,
+      type,
+      label: `${STUDIO_TRACK_PREFIX[type]}${count} · ${STUDIO_TRACK_LABEL[type]}`,
+      muted: false,
+      locked: false,
+      hidden: false,
+      clips: [],
+    });
+  }
+  return tracks;
+}
+
+// Track clips ko scene data se bharo (video/image/fx/transition + audio).
+// Sirf har type ka PEHLA track scene-derived clips dikhata hai — extra tracks
+// sirf user ke manually add kiye clips rakhte hain (CapCut jaisa overlay track).
+function studioTrackClips(job, track, isPrimary = true) {
+  const scenes = Array.isArray(job?.scenes) ? job.scenes : [];
+  const duration = Math.max(1, Number(job?.durationSeconds) || 60);
+  const perScene = duration / Math.max(1, scenes.length);
+  const clips = [];
+  if (isPrimary && (track.type === 'video' || track.type === 'image')) {
+    scenes.forEach((scene, sceneIndex) => {
+      const path = track.type === 'video' ? scene.video : scene.image;
+      if (!path) return;
+      const beat = job.visualBeats?.[sceneIndex];
+      const start = Number.isFinite(Number(beat?.start)) ? Number(beat.start) : perScene * sceneIndex;
+      const end = Number(beat?.end);
+      clips.push({
+        id: `${track.type}_${sceneIndex}`,
+        kind: track.type,
+        label: scene.caption || `${track.type === 'video' ? 'Scene' : 'Image'} ${sceneIndex + 1}`,
+        path,
+        start,
+        duration: end > start ? end - start : perScene,
+        sceneIndex,
+      });
+    });
+  } else if (isPrimary && track.type === 'fx') {
+    const fx = Array.isArray(job?.fx) ? job.fx : [];
+    if (fx.length) {
+      scenes.forEach((scene, sceneIndex) => {
+        const beat = job.visualBeats?.[sceneIndex];
+        const start = Number.isFinite(Number(beat?.start)) ? Number(beat.start) : perScene * sceneIndex;
+        clips.push({
+          id: `fx_${sceneIndex}`,
+          kind: 'fx',
+          label: fx.join(' + '),
+          path: null,
+          start,
+          duration: perScene,
+          sceneIndex,
+        });
+      });
+    }
+  } else if (isPrimary && track.type === 'transition') {
+    const transitions = Array.isArray(job?.transitions) ? job.transitions : [];
+    if (transitions.length) {
+      scenes.forEach((scene, sceneIndex) => {
+        if (sceneIndex >= scenes.length - 1) return;
+        const beat = job.visualBeats?.[sceneIndex];
+        const start = Number.isFinite(Number(beat?.start)) ? Number(beat.start) : perScene * sceneIndex;
+        const end = Number(beat?.end);
+        const clipDuration = end > start ? end - start : perScene;
+        clips.push({
+          id: `t_${sceneIndex}`,
+          kind: 'transition',
+          label: transitions[sceneIndex % transitions.length],
+          path: null,
+          start: start + clipDuration,
+          duration: Math.min(0.8, Math.max(0.2, clipDuration / 5)),
+          sceneIndex,
+        });
+      });
+    }
+  }
+  // User ke manually add kiye clips (extra tracks) — unhe merge karo.
+  for (const clip of track.clips || []) {
+    if (clip?.sceneIndex !== null && clip?.sceneIndex !== undefined && clip.sceneIndex >= 0) continue;
+    clips.push({ ...clip });
+  }
+  if (isPrimary && track.type === 'audio') {
+    const sources = [
+      { path: job.narrationPath, label: 'Narration' },
+      { path: job.audioPath, label: 'Voice / Audio' },
+      { path: job.ambientPath, label: 'Ambient' },
+      { path: job.bgmPath, label: 'BGM' },
+    ].filter((item) => item.path);
+    sources.forEach((source, sourceIndex) => {
+      clips.push({
+        id: `a_${sourceIndex}`,
+        kind: 'audio',
+        label: source.label,
+        path: source.path,
+        start: 0,
+        duration,
+      });
+    });
+  }
+  return clips;
+}
+
+function studioTrackIcon(type) {
+  const paths = {
+    video: '<rect x="3" y="6" width="13" height="12" rx="2" /><path d="M16 10l5-3v10l-5-3z" />',
+    image: '<rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.6" /><path d="M4 17l5-5 4 4 3-3 4 4" />',
+    audio: '<path d="M9 18V5l10-2v13" /><path d="M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM19 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z" />',
+    fx: '<path d="M12 3l1.8 4.6L18 9l-4.2 1.4L12 15l-1.8-4.6L6 9l4.2-1.4L12 3z" />',
+    transition: '<path d="M3 8h12l-3-3M21 16H9l3 3" />',
+  };
+  return `<svg viewBox="0 0 24 24">${paths[type] || paths.video}</svg>`;
+}
+
+function renderStudioTracks(job) {
+  const container = els.studioTracks;
   if (!container) return;
+  container.replaceChildren();
+  const tracks = studioTrackList(job);
+  if (!tracks.length) return;
+  const typeSeen = {};
+  for (const track of tracks) {
+    const isPrimary = !typeSeen[track.type];
+    typeSeen[track.type] = true;
+    if (track.hidden) continue;
+    const row = document.createElement('div');
+    row.className = `multi-track multi-track--${track.type}`;
+    row.dataset.trackId = track.id;
+    row.dataset.trackType = track.type;
+    if (track.muted) row.classList.add('muted');
+
+    const head = document.createElement('div');
+    head.className = 'multi-track-head';
+    const rowTop = document.createElement('div');
+    rowTop.className = 'row';
+    const title = document.createElement('strong');
+    title.textContent = track.label;
+    title.title = `${STUDIO_TRACK_LABEL[track.type]} track — ${track.label}`;
+    const typeTag = document.createElement('small');
+    typeTag.textContent = STUDIO_TRACK_PREFIX[track.type];
+    const muteBtn = document.createElement('button');
+    muteBtn.type = 'button';
+    muteBtn.className = `mini-track-btn${track.muted ? ' on' : ''}`;
+    muteBtn.title = track.muted ? 'Unmute track' : 'Mute track';
+    muteBtn.setAttribute('aria-label', muteBtn.title);
+    muteBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z" /><path d="M17 9l4 6M21 9l-4 6" /></svg>';
+    muteBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      studioTrackAction(job.id, 'update-track', { trackId: track.id, muted: !track.muted });
+    });
+    const lockBtn = document.createElement('button');
+    lockBtn.type = 'button';
+    lockBtn.className = `mini-track-btn${track.locked ? ' on' : ''}`;
+    lockBtn.title = track.locked ? 'Unlock track' : 'Lock track';
+    lockBtn.setAttribute('aria-label', lockBtn.title);
+    lockBtn.innerHTML = '<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>';
+    lockBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      studioTrackAction(job.id, 'update-track', { trackId: track.id, locked: !track.locked });
+    });
+    rowTop.append(title, typeTag, muteBtn, lockBtn);
+    const count = document.createElement('small');
+    count.textContent = `${track.clips?.length || 0} clips`;
+    head.append(rowTop, count);
+
+    const lane = document.createElement('div');
+    lane.className = 'multi-track-lane';
+    const clips = studioTrackClips(job, track, isPrimary);
+    if (!clips.length) {
+      const hint = document.createElement('span');
+      hint.className = 'studio-hint';
+      hint.textContent = track.type === 'audio'
+        ? 'Voice/BGM import karo ya Text-to-audio se banao.'
+        : `${STUDIO_TRACK_LABEL[track.type]} clips yahan aayenge.`;
+      lane.append(hint);
+    }
+    for (const clip of clips) {
+      const node = document.createElement('div');
+      node.className = 'track-clip';
+      node.dataset.kind = clip.kind;
+      node.dataset.trackId = track.id;
+      node.dataset.clipId = clip.id;
+      node.dataset.start = String(clip.start || 0);
+      node.dataset.duration = String(clip.duration || 0);
+      node.title = `${clip.label} · ${formatStudioClock(clip.duration || 0)}`;
+      if (clip.path && (clip.kind === 'image' || clip.kind === 'video')) {
+        const thumb = document.createElement(clip.kind === 'image' ? 'img' : 'video');
+        thumb.src = `/api/file?path=${encodeURIComponent(clip.path)}`;
+        if (clip.kind === 'video') { thumb.muted = true; thumb.preload = 'metadata'; }
+        node.append(thumb);
+      }
+      const name = document.createElement('span');
+      name.className = 'clip-name';
+      name.textContent = clip.label;
+      const dur = document.createElement('span');
+      dur.className = 'clip-dur';
+      dur.textContent = formatStudioClock(clip.duration || 0);
+      node.append(name, dur);
+      if (track.type !== 'video' && track.type !== 'image') {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'clip-del';
+        del.title = 'Clip hatao';
+        del.setAttribute('aria-label', 'Clip hatao');
+        del.innerHTML = '<svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5L5 19" /></svg>';
+        del.addEventListener('click', (event) => {
+          event.stopPropagation();
+          studioTrackAction(job.id, 'remove-clip', { trackId: track.id, clipId: clip.id });
+        });
+        node.append(del);
+      }
+      lane.append(node);
+    }
+
+    // Import panel se drag karke clip drop karo.
+    lane.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      row.classList.add('drop-target');
+    });
+    lane.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+    lane.addEventListener('drop', (event) => {
+      event.preventDefault();
+      row.classList.remove('drop-target');
+      const raw = event.dataTransfer?.getData('application/x-nova-asset');
+      if (!raw) return;
+      let asset;
+      try { asset = JSON.parse(raw); } catch { return; }
+      if (!asset?.path) return;
+      const kind = asset.kind || track.type;
+      const compatible = (track.type === kind)
+        || (track.type === 'video' && kind === 'image')
+        || (track.type === 'image' && kind === 'video')
+        || track.type === 'audio';
+      if (!compatible) {
+        toast(`${STUDIO_TRACK_LABEL[kind]} clip ${STUDIO_TRACK_LABEL[track.type]} track me nahi aa sakta`);
+        return;
+      }
+      studioTrackAction(job.id, 'add-clip', {
+        trackId: track.id,
+        kind,
+        label: asset.name || 'Imported clip',
+        path: asset.path,
+        start: 0,
+        duration: Math.max(1, Number(asset.duration) || 5),
+      });
+    });
+
+    row.append(head, lane);
+    container.append(row);
+  }
+}
+
+async function studioTrackAction(jobId, action, payload = {}) {
+  try {
+    const response = await fetch('/api/video-studio/tracks', {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({ jobId, action, ...payload }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Track update fail');
+    await loadMediaJobs();
+    renderStudioDashboard();
+    toast(action === 'add-track' ? `${STUDIO_TRACK_LABEL[payload.type] || 'Track'} add ho gayi` : 'Timeline update saved');
+  } catch (error) {
+    toast(error?.message || 'Track update fail');
+  }
+}
+
+function renderStudioPills(container, items, className) {  if (!container) return;
   container.replaceChildren();
   const shown = items.slice(-18);
   if (!shown.length) {
@@ -4336,7 +4776,9 @@ function syncMediaJobs(list) {
     if (found) {
       found.message.job = job;
       if (found.chat.id === activeId) patchJobCard(job);
-    } else {
+    } else if (!job.studio) {
+      // Studio jobs apne dashboard me rehte hain — chat card me mat daalo,
+      // warna chat delete karne se user ke banaye images/video delete ho jayenge.
       const target = chats.find((item) => item.id === job.chatId) || activeChat() || ensureChat();
       upsertJobMessage(target, job);
     }
@@ -4401,8 +4843,10 @@ async function cancelMediaJob(jobId) {
 }
 
 function cancelActiveMediaJobs() {
+  // Sirf abhi render chal raha wala job rok do. Studio assets (images/audio
+  // + awaiting-render) user ke banaye hain — unhe kabhi delete mat karo.
   const active = mediaJobs.filter((job) =>
-    ['queued', 'assets', 'awaiting-render', 'rendering'].includes(job.status),
+    !job.studio && ['queued', 'rendering'].includes(job.status),
   );
   for (const job of active) cancelMediaJob(job.id);
   if (active.length) toast('Stuck video job(s) cancel ho gaye');
@@ -6195,7 +6639,7 @@ els.studioSteps.addEventListener('click', (event) => {
   for (const button of els.studioSteps.querySelectorAll('.studio-step')) button.classList.remove('active');
   step.classList.add('active');
   if (step.dataset.stage === 'create') els.studioPrompt.focus();
-  if (step.dataset.stage === 'edit') els.studioTimeline.scrollIntoView({ block: 'center' });
+  if (step.dataset.stage === 'edit') els.studioTracks?.scrollIntoView({ block: 'center' });
   if (step.dataset.stage === 'export') els.studioPreviewWrap?.scrollIntoView?.({ block: 'center' });
 });
 els.ffmpegBtn.addEventListener('click', openFfmpeg);

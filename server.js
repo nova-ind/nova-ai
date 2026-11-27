@@ -1288,22 +1288,111 @@ function buildStoryScript(job, baseCaptions) {
 }
 
 async function loadMediaJobs() {
-  try {
-    const parsed = JSON.parse(await readFile(MEDIA_JOBS_FILE, 'utf8'));
-    mediaJobs = Array.isArray(parsed) ? parsed : [];
-  } catch {
-    mediaJobs = [];
+  // Force-kill ke beech file corrupt na ho — backup se recover karo.
+  for (const file of [MEDIA_JOBS_FILE, `${MEDIA_JOBS_FILE}.bak`]) {
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf8'));
+      if (Array.isArray(parsed)) {
+        mediaJobs = parsed;
+        return;
+      }
+    } catch {
+      /* corrupt ya missing — backup try karo */
+    }
   }
+  mediaJobs = [];
 }
 
 async function saveMediaJobs() {
-  await writeFile(MEDIA_JOBS_FILE, JSON.stringify(mediaJobs, null, 2));
+  // Atomic write — kill ho jaye to purani file intact rahe.
+  const temp = `${MEDIA_JOBS_FILE}.tmp`;
+  const payload = JSON.stringify(mediaJobs, null, 2);
+  await writeFile(temp, payload, 'utf8');
+  try {
+    await copyFile(MEDIA_JOBS_FILE, `${MEDIA_JOBS_FILE}.bak`);
+  } catch {
+    /* first write — backup nahi hai */
+  }
+  await rename(temp, MEDIA_JOBS_FILE);
 }
 
 async function updateMediaJob(job, patch) {
   // Har progress tick + har scene par autosave — app band ho jaye to wahin se resume.
   Object.assign(job, patch, { autosaveAt: Date.now(), updatedAt: Date.now() });
   await saveMediaJobs().catch(() => {});
+}
+
+/* ---------------------- Multi-track timeline model ------------------------- */
+// Track types: video | image | audio | fx | transition
+// Har track me multiple clips ho sakte hain — user audio/image/video tracks
+// unlimited add kar sakta hai. Data job.trackList me persist hota hai.
+const STUDIO_TRACK_TYPES = ['video', 'image', 'audio', 'fx', 'transition'];
+const STUDIO_TRACK_LABELS = {
+  video: 'Video',
+  image: 'Image',
+  audio: 'Audio',
+  fx: 'FX',
+  transition: 'Transition',
+};
+
+function normalizeStudioTracks(job) {
+  const list = Array.isArray(job.trackList) ? job.trackList : [];
+  const tracks = [];
+  for (const raw of list.slice(0, 60)) {
+    const type = STUDIO_TRACK_TYPES.includes(raw?.type) ? raw.type : 'video';
+    const clips = (Array.isArray(raw?.clips) ? raw.clips : [])
+      .slice(0, 200)
+      .map((clip, index) => ({
+        id: String(clip?.id || `c_${Date.now()}_${index}`).slice(0, 60),
+        kind: String(clip?.kind || (type === 'audio' ? 'audio' : type === 'image' ? 'image' : type === 'fx' ? 'fx' : type === 'transition' ? 'transition' : 'video')).slice(0, 30),
+        label: String(clip?.label || 'Clip').slice(0, 160),
+        path: clip?.path ? String(clip.path).slice(0, 600) : null,
+        start: Math.max(0, Number(clip?.start) || 0),
+        duration: Math.max(0.1, Number(clip?.duration) || 5),
+        muted: Boolean(clip?.muted),
+        locked: Boolean(clip?.locked),
+        sceneIndex: Number.isFinite(Number(clip?.sceneIndex)) ? Number(clip.sceneIndex) : null,
+        fx: Array.isArray(clip?.fx) ? clip.fx.slice(0, 30).map((f) => String(f).slice(0, 60)) : [],
+        transition: clip?.transition ? String(clip.transition).slice(0, 60) : null,
+      }));
+    tracks.push({
+      id: String(raw?.id || `tr_${type}_${tracks.length + 1}`).slice(0, 60),
+      type,
+      label: String(raw?.label || STUDIO_TRACK_LABELS[type]).slice(0, 60),
+      muted: Boolean(raw?.muted),
+      locked: Boolean(raw?.locked),
+      hidden: Boolean(raw?.hidden),
+      clips,
+    });
+  }
+  return tracks;
+}
+
+// Render ke liye default tracks ensure karo — video/image/audio/fx/transition sab dikhne chahiye.
+function ensureStudioTrackList(job) {
+  const tracks = normalizeStudioTracks(job);
+  const has = (type) => tracks.some((track) => track.type === type);
+  const defaults = [
+    { type: 'video', label: 'V1 · Video' },
+    { type: 'image', label: 'I1 · Images' },
+    { type: 'audio', label: 'A1 · Audio' },
+    { type: 'fx', label: 'FX1 · Effects' },
+    { type: 'transition', label: 'T1 · Transitions' },
+  ];
+  for (const item of defaults) {
+    if (has(item.type)) continue;
+    tracks.push({
+      id: `tr_${item.type}_${tracks.length + 1}`,
+      type: item.type,
+      label: item.label,
+      muted: false,
+      locked: false,
+      hidden: false,
+      clips: [],
+    });
+  }
+  job.trackList = tracks;
+  return tracks;
 }
 
 function cleanStockQuery(prompt, maxWords = 4) {
@@ -1394,7 +1483,7 @@ async function generateStockImages(prompt, count = 1) {
   throw lastError || new Error('Free stock images unavailable.');
 }
 
-async function fetchImageResult(prompt, model, provider, ratio) {
+async function fetchImageResult(prompt, model, provider, ratio, count = 1) {
   if (provider === 'bing') {
     if (!BING_SUPPORTED) {
       throw new Error(
@@ -1404,7 +1493,7 @@ async function fetchImageResult(prompt, model, provider, ratio) {
     return { images: await generateBingImages(prompt), provider: 'bing' };
   }
   if (provider === 'chatgpt') {
-    return { images: await generateChatGptImages(prompt), provider: 'chatgpt' };
+    return { images: await generateChatGptImages(prompt, count), provider: 'chatgpt' };
   }
   if (provider === 'cloudflare') {
     return { images: [await generateCloudflareImage(prompt, model)], provider: 'cloudflare' };
@@ -1576,9 +1665,12 @@ async function collectJobImages(job, prompts, directory = null, onImage = null) 
     // Bing 2 baar fail ho to free fallback providers — poori video rukti nahi.
     const fallbacks = provider === 'bing'
       ? ['stock', 'cloudflare', 'huggingface', 'worker']
-      : ['stock', 'auto'];
+      : provider === 'chatgpt'
+        ? ['chatgpt']
+        : ['stock', 'auto'];
     let activeProvider = provider;
-    for (let attempt = 0; attempt < 8 && !chosen; attempt += 1) {
+    const maxAttempts = provider === 'chatgpt' ? 3 : 8;
+    for (let attempt = 0; attempt < maxAttempts && !chosen; attempt += 1) {
       const text = variants[Math.min(attempt, variants.length - 1)];
       try {
         chosen = await requestUnique(text, activeProvider);
@@ -1782,6 +1874,8 @@ async function createMediaJob(payload = {}) {
   if (studio && sourceAssets.some((asset) => asset.kind === 'image' || asset.kind === 'video')) {
     job.useAiVideo = false;
   }
+  // Multi-track timeline — video/image/audio/fx/transition tracks default se bante hain.
+  if (studio) ensureStudioTrackList(job);
 
   mediaJobs.unshift(job);
   await saveMediaJobs();
@@ -1800,8 +1894,8 @@ async function createStudioImageJob(payload = {}) {
   const audioDuration = storyAudioAbs ? await probeAudioDuration(storyAudioAbs) : 0;
   const requested = Number(payload.count) || 0;
   const lineCount = requested > 0
-    ? Math.min(24, Math.max(1, Math.round(requested)))
-    : Math.max(2, Math.min(14, Math.round((audioDuration || 60) / 25)));
+    ? Math.min(12, Math.max(1, Math.round(requested)))
+    : Math.max(2, Math.min(12, Math.round((audioDuration || 60) / 25)));
   const storyAudioPath = storyAudioAbs
     ? path.relative(WORKSPACE, storyAudioAbs).replace(/\\/g, '/')
     : null;
@@ -1854,6 +1948,7 @@ async function createStudioImageJob(payload = {}) {
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
+  ensureStudioTrackList(job);
   mediaJobs.unshift(job);
   await saveMediaJobs();
   runStudioImageJob(job).catch(() => {});
@@ -4191,18 +4286,15 @@ async function ensureChatGptBrowser() {
 
 async function chatGptTarget(openUrl = '') {
   await ensureChatGptBrowser();
-  if (openUrl) {
-    const response = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/new?${encodeURIComponent(openUrl)}`, {
-      method: 'PUT',
-      signal: AbortSignal.timeout(8000),
-    });
-    if (response.ok) return response.json();
-  }
   const response = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/list`, {
     signal: AbortSignal.timeout(8000),
   });
   const targets = await response.json();
-  const target = targets.find((item) => item.type === 'page');
+  const pages = targets.filter((item) => item.type === 'page');
+  // Ek hi tab reuse karo — cookies lene ke liye naya tab nahi chahiye.
+  const target = pages.find((item) => item.url.includes('/c/'))
+    || pages.find((item) => item.url.includes('chatgpt.com'))
+    || pages[0];
   if (!target) throw new Error('ChatGPT browser me page nahi mila.');
   return target;
 }
@@ -4214,6 +4306,98 @@ async function chatGptCookiesFromBrowser() {
     const domain = String(item.domain || '').replace(/^\./, '');
     return CHATGPT_DOMAINS.some((pattern) => pattern.test(domain));
   });
+}
+
+// ChatGPT generation bhi isi dedicated browser me hoti hai — headless me Cloudflare
+// challenge aata hai, isliye visible (but background) profile use hota hai.
+// IMPORTANT: hamesha EK hi tab reuse karo — har image ke liye naya tab nahi khulna chahiye.
+async function chatGptGenTarget(openUrl = '') {
+  await ensureChatGptBrowser();
+  const response = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/list`, {
+    signal: AbortSignal.timeout(8000),
+  });
+  const targets = await response.json();
+  const pages = targets.filter((item) => item.type === 'page');
+  // NOVA-AI chat wali tab ko prefer karo — wahi single workspace hai.
+  const preferred = pages.find((item) => item.url.includes('/c/'))
+    || pages.find((item) => item.url.includes('chatgpt.com'))
+    || pages[0];
+  if (!preferred) {
+    // Ek hi tab banao — iske baad hamesha reuse hoga.
+    try {
+      const created = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/new?${encodeURIComponent(openUrl || 'https://chatgpt.com/')}`, {
+        method: 'PUT',
+        signal: AbortSignal.timeout(8000),
+      });
+      if (created.ok) return created.json();
+    } catch {
+      /* ignore */
+    }
+    throw new Error('ChatGPT browser me page nahi mila.');
+  }
+  if (openUrl && !String(preferred.url || '').includes('/c/')) {
+    await cdpCommand(preferred.webSocketDebuggerUrl, 'Page.navigate', { url: openUrl }).catch(() => {});
+  }
+  return preferred;
+}
+
+// Duplicate ChatGPT tabs band kar do — sirf ek NOVA-AI tab rahe.
+async function closeExtraChatGptTabs(keepId = '') {
+  try {
+    const response = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/list`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    const targets = await response.json();
+    const pages = targets.filter((item) => item.type === 'page' && item.url.includes('chatgpt.com'));
+    if (pages.length <= 1) return 0;
+    const keep = pages.find((item) => item.id === keepId)
+      || pages.find((item) => item.url.includes('/c/'))
+      || pages[0];
+    let closed = 0;
+    for (const page of pages) {
+      if (page.id === keep.id) continue;
+      try {
+        await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/close/${page.id}`);
+        closed += 1;
+      } catch {
+        /* ignore */
+      }
+    }
+    return closed;
+  } catch {
+    return 0;
+  }
+}
+
+async function chatGptGenEvaluate(expression) {
+  const target = await chatGptGenTarget();
+  const result = await cdpCommand(target.webSocketDebuggerUrl, 'Runtime.evaluate', {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.exception?.description || 'Page script failed.');
+  }
+  return result.result?.value;
+}
+
+// ChatGPT me page load hone tak wait — Cloudflare challenge clear hone dete hain.
+async function chatGptWaitReady(timeoutMs = 120_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const title = await chatGptGenEvaluate('document.title || ""').catch(() => '');
+    const hasComposer = await chatGptGenEvaluate(
+      `(() => Boolean(document.querySelector('div.ProseMirror[contenteditable="true"], #prompt-textarea')))()`,
+    ).catch(() => false);
+    if (hasComposer) return true;
+    if (/Just a moment/i.test(String(title))) {
+      await sleep(1500);
+      continue;
+    }
+    await sleep(1000);
+  }
+  return false;
 }
 
 function withChatGptLock(task) {
@@ -4229,13 +4413,14 @@ async function loadChatGptState() {
     return {
       configured: false,
       chatId: null,
+      projectId: null,
       title: CHATGPT_CHAT_TITLE,
       cookies: [],
       user: null,
       ...parsed,
     };
   } catch {
-    return { configured: false, chatId: null, title: CHATGPT_CHAT_TITLE, cookies: [], user: null };
+    return { configured: false, chatId: null, projectId: null, title: CHATGPT_CHAT_TITLE, cookies: [], user: null };
   }
 }
 
@@ -4244,6 +4429,7 @@ async function saveChatGptState(state) {
   chatgptSessionState = {
     configured: Boolean(state.configured),
     chatId: state.chatId || null,
+    projectId: state.projectId || null,
     title: state.title || CHATGPT_CHAT_TITLE,
   };
 }
@@ -4281,11 +4467,18 @@ async function openChatGptLogin() {
 
 function chatGptInsertScript(text) {
   return `(() => {
-    const box = document.querySelector('#prompt-textarea') || document.querySelector('textarea[data-testid="prompt-textarea"]');
+    const box = document.querySelector('div.ProseMirror[contenteditable="true"]')
+      || document.querySelector('#prompt-textarea')
+      || document.querySelector('textarea[data-testid="prompt-textarea"]');
     if (!box) throw new Error('ChatGPT composer not found.');
     box.focus();
     if (box.isContentEditable) {
-      document.execCommand('selectAll', false, null);
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(box);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
       document.execCommand('insertText', false, ${JSON.stringify(text)});
     } else {
       const proto = box.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -4293,79 +4486,201 @@ function chatGptInsertScript(text) {
       setter.call(box, ${JSON.stringify(text)});
       box.dispatchEvent(new Event('input', { bubbles: true }));
     }
+    box.dispatchEvent(new Event('input', { bubbles: true }));
     return true;
   })()`;
 }
 
 const CHATGPT_SEND_SCRIPT = `(() => {
-  const send = document.querySelector('button[data-testid="send-button"]')
+  const send = document.querySelector('button[aria-label="Send"]')
+    || document.querySelector('button[data-testid="send-button"]')
     || [...document.querySelectorAll('button')].find((b) => /send|submit/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.innerText || '')));
   if (send && !send.disabled) { send.click(); return 'clicked'; }
-  const box = document.querySelector('#prompt-textarea');
+  const box = document.querySelector('div.ProseMirror[contenteditable="true"]') || document.querySelector('#prompt-textarea');
   if (!box) return 'missing';
   box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
   return 'enter';
 })()`;
 
+// ChatGPT page se image URLs nikaalne ka expression (oaiusercontent / backend-anon / data / blob).
+const CHATGPT_IMAGE_URLS_EXPR = `[...new Set([...document.querySelectorAll('img')]
+  .map((i) => i.currentSrc || i.src || '')
+  .filter((u) => u && (
+    (/^https?:/.test(u) && (u.includes('oaiusercontent.com') || u.includes('backend-anon')))
+    || u.startsWith('data:image')
+    || u.startsWith('blob:')
+  )))]`;
+
 const CHATGPT_IMAGE_SCRIPT = `(() => {
-  const urls = [...new Set([...document.querySelectorAll('img')]
-    .map((i) => i.currentSrc || i.src || '')
-    .filter((u) => u && /^https?:/.test(u) && (u.includes('oaiusercontent.com') || u.includes('backend-anon'))))];
-  if (urls.length) return JSON.stringify(urls.slice(-4));
+  const urls = ${CHATGPT_IMAGE_URLS_EXPR};
+  if (urls.length) return JSON.stringify(urls.slice(-12));
   const text = document.body.innerText || '';
-  if (/something went wrong|unable to generate|rate limit|too many requests/i.test(text)) return 'ERROR:' + text.slice(0, 160);
+  if (/something went wrong|unable to generate|rate limit|too many requests|image generation failed/i.test(text)) return 'ERROR:' + text.slice(0, 160);
   return false;
 })()`;
 
+// ChatGPT naye UI me image ko blob: URL se deta hai — Node blob fetch nahi kar sakta,
+// isliye bytes page ke andar hi nikaal kar base64 me bhejte hain.
+const CHATGPT_IMAGE_CAPTURE_SCRIPT = (urls) => `(async () => {
+  try {
+    const store = [];
+    for (const u of ${JSON.stringify(urls)}) {
+      try {
+        const res = await fetch(u, { credentials: 'include' });
+        if (!res.ok) continue;
+        const buf = new Uint8Array(await res.arrayBuffer());
+        if (!buf.length) continue;
+        store.push({ url: u, bytes: buf });
+      } catch (e) { /* cross-origin ya expired blob */ }
+    }
+    window.__novaImgStore = store;
+    return JSON.stringify(store.map((s) => ({ url: s.url, length: s.bytes.length })));
+  } catch (e) {
+    return 'ERROR:' + String(e);
+  }
+})()`;
+
+const CHATGPT_IMAGE_CHUNK_SCRIPT = (index, offset, size) => `(() => {
+  const store = window.__novaImgStore || [];
+  const item = store[${index}];
+  if (!item) return '';
+  const end = Math.min(item.bytes.length, ${offset} + ${size});
+  let bin = '';
+  for (let i = ${offset}; i < end; i += 8192) {
+    bin += String.fromCharCode.apply(null, item.bytes.subarray(i, Math.min(i + 8192, end)));
+  }
+  return btoa(bin);
+})()`;
+
+// ChatGPT conversation rename — backend API (access token chahiye).
+const CHATGPT_RENAME_SCRIPT = (chatId, title) => `(async () => {
+  try {
+    let token = '';
+    try {
+      const s = await fetch('/api/auth/session');
+      const j = await s.json();
+      token = j.accessToken || '';
+    } catch (e) { /* ignore */ }
+    const headers = { 'content-type': 'application/json' };
+    if (token) headers.authorization = 'Bearer ' + token;
+    const res = await fetch('/backend-api/conversation/${chatId}', {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ title: ${JSON.stringify(title)} }),
+    });
+    return res.ok ? 'ok' : 'failed:' + res.status;
+  } catch (e) { return 'error:' + String(e); }
+})()`;
+
+const CHATGPT_PROJECT_TITLE = 'Nova-AI';
+
+async function ensureChatGptProject() {
+  const target = await chatGptGenTarget('https://chatgpt.com/');
+  await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', { url: 'https://chatgpt.com/' });
+  await sleep(3000);
+  await chatGptWaitReady();
+  // Pehle se bana project dhoondho.
+  const existing = await chatGptGenEvaluate(`(() => {
+    const title = ${JSON.stringify(CHATGPT_PROJECT_TITLE.toLowerCase())};
+    const links = [...document.querySelectorAll('a[href^="/g/"]')];
+    const hit = links.find((a) => (a.innerText || '').trim().toLowerCase() === title)
+      || links.find((a) => (a.innerText || '').trim().toLowerCase().includes(title));
+    return hit ? (hit.getAttribute('href') || '') : '';
+  })()`);
+  if (existing) {
+    const match = String(existing).match(/\/g\/([^/]+)/);
+    if (match) return match[1];
+  }
+  // Naya project banao.
+  const clicked = await chatGptGenEvaluate(`(() => {
+    const btn = document.querySelector('button[aria-label="Add new project"]');
+    if (!btn) return 'no-button';
+    btn.click();
+    return 'clicked';
+  })()`);
+  if (clicked !== 'clicked') return null;
+  await sleep(1800);
+  await chatGptGenEvaluate(`(() => {
+    const input = document.querySelector('input[placeholder], input[aria-label*="name" i]');
+    if (!input) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, ${JSON.stringify(CHATGPT_PROJECT_TITLE)});
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`).catch(() => false);
+  await sleep(700);
+  await chatGptGenEvaluate(`(() => {
+    const btn = [...document.querySelectorAll('button')].find((b) => (b.innerText || '').trim() === 'Create project');
+    if (!btn) return false;
+    btn.click();
+    return true;
+  })()`).catch(() => false);
+  await sleep(4000);
+  const created = await chatGptGenEvaluate(`(() => {
+    const match = location.pathname.match(/\\/g\\/([^/]+)/);
+    return match ? match[1] : '';
+  })()`);
+  return created || null;
+}
+
 // Hamesha wahi persistent "Nova-AI" chat — har image usi conversation me banti hai (character lock).
 async function ensureChatGptChat(state) {
+  const projectId = state?.projectId || (await ensureChatGptProject());
+  if (projectId) {
+    state.projectId = projectId;
+    await saveChatGptState(state);
+  }
   if (state?.chatId) return state.chatId;
-  await ensureImageBrowser();
-  await injectImageBrowserCookies(state.cookies);
-  await imageBrowserTarget('https://chatgpt.com/');
+  await ensureChatGptBrowser();
+  const startUrl = projectId ? `https://chatgpt.com/g/${projectId}/project` : 'https://chatgpt.com/';
+  const target = await chatGptGenTarget(startUrl);
+  await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', { url: startUrl });
   await sleep(3000);
-  const ready = await waitForPageValue(
-    `(() => Boolean(document.querySelector('#prompt-textarea, textarea[data-testid="prompt-textarea"]')))()`,
-    90_000,
-    imagePageEvaluate,
-  );
+  const ready = await chatGptWaitReady();
   if (!ready) throw new Error('ChatGPT page ready nahi hua — login check karein.');
-  const existing = await imagePageEvaluate(`(() => {
-    const links = [...document.querySelectorAll('a[href^="/c/"]')];
+  // Project ke andar pehle se bana NOVA-AI chat dhoondho.
+  const existing = await chatGptGenEvaluate(`(() => {
     const title = ${JSON.stringify(CHATGPT_CHAT_TITLE.toLowerCase())};
-    const hit = links.find((a) => (a.innerText || '').trim().toLowerCase().includes(title));
+    const links = [...document.querySelectorAll('a[href*="/c/"]')];
+    const hit = links.find((a) => (a.innerText || '').trim().toLowerCase() === title)
+      || links.find((a) => (a.innerText || '').trim().toLowerCase().includes(title));
     return hit ? (hit.getAttribute('href') || '') : '';
   })()`);
   if (existing) {
     const id = String(existing).split('/').filter(Boolean).pop();
     if (id) return id;
   }
-  // Naya persistent chat banao aur uska naam Nova-AI rakho.
-  await imagePageEvaluate(chatGptInsertScript('Nova-AI workspace ready.'));
-  await sleep(700);
-  await imagePageEvaluate(CHATGPT_SEND_SCRIPT);
+  // Naya chat banao aur uska naam NOVA-AI rakho.
+  await chatGptGenEvaluate(chatGptInsertScript('Nova AI image workspace ready. All images for Nova Video Studio are generated in this chat with a consistent character.'));
+  await sleep(800);
+  await chatGptGenEvaluate(CHATGPT_SEND_SCRIPT);
   const chatId = await waitForPageValue(
     `(() => (location.pathname.match(/\\/c\\/([a-z0-9-]+)/i) || [])[1] || '')`,
     90_000,
-    imagePageEvaluate,
+    chatGptGenEvaluate,
   );
   if (!chatId) return null;
-  await imagePageEvaluate(`(() => {
-    const title = document.querySelector('[data-testid="conversation-title"]');
-    if (!title) return false;
-    title.click();
-    return true;
-  })()`).catch(() => false);
-  await sleep(600);
-  await imagePageEvaluate(`(() => {
-    const input = document.querySelector('input[data-testid="conversation-title"], input[placeholder*="rename" i]');
-    if (!input) return false;
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-    setter.call(input, ${JSON.stringify(CHATGPT_CHAT_TITLE)});
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-    return true;
-  })()`).catch(() => false);
+  await sleep(2500);
+  const renamed = await chatGptGenEvaluate(CHATGPT_RENAME_SCRIPT(chatId, CHATGPT_CHAT_TITLE)).catch(() => '');
+  if (renamed !== 'ok') {
+    await chatGptGenEvaluate(`(() => {
+      const title = document.querySelector('.px-conversation-title-inline');
+      if (!title) return false;
+      title.click();
+      return true;
+    })()`).catch(() => false);
+    await sleep(700);
+    await chatGptGenEvaluate(`(() => {
+      const input = document.querySelector('input[data-testid="conversation-title"], input[placeholder*="rename" i]');
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(CHATGPT_CHAT_TITLE)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+      return true;
+    })()`).catch(() => false);
+  }
   return chatId;
 }
 
@@ -4400,6 +4715,7 @@ async function syncChatGptLogin() {
     return {
       configured: Boolean(previous.configured),
       chatId: previous.chatId || null,
+      projectId: previous.projectId || null,
       title: CHATGPT_CHAT_TITLE,
       user: previous.user || null,
     };
@@ -4423,6 +4739,7 @@ async function syncChatGptLogin() {
       httpOnly: Boolean(item.httpOnly),
     })),
     chatId: previous.chatId || null,
+    projectId: previous.projectId || null,
     updatedAt: Date.now(),
   };
   await saveChatGptState(saved);
@@ -4438,19 +4755,20 @@ async function syncChatGptLogin() {
   return {
     configured: true,
     chatId: saved.chatId || null,
+    projectId: saved.projectId || null,
     title: CHATGPT_CHAT_TITLE,
     user: saved.user,
   };
 }
 
-async function generateChatGptImages(prompt) {
+async function generateChatGptImages(prompt, count = 1) {
   const state = await loadChatGptState();
   if (!state.configured || !state.cookies?.length) {
     throw new Error('ChatGPT login nahi hai — pehle “Login with ChatGPT” dabao.');
   }
+  const wanted = Math.max(1, Math.min(12, Math.round(Number(count) || 1)));
   return withChatGptLock(async () => {
-    await ensureImageBrowser();
-    await injectImageBrowserCookies(state.cookies);
+    await ensureChatGptBrowser();
     let chatId = state.chatId || null;
     if (!chatId) {
       chatId = await ensureChatGptChat(state);
@@ -4459,43 +4777,90 @@ async function generateChatGptImages(prompt) {
         await saveChatGptState(state);
       }
     }
-    const url = chatId ? `https://chatgpt.com/c/${chatId}` : 'https://chatgpt.com/';
-    const target = await imageBrowserTarget(url);
-    await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', { url });
-    await sleep(3500);
-    const ready = await waitForPageValue(
-      `(() => Boolean(document.querySelector('#prompt-textarea, textarea[data-testid="prompt-textarea"]')))()`,
-      90_000,
-      imagePageEvaluate,
-    );
-    if (!ready) throw new Error('ChatGPT composer nahi mila — login dobara check karein.');
-    const message = `Create one single image for this scene. One coherent cinematic frame, no collage, no panels, no text. Scene: ${prompt}`;
-    await imagePageEvaluate(chatGptInsertScript(message));
-    await sleep(700);
-    await imagePageEvaluate(CHATGPT_SEND_SCRIPT);
-    const found = await waitForPageValue(CHATGPT_IMAGE_SCRIPT, 180_000, imagePageEvaluate);
-    if (typeof found === 'string' && found.startsWith('ERROR:')) throw new Error(found.slice(6));
-    if (!found || typeof found !== 'string') throw new Error('ChatGPT ne image return nahi ki.');
-    const urls = JSON.parse(found);
-    const header = chatGptCookieHeader(state.cookies);
-    const settled = await Promise.allSettled(
-      urls.map((imageUrl) =>
-        fetch(imageUrl, {
-          headers: { 'user-agent': UA, ...(header ? { cookie: header } : {}) },
-          signal: AbortSignal.timeout(60_000),
-        }).then(async (response) => {
-          if (!response.ok) throw new Error(`ChatGPT image download failed (${response.status}).`);
-          return Buffer.from(await response.arrayBuffer());
-        }),
-      ),
-    );
-    const images = settled
-      .filter((item) => item.status === 'fulfilled' && validImageBytes(item.value))
-      .map((item) => item.value);
-    if (!images.length) {
-      throw new Error(settled.find((item) => item.status === 'rejected')?.reason?.message || 'ChatGPT image invalid aayi.');
+    const projectId = state.projectId || null;
+    const url = chatId
+      ? (projectId ? `https://chatgpt.com/g/${projectId}/c/${chatId}` : `https://chatgpt.com/c/${chatId}`)
+      : 'https://chatgpt.com/';
+    // SIRF EK TAB — naya tab kabhi nahi khulna chahiye.
+    const target = await chatGptGenTarget(url);
+    if (chatId && !String(target.url || '').includes(`/c/${chatId}`)) {
+      await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', { url });
+      await sleep(3000);
     }
-    return images;
+    const ready = await chatGptWaitReady();
+    if (!ready) throw new Error('ChatGPT composer nahi mila — login dobara check karein.');
+    const header = chatGptCookieHeader(state.cookies);
+    const images = [];
+    // Ek ek karke: pehle prompt → image → download → phir next prompt.
+    for (let round = 0; round < wanted && images.length < wanted; round += 1) {
+      const before = await chatGptGenEvaluate(`(() => ${CHATGPT_IMAGE_URLS_EXPR})()`).catch(() => []);
+      const message = wanted > 1
+        ? `Create image ${round + 1} of ${wanted} for this story. One single coherent cinematic frame — no collage, no panels, no grid, no text, no captions. Keep the same character and style in every image. Scene: ${prompt}`
+        : `Create one single image for this scene. One coherent cinematic frame, no collage, no panels, no text. Scene: ${prompt}`;
+      await chatGptGenEvaluate(chatGptInsertScript(message));
+      await sleep(900);
+      await chatGptGenEvaluate(CHATGPT_SEND_SCRIPT);
+      const freshScript = `(() => {
+        const urls = ${CHATGPT_IMAGE_URLS_EXPR};
+        const before = ${JSON.stringify(Array.isArray(before) ? before : [])};
+        const fresh = urls.filter((u) => !before.includes(u));
+        if (fresh.length) return JSON.stringify(fresh.slice(-4));
+        const text = document.body.innerText || '';
+        if (/something went wrong|unable to generate|rate limit|too many requests|image generation failed/i.test(text)) return 'ERROR:' + text.slice(0, 160);
+        return false;
+      })()`;
+      const found = await waitForPageValue(freshScript, 180_000, chatGptGenEvaluate);
+      if (typeof found === 'string' && found.startsWith('ERROR:')) throw new Error(found.slice(6));
+      if (!found || typeof found !== 'string') throw new Error('ChatGPT ne image return nahi ki.');
+      const urls = JSON.parse(found);
+      const freshImages = [];
+      // 1) blob:/data: URLs — bytes page ke andar se hi lo.
+      const localUrls = urls.filter((u) => u.startsWith('blob:') || u.startsWith('data:'));
+      if (localUrls.length) {
+        const meta = await chatGptGenEvaluate(CHATGPT_IMAGE_CAPTURE_SCRIPT(localUrls)).catch(() => '');
+        if (meta && !String(meta).startsWith('ERROR:')) {
+          const list = JSON.parse(meta);
+          for (let index = 0; index < list.length; index += 1) {
+            const parts = [];
+            for (let offset = 0; offset < list[index].length; offset += 512 * 1024) {
+              const chunk = await chatGptGenEvaluate(
+                CHATGPT_IMAGE_CHUNK_SCRIPT(index, offset, 512 * 1024),
+              ).catch(() => '');
+              if (!chunk) break;
+              parts.push(chunk);
+            }
+            if (parts.length) {
+              const bytes = Buffer.from(parts.join(''), 'base64');
+              if (validImageBytes(bytes)) freshImages.push(bytes);
+            }
+          }
+        }
+      }
+      // 2) http(s) URLs — Node se cookie ke saath download.
+      const remoteUrls = urls.filter((u) => /^https?:/i.test(u));
+      if (remoteUrls.length) {
+        const settled = await Promise.allSettled(
+          remoteUrls.map((imageUrl) =>
+            fetch(imageUrl, {
+              headers: { 'user-agent': UA, ...(header ? { cookie: header } : {}) },
+              signal: AbortSignal.timeout(60_000),
+            }).then(async (response) => {
+              if (!response.ok) throw new Error(`ChatGPT image download failed (${response.status}).`);
+              return Buffer.from(await response.arrayBuffer());
+            }),
+          ),
+        );
+        for (const item of settled) {
+          if (item.status === 'fulfilled' && validImageBytes(item.value)) freshImages.push(item.value);
+        }
+      }
+      if (!freshImages.length) {
+        throw new Error('ChatGPT image bytes nahi mile — page reload ho gaya, dobara try karein.');
+      }
+      images.push(...freshImages);
+    }
+    await closeExtraChatGptTabs(target.id);
+    return images.slice(0, wanted);
   });
 }
 
@@ -7578,6 +7943,38 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
     ? audioIndex++ : null;
   if (silenceIndex !== null) args.push('-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo');
 
+  // ---- Extra timeline tracks (user ke drag/add kiye clips) ----
+  // Video/Image track ka extra clip overlay banta hai, audio track ka clip mix hota hai.
+  const extraVisualInputs = [];
+  const extraAudioInputs = [];
+  const timelineTracks = Array.isArray(job.trackList) ? job.trackList : [];
+  for (const track of timelineTracks) {
+    if (!track || track.hidden || track.muted) continue;
+    for (const clip of Array.isArray(track.clips) ? track.clips : []) {
+      if (!clip?.path) continue;
+      // Scene-derived clips base render me already hain — double mat karo.
+      if (clip.sceneIndex !== null && clip.sceneIndex !== undefined) continue;
+      const start = Math.max(0, Number(clip.start) || 0);
+      if (start >= target) continue;
+      const duration = Math.max(0.2, Math.min(Number(clip.duration) || 5, target - start));
+      const absolute = path.resolve(WORKSPACE, String(clip.path).replace(/\\/g, '/'));
+      if (!pathInAllowedFolders(absolute)) continue;
+      if (track.type === 'video' || track.type === 'image') {
+        const index = audioIndex++;
+        if (track.type === 'image') {
+          args.push('-loop', '1', '-framerate', String(fps), '-t', duration.toFixed(3), '-i', absolute);
+        } else {
+          args.push('-stream_loop', '-1', '-t', duration.toFixed(3), '-i', absolute);
+        }
+        extraVisualInputs.push({ index, kind: track.type, start, duration });
+      } else if (track.type === 'audio') {
+        const index = audioIndex++;
+        args.push('-i', absolute);
+        extraAudioInputs.push({ index, start, duration });
+      }
+    }
+  }
+
   const filters = [];
   for (let index = 0; index < count; index += 1) {
     const frames = Math.max(2, Math.round(durations[index] * fps));
@@ -7632,6 +8029,34 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
     );
     current = label;
   }
+  // Extra video/image track clips — center overlay (CapCut jaisa layer).
+  extraVisualInputs.forEach((clip, position) => {
+    const start = clip.start;
+    const duration = clip.duration;
+    const fade = Math.min(0.25, duration / 3);
+    const overlayLabel = `xov${position}`;
+    const mergedLabel = `xovb${position}`;
+    const scale = `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2`;
+    if (clip.kind === 'image') {
+      filters.push(
+        `[${clip.index}:v]${scale},setsar=1,format=yuva420p,`
+        + `fade=t=in:st=0:d=${fade.toFixed(3)}:alpha=1,`
+        + `fade=t=out:st=${Math.max(0, duration - fade).toFixed(3)}:d=${fade.toFixed(3)}:alpha=1,`
+        + `tpad=start_duration=${start.toFixed(3)}:start_mode=add:color=black@0.0,setpts=PTS-STARTPTS[${overlayLabel}]`,
+      );
+    } else {
+      filters.push(
+        `[${clip.index}:v]${scale},setsar=1,fps=${fps},format=yuva420p,`
+        + `fade=t=in:st=0:d=${fade.toFixed(3)}:alpha=1,`
+        + `fade=t=out:st=${Math.max(0, duration - fade).toFixed(3)}:d=${fade.toFixed(3)}:alpha=1,`
+        + `tpad=start_duration=${start.toFixed(3)}:start_mode=add:color=black@0.0,setpts=PTS-STARTPTS[${overlayLabel}]`,
+      );
+    }
+    filters.push(
+      `[${current}][${overlayLabel}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass:repeatlast=0[${mergedLabel}]`,
+    );
+    current = mergedLabel;
+  });
   filters.push(`[${current}]fade=t=in:st=0:d=0.5,fade=t=out:st=${(target - 0.6).toFixed(3)}:d=0.6[vout]`);
 
   const audioStreams = [];
@@ -7655,6 +8080,17 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
       `[${bgmIndex}:a]lowpass=f=7000,volume=0.2,apad=pad_dur=${target.toFixed(3)}[bgm]`,
     );
   }
+  // Extra audio track clips — apni position pe delay hoke mix.
+  const extraAudioLabels = [];
+  extraAudioInputs.forEach((clip, position) => {
+    const label = `xau${position}`;
+    audioStreams.push(
+      `[${clip.index}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,`
+      + `atrim=0:${clip.duration.toFixed(3)},asetpts=PTS-STARTPTS,`
+      + `adelay=${Math.round(clip.start * 1000)}:all=1,volume=0.85[${label}]`,
+    );
+    extraAudioLabels.push(`[${label}]`);
+  });
   if (silenceIndex !== null) {
     audioStreams.push(`[${silenceIndex}:a]atrim=0:${target.toFixed(3)}[silence]`);
   }
@@ -7663,13 +8099,14 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   if (voiceIndex !== null) audioLabels.push('[voice]');
   if (ambientIndex !== null) audioLabels.push('[ambient]');
   if (bgmIndex !== null) audioLabels.push('[bgm]');
+  audioLabels.push(...extraAudioLabels);
   if (silenceIndex !== null) audioLabels.push('[silence]');
   if (audioStreams.length) filters.push(audioStreams.join(';'));
   if (audioLabels.length > 1) {
     filters.push(
-      `${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=first:`
+      `${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:`
       + `dropout_transition=1:normalize=0,acompressor=threshold=-14dB:ratio=2:attack=20:release=250,`
-      + `atrim=0:${target.toFixed(3)}[aout]`,
+      + `apad=pad_dur=${target.toFixed(3)},atrim=0:${target.toFixed(3)}[aout]`,
     );
   } else if (audioLabels.length === 1) {
     filters.push(`${audioLabels[0]}atrim=0:${target.toFixed(3)}[aout]`);
@@ -8021,6 +8458,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         configured: Boolean(state.configured),
         chatId: state.chatId || null,
+        projectId: state.projectId || null,
         title: state.title || CHATGPT_CHAT_TITLE,
         user: state.user || null,
         updatedAt: state.updatedAt || null,
@@ -8181,6 +8619,93 @@ const server = http.createServer(async (req, res) => {
         });
       } catch (err) {
         return sendJson(res, 400, { error: err.message || 'Images nahi shuru hui.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/video-studio/tracks') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      const job = mediaJobs.find((item) => item.id === String(payload.jobId || ''));
+      if (!job) return sendJson(res, 404, { error: 'Media job not found.' });
+      const action = String(payload.action || '');
+      const tracks = ensureStudioTrackList(job);
+      try {
+        if (action === 'add-track') {
+          const type = STUDIO_TRACK_TYPES.includes(payload.type) ? payload.type : 'video';
+          const count = tracks.filter((track) => track.type === type).length + 1;
+          const prefix = { video: 'V', image: 'I', audio: 'A', fx: 'FX', transition: 'T' }[type];
+          tracks.push({
+            id: `tr_${type}_${Date.now()}_${count}`,
+            type,
+            label: String(payload.label || `${prefix}${count} · ${STUDIO_TRACK_LABELS[type]}`).slice(0, 60),
+            muted: false,
+            locked: false,
+            hidden: false,
+            clips: [],
+          });
+        } else if (action === 'remove-track') {
+          const index = tracks.findIndex((track) => track.id === String(payload.trackId || ''));
+          if (index < 0) return sendJson(res, 404, { error: 'Track not found.' });
+          const type = tracks[index].type;
+          const remaining = tracks.filter((track) => track.type === type);
+          if (remaining.length <= 1) return sendJson(res, 400, { error: 'Har type ka kam se kam ek track zaroori hai.' });
+          tracks.splice(index, 1);
+        } else if (action === 'add-clip') {
+          const track = tracks.find((item) => item.id === String(payload.trackId || ''));
+          if (!track) return sendJson(res, 404, { error: 'Track not found.' });
+          const clip = {
+            id: `c_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            kind: String(payload.kind || track.type).slice(0, 30),
+            label: String(payload.label || 'Clip').slice(0, 160),
+            path: payload.path ? String(payload.path).slice(0, 600) : null,
+            start: Math.max(0, Number(payload.start) || 0),
+            duration: Math.max(0.1, Number(payload.duration) || 5),
+            muted: false,
+            locked: false,
+            sceneIndex: null,
+            fx: [],
+            transition: null,
+          };
+          track.clips.push(clip);
+        } else if (action === 'remove-clip') {
+          const track = tracks.find((item) => item.id === String(payload.trackId || ''));
+          if (!track) return sendJson(res, 404, { error: 'Track not found.' });
+          const index = track.clips.findIndex((clip) => clip.id === String(payload.clipId || ''));
+          if (index < 0) return sendJson(res, 404, { error: 'Clip not found.' });
+          track.clips.splice(index, 1);
+        } else if (action === 'update-clip') {
+          const track = tracks.find((item) => item.id === String(payload.trackId || ''));
+          if (!track) return sendJson(res, 404, { error: 'Track not found.' });
+          const clip = track.clips.find((item) => item.id === String(payload.clipId || ''));
+          if (!clip) return sendJson(res, 404, { error: 'Clip not found.' });
+          if (payload.start !== undefined) clip.start = Math.max(0, Number(payload.start) || 0);
+          if (payload.duration !== undefined) clip.duration = Math.max(0.1, Number(payload.duration) || 5);
+          if (payload.label !== undefined) clip.label = String(payload.label).slice(0, 160);
+          if (payload.muted !== undefined) clip.muted = Boolean(payload.muted);
+          if (payload.locked !== undefined) clip.locked = Boolean(payload.locked);
+          if (payload.fx !== undefined) clip.fx = Array.isArray(payload.fx) ? payload.fx.slice(0, 30) : [];
+          if (payload.transition !== undefined) clip.transition = payload.transition ? String(payload.transition).slice(0, 60) : null;
+        } else if (action === 'update-track') {
+          const track = tracks.find((item) => item.id === String(payload.trackId || ''));
+          if (!track) return sendJson(res, 404, { error: 'Track not found.' });
+          if (payload.label !== undefined) track.label = String(payload.label).slice(0, 60);
+          if (payload.muted !== undefined) track.muted = Boolean(payload.muted);
+          if (payload.locked !== undefined) track.locked = Boolean(payload.locked);
+          if (payload.hidden !== undefined) track.hidden = Boolean(payload.hidden);
+        } else {
+          return sendJson(res, 400, { error: 'Unknown track action.' });
+        }
+        await updateMediaJob(job, {
+          trackList: tracks,
+          ...(job.status === 'rendering' ? {} : { step: 'Timeline update saved — autosave on' }),
+        });
+        return sendJson(res, 200, { ok: true, jobId: job.id, tracks });
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Track update fail.' });
       }
     }
 
@@ -8402,6 +8927,30 @@ const server = http.createServer(async (req, res) => {
         if ('progress' in payload) {
           patch.progress = Math.max(0, Math.min(100, Number(payload.progress) || 0));
         }
+        if (Array.isArray(payload.trackList)) {
+          // Multi-track timeline — video/image/audio/fx/transition tracks (multiple allowed).
+          patch.trackList = payload.trackList.slice(0, 60).map((track) => ({
+            id: String(track?.id || `tr_${Math.random().toString(36).slice(2, 8)}`).slice(0, 80),
+            type: STUDIO_TRACK_TYPES.includes(track?.type) ? track.type : 'video',
+            label: String(track?.label || 'Track').slice(0, 60),
+            muted: Boolean(track?.muted),
+            locked: Boolean(track?.locked),
+            hidden: Boolean(track?.hidden),
+            clips: (Array.isArray(track?.clips) ? track.clips : []).slice(0, 500).map((clip) => ({
+              id: String(clip?.id || `c_${Math.random().toString(36).slice(2, 8)}`).slice(0, 80),
+              kind: String(clip?.kind || 'video').slice(0, 30),
+              label: String(clip?.label || 'Clip').slice(0, 160),
+              path: clip?.path ? String(clip.path).slice(0, 600) : null,
+              start: Math.max(0, Number(clip?.start) || 0),
+              duration: Math.max(0.1, Number(clip?.duration) || 5),
+              muted: Boolean(clip?.muted),
+              locked: Boolean(clip?.locked),
+              sceneIndex: Number.isFinite(Number(clip?.sceneIndex)) ? Number(clip.sceneIndex) : null,
+              fx: Array.isArray(clip?.fx) ? clip.fx.slice(0, 30) : [],
+              transition: clip?.transition ? String(clip.transition).slice(0, 60) : null,
+            })),
+          }));
+        }
         if (['done', 'awaiting-render', 'error', 'assets'].includes(payload.status)) {
           patch.status = payload.status;
         }
@@ -8411,6 +8960,13 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'DELETE') {
         cancelledJobs.add(job.id);
+        // Debug: kaun delete kar raha hai — log rakh lo.
+        await writeFile(
+          path.join(WORKSPACE, 'media-job-deletes.log'),
+          `${new Date().toISOString()} ${job.id} studio=${job.studio ? 1 : 0} assets=${job.assetsOnly ? 1 : 0}`
+          + ` ua=${String(req.headers['user-agent'] || '').slice(0, 90)}\n`,
+          { flag: 'a' },
+        ).catch(() => {});
         ffmpegChildren.get(job.id)?.kill('SIGKILL');
         mediaJobs = mediaJobs.filter((item) => item.id !== job.id);
         mediaTtsCredentials.delete(job.id);
@@ -8461,6 +9017,41 @@ const server = http.createServer(async (req, res) => {
         name: safeFileName(name, 'audio.mp3'),
         size: bytes.length,
       });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/media-upload/delete') {
+      let payload;
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        return sendJson(res, 400, { error: 'Invalid JSON body.' });
+      }
+      const relative = String(payload.path || '').trim();
+      if (!relative) return sendJson(res, 400, { error: 'File path missing.' });
+      const absolute = path.resolve(WORKSPACE, relative.replace(/\\/g, '/'));
+      const uploadsRoot = path.join(WORKSPACE, 'uploads');
+      const inUploads = absolute.startsWith(path.join(uploadsRoot, path.sep)) || absolute === uploadsRoot;
+      const inMediaJobs = absolute.startsWith(path.join(WORKSPACE, 'media-jobs'));
+      if (!inUploads && !inMediaJobs) {
+        return sendJson(res, 400, { error: 'Sirf Nova workspace ki files delete ho sakti hain.' });
+      }
+      try {
+        await rm(absolute, { force: true });
+      } catch (err) {
+        return sendJson(res, 400, { error: err.message || 'Delete fail.' });
+      }
+      // Track list se bhi hatao.
+      for (const job of mediaJobs) {
+        if (!Array.isArray(job.trackList)) continue;
+        let changed = false;
+        for (const track of job.trackList) {
+          const before = track.clips?.length || 0;
+          track.clips = (track.clips || []).filter((clip) => String(clip.path || '').replace(/\\/g, '/') !== relative.replace(/\\/g, '/'));
+          if (track.clips.length !== before) changed = true;
+        }
+        if (changed) await updateMediaJob(job, { trackList: job.trackList });
+      }
+      return sendJson(res, 200, { ok: true, path: relative });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/chat') {
