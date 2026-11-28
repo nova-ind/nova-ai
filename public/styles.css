@@ -2231,6 +2231,12 @@ video:-webkit-full-screen {
 .studio-image-progress[hidden] { display: none; }
 .studio-image-progress .track { flex: 1; height: 4px; overflow: hidden; border-radius: 99px; background: #22252a; }
 .studio-image-progress .track i { display: block; width: 0; height: 100%; border-radius: 99px; background: #f4f4f5; transition: width .3s ease; }
+.studio-chatgpt-row { margin-top: 8px; display: flex; align-items: center; gap: 8px; color: #8b8e94; font-size: 10px; }
+.studio-chatgpt-row[hidden] { display: none; }
+.studio-chatgpt-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-chatgpt-row button { flex: none; padding: 4px 8px; border: 1px solid #2b2f35; border-radius: 7px; background: #121418; color: #d8dade; font-size: 10px; cursor: pointer; transition: .18s ease; }
+.studio-chatgpt-row button:hover { border-color: #555a62; background: #171a1f; }
+.studio-chatgpt-row button[hidden] { display: none; }
 .studio-login { width: 100%; margin-top: 12px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 10px; border: 1px solid #2b2f35; border-radius: 9px; background: #121418; color: #d8dade; font-size: 11px; cursor: pointer; transition: .18s ease; }
 .studio-login:hover { border-color: #555a62; background: #171a1f; }
 .studio-login .dot { width: 7px; height: 7px; border-radius: 50%; background: #55595f; }
@@ -2271,6 +2277,8 @@ video:-webkit-full-screen {
 .studio-agent span { margin-right: 6px; color: #fff; }
 .studio-agent:hover { border-color: #555a62; background: #16191d; }
 .tts-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; margin-top: 9px; }
+.tts-controls.studio-3col { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+@media (max-width: 560px) { .tts-controls.studio-3col { grid-template-columns: minmax(0, 1fr) auto; } }
 .tts-controls .mini-field { min-width: 0; }
 .tts-btn { height: 33px; padding: 0 12px; border: 1px solid #3a3e45; border-radius: 8px; background: #171a1e; color: #f0f1f3; font-size: 10.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: .18s ease; }
 .tts-btn:hover { border-color: #6a6f78; background: #20242a; }

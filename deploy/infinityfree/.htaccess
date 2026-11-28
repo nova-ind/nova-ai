@@ -1,0 +1,19 @@
+# Nova AI — InfinityFree free subdomain se live app par 301 redirect.
+#
+# Upload karne ka tarika:
+#   InfinityFree control panel → File Manager → htdocs → is file ko ".htaccess" naam se save karein.
+#   (Control panel → "Redirects" tool me bhi same kaam ho jata hai — tab .htaccess ki zarurat nahi.)
+#
+# InfinityFree free hosting par sirf PHP + MySQL chalega, Node.js nahi — isliye Nova app
+# (server.js + /api routes) wahan host nahi ho sakti. Ye file subdomain ko Render par live
+# app par bhej deti hai (browser ka address bar Render URL dikhayega).
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+  # Har path (/api/health, /chat, etc.) Render app ke same path par jaaye.
+  RewriteRule ^(.*)$ https://nova-ai-9gbh.onrender.com/$1 [R=301,L,QSA]
+</IfModule>
+
+# Fallback — mod_rewrite off ho to PHP file index.php se redirect karegi.
+DirectoryIndex index.php

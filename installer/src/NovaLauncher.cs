@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Management;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Net.Sockets;
@@ -658,6 +659,109 @@ namespace NovaDesktop
             }
         }
 
+        // App band karte hi Nova ke apne ChatGPT / Bing browsers band kar do.
+        // User ka normal Chrome bilkul safe rehta hai — sirf Nova profile wali
+        // Chrome processes close hoti hain.
+        private void CloseNovaBrowsers()
+        {
+            // 1) Server se graceful close (CDP Browser.close) — profile crash-mark nahi hota.
+            try
+            {
+                string endpoint = "http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture) + "/api/app-exit";
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(endpoint);
+                request.Method = "POST";
+                request.ContentLength = 0;
+                request.Timeout = 4000;
+                request.ReadWriteTimeout = 4000;
+                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                {
+                    // Sirf graceful close ka signal — response body ki zaroorat nahi.
+                }
+                WriteLog("Nova browsers closed through the local service.");
+            }
+            catch (Exception error)
+            {
+                WriteLog("Browser close request failed: " + error.Message);
+            }
+
+            // 2) Fallback — Nova profile wali Chrome/Edge processes force-close.
+            try
+            {
+                string workspace = Path.Combine(appDir, "workspace");
+                string[] profiles =
+                {
+                    Path.Combine(workspace, ".chatgpt-profile"),
+                    Path.Combine(workspace, ".arena-profile"),
+                    Path.Combine(workspace, ".browser-profile"),
+                    Path.Combine(workspace, ".bing-headless-profile"),
+                };
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='chrome.exe' OR Name='msedge.exe'"))
+                {
+                    foreach (ManagementObject item in searcher.Get())
+                    {
+                        string commandLine = item["CommandLine"] as string;
+                        if (string.IsNullOrEmpty(commandLine))
+                        {
+                            continue;
+                        }
+
+                        bool ours = false;
+                        foreach (string profile in profiles)
+                        {
+                            if (commandLine.IndexOf(profile, StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                ours = true;
+                                break;
+                            }
+                        }
+                        if (!ours)
+                        {
+                            continue;
+                        }
+
+                        object rawId = item["ProcessId"];
+                        if (rawId == null)
+                        {
+                            continue;
+                        }
+                        int processId = Convert.ToInt32(rawId, CultureInfo.InvariantCulture);
+                        WriteLog("Closing Nova browser process " + processId.ToString(CultureInfo.InvariantCulture));
+                        KillProcessTree(processId);
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                WriteLog("Browser process cleanup failed: " + error.Message);
+            }
+        }
+
+        private static void KillProcessTree(int processId)
+        {
+            try
+            {
+                ProcessStartInfo startInfo = new ProcessStartInfo();
+                startInfo.FileName = "taskkill";
+                startInfo.Arguments = "/PID " + processId.ToString(CultureInfo.InvariantCulture) + " /T /F";
+                startInfo.UseShellExecute = false;
+                startInfo.CreateNoWindow = true;
+                startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
+                using (Process killer = Process.Start(startInfo))
+                {
+                    if (killer != null)
+                    {
+                        killer.WaitForExit(5000);
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort — process already gone ho sakta hai.
+            }
+        }
+
         private void BingButton_Click(object sender, EventArgs e)
         {
             if (!serverReady)
@@ -702,6 +806,7 @@ namespace NovaDesktop
         private void ExitButton_Click(object sender, EventArgs e)
         {
             exiting = true;
+            CloseNovaBrowsers();
             StopServer();
             trayIcon.Visible = false;
             Application.Exit();
@@ -739,6 +844,7 @@ namespace NovaDesktop
 
         private void Application_ApplicationExit(object sender, EventArgs e)
         {
+            CloseNovaBrowsers();
             StopServer();
             if (webView != null)
             {

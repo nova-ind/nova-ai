@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import tls from 'node:tls';
 import { openSync, closeSync } from 'node:fs';
 import { readFile, readdir, writeFile, mkdir, stat, rm, copyFile, rename, access } from 'node:fs/promises';
@@ -87,12 +87,14 @@ const CF_IMAGE_MODELS = [
 ];
 const IMAGE_PROVIDERS = [
   { id: 'chatgpt', label: 'ChatGPT Go · Nova-AI chat', note: 'Same persistent chat · character lock' },
+  { id: 'arena', label: 'Arena.ai · free image arena', note: 'Free daily credits · login once' },
   { id: 'bing', label: 'Bing Image Creator', note: 'Free · best quality · Chrome required' },
   { id: 'cloudflare', label: 'Cloudflare Flux', note: 'Free 10k neurons/day · needs free token' },
   { id: 'huggingface', label: 'Hugging Face Flux', note: 'Free ZeroGPU Space · token optional (5 min/day)' },
   { id: 'stock', label: 'Free stock images', note: 'Openverse CC0/PDM · copyright-free · no key' },
 ];
 const VIDEO_PROVIDERS = [
+  { id: 'arena', label: 'Arena.ai · free video arena', note: 'Free · 2 clips/day · login once' },
   { id: 'ltx', label: 'LTX-Video · GitHub/HF', note: 'Free open-source model · no card' },
 ];
 const CDP_PORT = Number(process.env.CDP_PORT || 9222);
@@ -1483,7 +1485,7 @@ async function generateStockImages(prompt, count = 1) {
   throw lastError || new Error('Free stock images unavailable.');
 }
 
-async function fetchImageResult(prompt, model, provider, ratio, count = 1) {
+async function fetchImageResult(prompt, model, provider, ratio, count = 1, options = {}) {
   if (provider === 'bing') {
     if (!BING_SUPPORTED) {
       throw new Error(
@@ -1493,7 +1495,10 @@ async function fetchImageResult(prompt, model, provider, ratio, count = 1) {
     return { images: await generateBingImages(prompt), provider: 'bing' };
   }
   if (provider === 'chatgpt') {
-    return { images: await generateChatGptImages(prompt, count), provider: 'chatgpt' };
+    return { images: await generateChatGptImages(prompt, count, options), provider: 'chatgpt' };
+  }
+  if (provider === 'arena') {
+    return { images: await generateArenaImages(prompt, count, options), provider: 'arena' };
   }
   if (provider === 'cloudflare') {
     return { images: [await generateCloudflareImage(prompt, model)], provider: 'cloudflare' };
@@ -1519,6 +1524,10 @@ async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'au
     return images[0];
   }
   if (provider === 'ltx') return generateLtxVideo(prompt, { duration, ratio });
+  if (provider === 'arena') {
+    const clips = await generateArenaVideos(prompt, { duration, ratio });
+    return clips[0];
+  }
   if (provider === 'pollinations') {
     throw new Error('Pollinations video band hai — LTX-Video free provider use karein.');
   }
@@ -1529,6 +1538,7 @@ async function fetchMediaBytes(kind, prompt, model, duration = 5, provider = 'au
 function configuredImageProviders() {
   return [
     ...(chatgptSessionState.configured ? ['chatgpt'] : []),
+    ...(arenaState.loggedIn ? ['arena'] : []),
     ...(!BING_SUPPORTED && imageWorkerConnected() ? ['worker'] : []),
     ...(BING_SUPPORTED ? ['bing'] : []),
     ...(cloudflareAccount && cloudflareToken ? ['cloudflare'] : []),
@@ -1554,6 +1564,8 @@ async function generateImageSmart(prompt, options = {}) {
         options.model || DEFAULT_IMAGE_MODEL,
         provider,
         options.ratio || '16:9',
+        options.count || 1,
+        options,
       );
       return {
         bytes: result.images[0],
@@ -1629,10 +1641,20 @@ async function collectJobImages(job, prompts, directory = null, onImage = null) 
     }
     return null;
   };
-  const requestUnique = async (text, forceProvider = provider) => {
+  const requestUnique = async (text, forceProvider = provider, beatIndex = null) => {
     const result = forceProvider === 'auto'
-      ? await generateImageSmart(text, { model: job.imageModel, ratio: job.ratio })
-      : await fetchImageResult(text, job.imageModel, forceProvider, job.ratio);
+      ? await generateImageSmart(text, {
+        model: job.imageModel,
+        ratio: job.ratio,
+        job,
+        beatIndex,
+        beatTotal: list.length,
+      })
+      : await fetchImageResult(text, job.imageModel, forceProvider, job.ratio, 1, {
+        job,
+        beatIndex,
+        beatTotal: list.length,
+      });
     return pickUnique(result.images || []);
   };
   const movieLook = job.type === 'song' || job.style === 'cinematic'
@@ -1674,22 +1696,30 @@ async function collectJobImages(job, prompts, directory = null, onImage = null) 
       ? ['stock', 'cloudflare', 'huggingface', 'worker']
       : provider === 'chatgpt'
         ? ['chatgpt']
-        : ['stock', 'auto'];
+        : provider === 'arena'
+          ? ['arena']
+          : ['stock', 'auto'];
     let activeProvider = provider;
-    const maxAttempts = provider === 'chatgpt' ? 3 : 8;
+    // ChatGPT/Arena me retry limited — daily free credits waste nahi hone chahiye.
+    const maxAttempts = provider === 'chatgpt' ? 3 : provider === 'arena' ? 3 : 8;
+    let lastProviderError = null;
     for (let attempt = 0; attempt < maxAttempts && !chosen; attempt += 1) {
       const text = variants[Math.min(attempt, variants.length - 1)];
       try {
-        chosen = await requestUnique(text, activeProvider);
-      } catch {
+        chosen = await requestUnique(text, activeProvider, index);
+      } catch (err) {
         chosen = null;
+        lastProviderError = err;
+        // Login chahiye to retry bekaar hai — seedha batao.
+        if (/login|sign ?in|logged/i.test(String(err?.message || ''))) break;
       }
       if (chosen) break;
       if (attempt >= 1) activeProvider = fallbacks[(attempt - 1) % fallbacks.length];
       if (!chosen) await sleep(800);
     }
     if (!chosen) {
-      throw new Error(`Scene ${index + 1}/${list.length} ki unique image nahi bani. Bing/login check karke dobara try karein.`);
+      const reason = String(lastProviderError?.message || '').trim();
+      throw new Error(`Scene ${index + 1}/${list.length} ki unique image nahi bani.${reason ? ` ${reason}` : ' Bing/login check karke dobara try karein.'}`);
     }
     // Extension asli bytes se match karo (ChatGPT PNG deta hai) — warna browser/FFmpeg confuse hota hai.
     if (directory) {
@@ -1700,8 +1730,12 @@ async function collectJobImages(job, prompts, directory = null, onImage = null) 
     }
     const relative = file ? `media-jobs/${job.id}/${path.basename(file)}` : null;
     pool.push(chosen);
+    const providerLabel = provider === 'stock' ? 'Stock'
+      : provider === 'chatgpt' ? 'ChatGPT'
+        : provider === 'arena' ? 'Arena.ai'
+          : provider === 'bing' ? 'Bing' : 'AI';
     await updateMediaJob(job, {
-      step: `${provider === 'stock' ? 'Stock' : 'Bing'} se scene ${index + 1}/${list.length} ki image ready — story line se match…`,
+      step: `${providerLabel} se scene ${index + 1}/${list.length} ki image ready — story line se match…`,
       progress: 20 + Math.round(((index + 1) / list.length) * 45),
       ...(file ? { resumeOnStart: true } : {}),
     });
@@ -1873,6 +1907,14 @@ async function createMediaJob(payload = {}) {
     imageProvider: String(payload.imageProvider || DEFAULT_IMAGE_PROVIDER).slice(0, 40),
     videoProvider: String(payload.videoProvider || DEFAULT_VIDEO_PROVIDER).slice(0, 40),
     chatId: payload.chatId ? String(payload.chatId).slice(0, 80) : null,
+    // Har story ka apna ChatGPT chat — id ke saath save hota hai taaki resume same chat me ho.
+    chatGptChatId: null,
+    chatGptChatTitle: null,
+    chatGptChatUrl: null,
+    chatGptDoneBeats: [],
+    chatGptImagesDone: 0,
+    chatGptImagesTotal: 0,
+    chatGptPendingBeats: [],
     status: 'queued',
     progress: 0,
     step: 'Job queue me hai…',
@@ -1951,6 +1993,14 @@ async function createStudioImageJob(payload = {}) {
     imageProvider: String(payload.imageProvider || DEFAULT_IMAGE_PROVIDER).slice(0, 40),
     videoProvider: String(payload.videoProvider || DEFAULT_VIDEO_PROVIDER).slice(0, 40),
     chatId: payload.chatId ? String(payload.chatId).slice(0, 80) : null,
+    // Studio image job ka bhi apna ChatGPT chat — resume par wahin se continue.
+    chatGptChatId: null,
+    chatGptChatTitle: null,
+    chatGptChatUrl: null,
+    chatGptDoneBeats: [],
+    chatGptImagesDone: 0,
+    chatGptImagesTotal: 0,
+    chatGptPendingBeats: [],
     status: 'queued',
     progress: 0,
     step: 'Image job queue me hai…',
@@ -1981,20 +2031,43 @@ async function runStudioImageJob(job) {
     const captions = splitCaptions(source, job.sceneCount);
     const creds = mediaTtsCredentials.get(job.id) || {};
     let lineImages = [];
-    try {
-      const generated = await generateVisualBeatsWithModel(job, captions, creds);
-      lineImages = generated.lineImages;
-      job.characterBible = generated.characterBible || '';
-    } catch {
-      lineImages = captions.map((line, index) => fallbackLineImagePrompts(job, line, job.imagePrompts?.[index]));
+    let visualBeats = [];
+    // Resume par saved visual beats wahi rehte hain — taaki ChatGPT chat me
+    // beat mapping (NOVA-BEAT x/y) same rahe.
+    const savedBeats = Array.isArray(job.visualBeats) ? job.visualBeats : [];
+    const savedLineImages = Array.isArray(job.lineImagePrompts) ? job.lineImagePrompts : [];
+    const canReuseBeats = savedBeats.length > 0
+      && savedLineImages.length === captions.length
+      && savedBeats.length === Number(job.sceneCount)
+      && savedBeats.every((beat) => {
+        const lineIndex = Number(beat?.lineIndex);
+        return Number.isInteger(lineIndex) && lineIndex >= 0 && lineIndex < captions.length;
+      });
+    if (canReuseBeats) {
+      lineImages = savedLineImages.map((images, index) => {
+        const list = Array.isArray(images) && images.length
+          ? images.slice(0, 3)
+          : fallbackLineImagePrompts(job, captions[index], job.imagePrompts?.[index]);
+        return list.map((prompt) => withCharacterBible(prompt, job.characterBible));
+      });
+      visualBeats = savedBeats.map((beat) => withVisualBeatLock(job, beat));
+      await updateMediaJob(job, { step: 'Saved visual beats mil gaye — wahi chat se resume…', progress: 10 });
+    } else {
+      try {
+        const generated = await generateVisualBeatsWithModel(job, captions, creds);
+        lineImages = generated.lineImages;
+        job.characterBible = generated.characterBible || '';
+      } catch {
+        lineImages = captions.map((line, index) => fallbackLineImagePrompts(job, line, job.imagePrompts?.[index]));
+      }
+      lineImages = lineImages.map((images, index) => {
+        const list = Array.isArray(images) && images.length
+          ? images.slice(0, 3)
+          : fallbackLineImagePrompts(job, captions[index], job.imagePrompts?.[index]);
+        return list.map((prompt) => withCharacterBible(prompt, job.characterBible));
+      });
+      visualBeats = buildVisualBeats(job, captions, lineImages);
     }
-    lineImages = lineImages.map((images, index) => {
-      const list = Array.isArray(images) && images.length
-        ? images.slice(0, 3)
-        : fallbackLineImagePrompts(job, captions[index], job.imagePrompts?.[index]);
-      return list.map((prompt) => withCharacterBible(prompt, job.characterBible));
-    });
-    const visualBeats = buildVisualBeats(job, captions, lineImages);
     if (!visualBeats.length) throw new Error('Story se koi image prompt nahi bana.');
     await updateMediaJob(job, {
       visualBeats,
@@ -2117,7 +2190,7 @@ async function createStudioVideoClip(payload = {}) {
       imageModel: String(payload.imageModel || DEFAULT_IMAGE_MODEL).slice(0, 120),
       videoModel: String(payload.videoModel || DEFAULT_VIDEO_MODEL).slice(0, 120),
       imageProvider: String(payload.imageProvider || DEFAULT_IMAGE_PROVIDER).slice(0, 40),
-      videoProvider: 'ltx',
+      videoProvider: String(payload.videoProvider || 'ltx').slice(0, 40),
       chatId: payload.chatId ? String(payload.chatId).slice(0, 80) : null,
       status: 'queued',
       progress: 0,
@@ -2207,6 +2280,20 @@ async function renderExistingStudioJob(job) {
     });
   });
   return job;
+}
+
+// Job ke scene media files disk par hain ya nahi — missing list.
+async function missingSceneMedia(job) {
+  const missing = [];
+  const scenes = Array.isArray(job?.scenes) ? job.scenes : [];
+  for (const scene of scenes) {
+    const source = scene?.video || scene?.image;
+    if (!source) continue;
+    const absolute = path.resolve(WORKSPACE, String(source).replace(/\\/g, '/'));
+    if (!pathInAllowedFolders(absolute)) continue;
+    if (!(await fileExists(absolute))) missing.push(path.basename(absolute));
+  }
+  return missing;
 }
 
 async function runMediaJob(job) {
@@ -2597,7 +2684,8 @@ async function resumeMediaJobs() {
       continue;
     }
     if (job.status === 'queued' || job.status === 'assets') {
-      runMediaJob(job).catch(() => {});
+      if (job.assetsOnly) runStudioImageJob(job).catch(() => {});
+      else runMediaJob(job).catch(() => {});
     } else if (job.status === 'error' && job.resumeOnStart && (job.resumeAttempts || 0) < 3 && !mediaRunning.has(job.id)) {
       await updateMediaJob(job, { resumeAttempts: (job.resumeAttempts || 0) + 1 });
       await updateMediaJob(job, {
@@ -2605,9 +2693,25 @@ async function resumeMediaJobs() {
         error: null,
         step: 'App restart — saved images se wahin se resume…',
       });
-      runMediaJob(job).catch(() => {});
+      if (job.assetsOnly) runStudioImageJob(job).catch(() => {});
+      else runMediaJob(job).catch(() => {});
     } else if (job.status === 'rendering') {
       const directory = path.join(WORKSPACE, 'media-jobs', job.id);
+      // Render beech me band hua tha — pehle sab scene files maujood hain ya nahi dekho.
+      const missing = await missingSceneMedia(job);
+      if (missing.length) {
+        // Kuch scene image missing hai — render mat chalao, images wapas banao.
+        await updateMediaJob(job, {
+          status: 'assets',
+          error: null,
+          renderMode: null,
+          step: `Scene image missing (${missing.join(', ')}) — wahi chat se bana raha hoon…`,
+          progress: 40,
+        });
+        if (job.assetsOnly) runStudioImageJob(job).catch(() => {});
+        else runMediaJob(job).catch(() => {});
+        continue;
+      }
       await updateMediaJob(job, { step: 'Restart ke baad FFmpeg render resume…', progress: 75 });
       if (job.scenes?.length) assembleVideoWithFfmpeg(job, directory, {}).catch(() => {});
       else await updateMediaJob(job, { status: 'awaiting-render', step: 'Browser render resume…', progress: 75 });
@@ -3963,7 +4067,11 @@ async function pageEvaluate(expression) {
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || 'Page script failed.');
   }
-  return result.result?.value;
+  const remote = result.result || {};
+  if (remote.type === 'function' || remote.type === 'symbol') {
+    throw new Error('Page script did not run (missing invocation).');
+  }
+  return remote.value;
 }
 
 /* ---------- hidden Chrome for Bing (screen par page kabhi nahi dikhta) ------- */
@@ -4301,6 +4409,83 @@ async function ensureChatGptBrowser() {
   throw new Error('ChatGPT browser start hua par debugging port nahi khula.');
 }
 
+/* ---------------------- App exit: Nova ke apne browsers band ---------------- */
+// App band karte hi ChatGPT / Bing / cookie browser band ho jana chahiye —
+// user ka normal Chrome bilkul safe rahe. Nova sirf apne profile wali
+// Chrome processes ko hi close karta hai.
+
+function novaBrowserPorts() {
+  return [...new Set([CHATGPT_CDP_PORT, CDP_PORT, COOKIE_CDP_PORT, IMG_CDP_PORT, ARENA_CDP_PORT])];
+}
+
+function novaBrowserProfiles() {
+  return [...new Set([CHATGPT_BROWSER_PROFILE, BROWSER_PROFILE, IMG_BROWSER_PROFILE, ARENA_BROWSER_PROFILE])];
+}
+
+async function closeCdpBrowser(port) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return false;
+    const info = await response.json().catch(() => ({}));
+    if (!info?.webSocketDebuggerUrl) return false;
+    // Browser.close graceful exit karta hai — profile "crashed" mark nahi hota.
+    await cdpCommand(info.webSocketDebuggerUrl, 'Browser.close', {}).catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Nova apne profile wali Chrome/Edge processes force-close karo (CDP fail ho to).
+function killNovaBrowserProcesses() {
+  const patterns = novaBrowserProfiles()
+    .map((item) => String(item).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .filter(Boolean);
+  if (!patterns.length) return;
+  const script = `$ErrorActionPreference='SilentlyContinue'; `
+    + `Get-CimInstance Win32_Process -Filter "Name='chrome.exe' OR Name='msedge.exe'" `
+    + `| Where-Object { $_.CommandLine -and ($_.CommandLine -match '${patterns.join('|')}') } `
+    + `| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+  try {
+    spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      timeout: 20_000,
+    });
+  } catch {
+    /* ignore — best effort cleanup */
+  }
+}
+
+let novaBrowserCleanupDone = false;
+
+async function shutdownNovaBrowsers(reason = 'exit') {
+  if (novaBrowserCleanupDone) return { ok: true, alreadyClosed: true };
+  novaBrowserCleanupDone = true;
+  const closed = [];
+  for (const port of novaBrowserPorts()) {
+    const ok = await closeCdpBrowser(port).catch(() => false);
+    if (ok) closed.push(port);
+  }
+  await sleep(500);
+  killNovaBrowserProcesses();
+  console.log(`[nova] Nova browsers band kar diye (${reason}).`);
+  return { ok: true, closed };
+}
+
+// Server kisi bhi tarah se band ho — aux browsers band kar do.
+process.on('exit', () => {
+  if (!novaBrowserCleanupDone) killNovaBrowserProcesses();
+});
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    shutdownNovaBrowsers(signal)
+      .catch(() => {})
+      .finally(() => process.exit(0));
+  });
+}
+
 async function chatGptTarget(openUrl = '') {
   await ensureChatGptBrowser();
   const response = await fetch(`http://127.0.0.1:${CHATGPT_CDP_PORT}/json/list`, {
@@ -4440,7 +4625,12 @@ async function chatGptGenEvaluate(expression) {
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || 'Page script failed.');
   }
-  return result.result?.value;
+  const remote = result.result || {};
+  // Bina invoke kiye expression (missing `()`) function object deta hai — use mat lo.
+  if (remote.type === 'function' || remote.type === 'symbol') {
+    throw new Error('Page script did not run (missing invocation).');
+  }
+  return remote.value;
 }
 
 // ChatGPT me page load hone tak wait — Cloudflare challenge clear hone dete hain.
@@ -4618,6 +4808,320 @@ const CHATGPT_IMAGE_CHUNK_SCRIPT = (index, offset, size) => `(() => {
   return btoa(bin);
 })()`;
 
+// Har image prompt me ek beat marker jata hai — app restart ke baad isi chat
+// me dekh kar pata chalta hai kaun si line ki image bani aur kaun si baki hai.
+const CHATGPT_BEAT_MARK = 'NOVA-BEAT';
+
+const CHATGPT_BEAT_SCAN_SCRIPT = `(() => {
+  const MARK = /NOVA-BEAT\\s*(\\d+)\\s*\\/\\s*(\\d+)/gi;
+  const beats = [];
+  let current = null;
+  // Naya ChatGPT UI — user message "group/user-message", image "generated-image-preview".
+  const newUi = document.querySelector('[class*="group/user-message"], [data-testid="generated-image-preview"]');
+  if (newUi) {
+    const nodes = [...document.querySelectorAll('[class*="group/user-message"], [data-testid="generated-image-preview"]')];
+    for (const node of nodes) {
+      if (node.matches('[class*="group/user-message"]')) {
+        // Ek bubble me kabhi ek se zyada marker ho sakta hai — sab parse karo.
+        const text = node.innerText || node.textContent || '';
+        MARK.lastIndex = 0;
+        let match = MARK.exec(text);
+        while (match) {
+          current = { beat: Number(match[1]), total: Number(match[2]), images: 0, src: '' };
+          beats.push(current);
+          match = MARK.exec(text);
+        }
+        continue;
+      }
+      const img = node.querySelector('img');
+      if (!img || img.naturalWidth < 200) continue;
+      const src = img.currentSrc || img.src || '';
+      if (!src) continue;
+      if (current) {
+        current.images += 1;
+        if (!current.src) current.src = src;
+      } else {
+        beats.push({ beat: 0, total: 0, images: 1, src });
+      }
+    }
+    return JSON.stringify(beats);
+  }
+  // Purana UI — data-message-author-role ya article.
+  let messages = [...document.querySelectorAll('[data-message-author-role]')];
+  if (!messages.length) messages = [...document.querySelectorAll('article')];
+  for (const node of messages) {
+    const role = (node.getAttribute && node.getAttribute('data-message-author-role')) || '';
+    const text = node.innerText || node.textContent || '';
+    const images = [...node.querySelectorAll('img')].filter((img) => {
+      const src = img.currentSrc || img.src || '';
+      return img.naturalWidth >= 200 || /oaiusercontent|backend-anon|blob:|data:image/i.test(src);
+    });
+    if (role === 'user' || (!role && images.length === 0)) {
+      MARK.lastIndex = 0;
+      let match = MARK.exec(text);
+      while (match) {
+        current = { beat: Number(match[1]), total: Number(match[2]), images: 0, src: '' };
+        beats.push(current);
+        match = MARK.exec(text);
+      }
+      continue;
+    }
+    if (!images.length) continue;
+    if (current) {
+      current.images += images.length;
+      if (!current.src) current.src = images[0].currentSrc || images[0].src || '';
+    } else {
+      beats.push({ beat: 0, total: 0, images: images.length, src: images[0].currentSrc || images[0].src || '' });
+    }
+  }
+  return JSON.stringify(beats);
+})()`;
+
+// Job (story) ka apna ChatGPT chat — har story alag conversation.
+function chatGptJobTitle(job) {
+  const firstLine = String(job?.storyLines?.[0] || job?.storyAudioText || job?.storyText || job?.prompt || '')
+    .split('\n')
+    .map((item) => String(item).trim())
+    .filter(Boolean)[0] || '';
+  const short = firstLine.replace(/^\d+[.)]\s*/, '').slice(0, 44).trim();
+  const suffix = String(job?.id || '').slice(-6);
+  return `Nova Story${suffix ? ` · ${suffix}` : ''}${short ? ` · ${short}` : ''}`;
+}
+
+function chatGptJobChatUrl(projectId, chatId) {
+  if (!chatId) return '';
+  return projectId ? `https://chatgpt.com/g/${projectId}/c/${chatId}` : `https://chatgpt.com/c/${chatId}`;
+}
+
+// Tab ko target URL par le jao — ek hi tab, koi naya tab nahi.
+async function chatGptNavigateTo(target, url, chatId = '', newChat = false) {
+  const matches = (href) => (chatId
+    ? href.includes(`/c/${chatId}`)
+    : (newChat ? href.includes('/g/') && !href.includes('/c/') : href.includes('chatgpt.com')));
+  const href = String(await chatGptGenEvaluate('location.href').catch(() => '') || '');
+  if (!matches(href)) {
+    await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', { url }).catch(() => {});
+  }
+  const started = Date.now();
+  while (Date.now() - started < 60_000) {
+    const current = String(await chatGptGenEvaluate('location.href').catch(() => '') || '');
+    if (matches(current)) return true;
+    await sleep(900);
+  }
+  return false;
+}
+
+// Naya story chat — purana conversation inherit nahi hona chahiye.
+// Isliye project home par jaake page reload karte hain (memory clear hoti hai).
+async function chatGptStartFreshChat(target, projectUrl) {
+  await cdpCommand(target.webSocketDebuggerUrl, 'Page.navigate', { url: projectUrl }).catch(() => {});
+  await sleep(1500);
+  await cdpCommand(target.webSocketDebuggerUrl, 'Page.reload', {}).catch(() => {});
+  await sleep(2500);
+  const started = Date.now();
+  while (Date.now() - started < 60_000) {
+    const current = String(await chatGptGenEvaluate('location.href').catch(() => '') || '');
+    if (current.includes('/g/') && !current.includes('/c/')) break;
+    await sleep(800);
+  }
+  const ready = await chatGptWaitReady();
+  // Purana conversation DOM me bache to message bubble count check karo.
+  const stale = await chatGptGenEvaluate(
+    `document.querySelectorAll('[class*="group/user-message"], [data-message-author-role]').length`,
+  ).catch(() => 0);
+  return { ready, stale: Number(stale) || 0 };
+}
+
+// ChatGPT naye chat ka asli id — "local-chatgpt:..." temporary id skip karte hain.
+const CHATGPT_CHAT_ID_EXPR = `(() => {
+  const match = location.pathname.match(/\\/c\\/([^/]+)/i);
+  const id = match ? decodeURIComponent(match[1]) : '';
+  if (!id || /^local-chatgpt/i.test(id)) return '';
+  return id;
+})()`;
+
+// Chat me already kitni images bani hain — beat number ke saath.
+async function chatGptScanBeats(waitMs = 40_000) {
+  const deadline = Date.now() + waitMs;
+  let last = [];
+  while (Date.now() < deadline) {
+    const raw = await chatGptGenEvaluate(CHATGPT_BEAT_SCAN_SCRIPT).catch(() => '');
+    const map = new Map();
+    if (raw && typeof raw === 'string') {
+      try {
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          for (const item of list) {
+            const beat = Number(item?.beat);
+            if (!(beat > 0)) continue;
+            const previous = map.get(beat);
+            if (previous) {
+              previous.images += Number(item.images) || 0;
+              previous.total = previous.total || Number(item.total) || 0;
+              if (!previous.src && item.src) previous.src = String(item.src);
+            } else {
+              map.set(beat, {
+                beat,
+                total: Number(item.total) || 0,
+                images: Number(item.images) || 0,
+                src: String(item.src || ''),
+              });
+            }
+          }
+        }
+      } catch {
+        /* ignore — agli try me phir scan hoga */
+      }
+    }
+    last = [...map.values()].sort((a, b) => a.beat - b.beat);
+    // Images late render hoti hain — 2 checks same rahe tabhi count pakka hai.
+    const imagesNow = last.reduce((sum, item) => sum + item.images, 0);
+    if (imagesNow > 0) {
+      await sleep(2200);
+      const confirm = await chatGptScanOnce();
+      const imagesConfirm = confirm.reduce((sum, item) => sum + item.images, 0);
+      if (imagesConfirm === imagesNow) return confirm;
+      last = confirm;
+      continue;
+    }
+    const hasNodes = await chatGptGenEvaluate(
+      `Boolean(document.querySelector('[class*="group/user-message"], [data-testid="generated-image-preview"], [data-message-author-role], article'))`,
+    ).catch(() => false);
+    // Markers dikh rahe hain par images abhi render nahi hui — thoda aur wait karo.
+    if (hasNodes && last.length) {
+      await sleep(1500);
+      continue;
+    }
+    await sleep(1000);
+  }
+  return last;
+}
+
+// Ek baar scan (merge ke saath).
+async function chatGptScanOnce() {
+  const raw = await chatGptGenEvaluate(CHATGPT_BEAT_SCAN_SCRIPT).catch(() => '');
+  const map = new Map();
+  if (!raw || typeof raw !== 'string') return [];
+  try {
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    for (const item of list) {
+      const beat = Number(item?.beat);
+      if (!(beat > 0)) continue;
+      const previous = map.get(beat);
+      if (previous) {
+        previous.images += Number(item.images) || 0;
+        previous.total = previous.total || Number(item.total) || 0;
+        if (!previous.src && item.src) previous.src = String(item.src);
+      } else {
+        map.set(beat, {
+          beat,
+          total: Number(item.total) || 0,
+          images: Number(item.images) || 0,
+          src: String(item.src || ''),
+        });
+      }
+    }
+  } catch {
+    return [];
+  }
+  return [...map.values()].sort((a, b) => a.beat - b.beat);
+}
+
+// blob:/data: image bytes page ke andar se hi nikaalo (Node blob fetch nahi kar sakta).
+async function captureChatGptLocalImages(urls) {
+  const localUrls = (urls || []).filter((u) => u.startsWith('blob:') || u.startsWith('data:'));
+  const images = [];
+  if (!localUrls.length) return images;
+  const meta = await chatGptGenEvaluate(CHATGPT_IMAGE_CAPTURE_SCRIPT(localUrls)).catch(() => '');
+  if (!meta || String(meta).startsWith('ERROR:')) return images;
+  let list = [];
+  try {
+    list = JSON.parse(meta);
+  } catch {
+    return images;
+  }
+  for (let index = 0; index < list.length; index += 1) {
+    const parts = [];
+    for (let offset = 0; offset < list[index].length; offset += CHATGPT_CHUNK_BYTES) {
+      const chunk = await chatGptGenEvaluate(
+        CHATGPT_IMAGE_CHUNK_SCRIPT(index, offset, CHATGPT_CHUNK_BYTES),
+      ).catch((err) => { console.log(`[chatgpt] chunk ${index}@${offset} error: ${err?.message || err}`); return ''; });
+      if (!chunk) break;
+      const part = Buffer.from(chunk, 'base64');
+      if (!part.length) break;
+      parts.push(part);
+    }
+    if (parts.length) {
+      const bytes = Buffer.concat(parts);
+      console.log(`[chatgpt] image ${index} bytes=${bytes.length}/${list[index].length}`);
+      if (validImageBytes(bytes)) images.push(bytes);
+    }
+  }
+  return images;
+}
+
+// http(s) image — Node se cookie ke saath download.
+async function downloadChatGptRemoteImages(urls, header) {
+  const remoteUrls = (urls || []).filter((u) => /^https?:/i.test(u));
+  if (!remoteUrls.length) return [];
+  const settled = await Promise.allSettled(
+    remoteUrls.map((imageUrl) =>
+      fetch(imageUrl, {
+        headers: { 'user-agent': UA, ...(header ? { cookie: header } : {}) },
+        signal: AbortSignal.timeout(60_000),
+      }).then(async (response) => {
+        if (!response.ok) throw new Error(`ChatGPT image download failed (${response.status}).`);
+        return Buffer.from(await response.arrayBuffer());
+      }),
+    ),
+  );
+  const images = [];
+  for (const item of settled) {
+    if (item.status === 'fulfilled' && validImageBytes(item.value)) images.push(item.value);
+  }
+  return images;
+}
+
+// Job me ChatGPT progress likho — kitni images bani, kaun si lines baki.
+async function updateChatGptJobProgress(job, beats = [], total = 0) {
+  if (!job) return;
+  const doneSet = new Set(Array.isArray(job.chatGptDoneBeats) ? job.chatGptDoneBeats : []);
+  for (const beat of beats) {
+    if (Number(beat?.images || 0) > 0) doneSet.add(Number(beat.beat));
+  }
+  const doneList = [...doneSet].filter((n) => Number.isInteger(n) && n > 0).sort((a, b) => a - b);
+  const totalBeats = Math.max(Number(total) || 0, Number(job.chatGptImagesTotal) || 0, doneList.length);
+  const pending = [];
+  for (let index = 1; index <= totalBeats; index += 1) {
+    if (!doneList.includes(index)) pending.push(index);
+  }
+  await updateMediaJob(job, {
+    chatGptDoneBeats: doneList,
+    chatGptImagesDone: doneList.length,
+    chatGptImagesTotal: totalBeats,
+    chatGptPendingBeats: pending,
+  });
+}
+
+async function markChatGptBeatDone(job, beatNo, total = 0) {
+  if (!job || !beatNo) return;
+  const doneSet = new Set(Array.isArray(job.chatGptDoneBeats) ? job.chatGptDoneBeats : []);
+  doneSet.add(Number(beatNo));
+  const doneList = [...doneSet].sort((a, b) => a - b);
+  const totalBeats = Math.max(Number(total) || 0, Number(job.chatGptImagesTotal) || 0, doneList.length);
+  const pending = [];
+  for (let index = 1; index <= totalBeats; index += 1) {
+    if (!doneList.includes(index)) pending.push(index);
+  }
+  await updateMediaJob(job, {
+    chatGptDoneBeats: doneList,
+    chatGptImagesDone: doneList.length,
+    chatGptImagesTotal: totalBeats,
+    chatGptPendingBeats: pending,
+  });
+}
+
 // ChatGPT conversation rename — backend API (access token chahiye).
 const CHATGPT_RENAME_SCRIPT = (chatId, title) => `(async () => {
   try {
@@ -4722,11 +5226,11 @@ async function ensureChatGptChat(state) {
   await sleep(800);
   await chatGptGenEvaluate(CHATGPT_SEND_SCRIPT);
   const chatId = await waitForPageValue(
-    `(() => (location.pathname.match(/\\/c\\/([a-z0-9-]+)/i) || [])[1] || '')`,
+    CHATGPT_CHAT_ID_EXPR,
     90_000,
     chatGptGenEvaluate,
   );
-  if (!chatId) return null;
+  if (!chatId || typeof chatId !== 'string') return null;
   await sleep(2500);
   const renamed = await chatGptGenEvaluate(CHATGPT_RENAME_SCRIPT(chatId, CHATGPT_CHAT_TITLE)).catch(() => '');
   if (renamed !== 'ok') {
@@ -4827,47 +5331,112 @@ async function syncChatGptLogin() {
   };
 }
 
-async function generateChatGptImages(prompt, count = 1) {
+async function generateChatGptImages(prompt, count = 1, options = {}) {
   const state = await loadChatGptState();
   if (!state.configured || !state.cookies?.length) {
     throw new Error('ChatGPT login nahi hai — pehle “Login with ChatGPT” dabao.');
   }
   const wanted = Math.max(1, Math.min(12, Math.round(Number(count) || 1)));
+  // Job ke saath aaya ho to us story ka APNA ChatGPT chat use hoga.
+  const job = options.job && typeof options.job === 'object' ? options.job : null;
+  const jobMode = Boolean(job);
+  const beatIndex = Number.isInteger(Number(options.beatIndex)) ? Number(options.beatIndex) : null;
+  const beatTotal = Math.max(0, Number(options.beatTotal) || 0);
   return withChatGptLock(async () => {
     await ensureChatGptBrowser();
-    let chatId = state.chatId || null;
-    if (!chatId) {
+    // --- Chat id decide karo -------------------------------------------------
+    let projectId = state.projectId || null;
+    if (!projectId) {
+      projectId = await ensureChatGptProject().catch(() => null);
+      if (projectId) {
+        state.projectId = projectId;
+        await saveChatGptState(state);
+      }
+    }
+    let chatId = jobMode ? (job.chatGptChatId || null) : (state.chatId || null);
+    if (!jobMode && !chatId) {
       chatId = await ensureChatGptChat(state);
       if (chatId) {
         state.chatId = chatId;
         await saveChatGptState(state);
       }
     }
-    const projectId = state.projectId || null;
-    const url = chatId
-      ? (projectId ? `https://chatgpt.com/g/${projectId}/c/${chatId}` : `https://chatgpt.com/c/${chatId}`)
-      : 'https://chatgpt.com/';
+    const chatTitle = jobMode
+      ? (job.chatGptChatTitle || chatGptJobTitle(job))
+      : CHATGPT_CHAT_TITLE;
+    const chatUrl = chatId
+      ? chatGptJobChatUrl(projectId, chatId)
+      : (projectId ? `https://chatgpt.com/g/${projectId}` : 'https://chatgpt.com/');
     // SIRF EK TAB — naya tab kabhi nahi khulna chahiye.
-    const target = await chatGptGenTarget(url);
-    if (chatId) {
-      // Tab sach me NOVA-AI chat par hai ya nahi — verify karo, warna prompt
-      // homepage par chala jata aur image wahi chat me banti (project switch bug).
-      const onChat = await chatGptEnsureChatUrl(target, url, chatId);
-      if (!onChat) throw new Error('NOVA-AI chat tab nahi khula — ChatGPT login dobara check karein.');
+    const target = await chatGptGenTarget(chatUrl);
+    // Tab ko isi chat par le jao, warna prompt galat conversation me chala jata hai.
+    if (jobMode && !chatId) {
+      // Naya story chat — pehle project home + reload (purana conversation inherit na ho).
+      const fresh = await chatGptStartFreshChat(target, chatUrl);
+      if (!fresh.ready) throw new Error('ChatGPT naya chat nahi khul paaya — login dobara check karein.');
+      if (fresh.stale > 0) {
+        // Fir bhi purane messages dikh rahe hain — ek aur reload.
+        await cdpCommand(target.webSocketDebuggerUrl, 'Page.reload', {}).catch(() => {});
+        await sleep(3000);
+        await chatGptWaitReady();
+      }
+    } else {
+      const onChat = await chatGptNavigateTo(target, chatUrl, chatId, false);
+      if (chatId && !onChat) throw new Error('ChatGPT chat tab nahi khula — login dobara check karein.');
     }
     const ready = await chatGptWaitReady();
     if (!ready) throw new Error('ChatGPT composer nahi mila — login dobara check karein.');
     const header = chatGptCookieHeader(state.cookies);
+    // --- Resume: chat me pehle se kitni images bani hain ---------------------
+    let beats = [];
+    if (chatId) {
+      beats = await chatGptScanBeats();
+      if (jobMode) await updateChatGptJobProgress(job, beats, beatTotal);
+    }
     const images = [];
+    const rounds = jobMode ? 1 : wanted;
     // Ek ek karke: pehle prompt → image → download → phir next prompt.
-    for (let round = 0; round < wanted && images.length < wanted; round += 1) {
+    for (let round = 0; round < rounds && images.length < rounds; round += 1) {
+      const beatNo = jobMode && beatIndex !== null ? beatIndex + 1 : 0;
+      // Resume: is beat ki image chat me pehle se bani hai? Uthi hui image uthao.
+      if (beatNo) {
+        const entry = beats.find((item) => Number(item.beat) === beatNo && Number(item.images || 0) > 0);
+        if (entry?.src) {
+          const reused = await captureChatGptLocalImages([entry.src]);
+          if (reused.length) {
+            images.push(reused[0]);
+            await markChatGptBeatDone(job, beatNo, beatTotal);
+            continue;
+          }
+          const remote = await downloadChatGptRemoteImages([entry.src], header);
+          if (remote.length) {
+            images.push(remote[0]);
+            await markChatGptBeatDone(job, beatNo, beatTotal);
+            continue;
+          }
+        }
+      }
       const before = await chatGptGenEvaluate(`(() => ${CHATGPT_IMAGE_URLS_EXPR})()`).catch(() => []);
+      const marker = beatNo ? `[${CHATGPT_BEAT_MARK} ${beatNo}/${beatTotal || beatNo}] ` : '';
       const message = wanted > 1
-        ? `Create image ${round + 1} of ${wanted} for this story. One single coherent cinematic frame — no collage, no panels, no grid, no text, no captions. Keep the same character and style in every image. Scene: ${prompt}`
-        : `Create one single image for this scene. One coherent cinematic frame, no collage, no panels, no text. Scene: ${prompt}`;
+        ? `${marker}Create image ${round + 1} of ${wanted} for this story. One single coherent cinematic frame — no collage, no panels, no grid, no text, no captions. Keep the same character and style in every image. Scene: ${prompt}`
+        : `${marker}Create one single image for this scene. One coherent cinematic frame, no collage, no panels, no text. Scene: ${prompt}`;
       await chatGptGenEvaluate(chatGptInsertScript(message));
       await sleep(900);
       await chatGptGenEvaluate(CHATGPT_SEND_SCRIPT);
+      // Naya chat abhi bana — uska id pakdo aur job me save karo (restart ke baad wahin jayenge).
+      if (jobMode && !chatId) {
+        const newChatId = await waitForPageValue(CHATGPT_CHAT_ID_EXPR, 45_000, chatGptGenEvaluate);
+        if (newChatId) {
+          chatId = newChatId;
+          await updateMediaJob(job, {
+            chatGptChatId: chatId,
+            chatGptChatTitle: chatTitle,
+            chatGptChatUrl: chatGptJobChatUrl(projectId, chatId),
+          });
+          await chatGptGenEvaluate(CHATGPT_RENAME_SCRIPT(chatId, chatTitle)).catch(() => '');
+        }
+      }
       const freshScript = `(() => {
         const urls = ${CHATGPT_IMAGE_URLS_EXPR};
         const before = ${JSON.stringify(Array.isArray(before) ? before : [])};
@@ -4931,10 +5500,539 @@ async function generateChatGptImages(prompt, count = 1) {
         throw new Error('ChatGPT image bytes nahi mile — page reload ho gaya, dobara try karein.');
       }
       images.push(...freshImages);
+      if (beatNo) await markChatGptBeatDone(job, beatNo, beatTotal);
+      // Chat id ab pakka mil gaya hoga (response save ho chuka hai) — save + rename.
+      if (jobMode && !chatId) {
+        const newChatId = await waitForPageValue(CHATGPT_CHAT_ID_EXPR, 45_000, chatGptGenEvaluate);
+        if (newChatId) {
+          chatId = newChatId;
+          await updateMediaJob(job, {
+            chatGptChatId: chatId,
+            chatGptChatTitle: chatTitle,
+            chatGptChatUrl: chatGptJobChatUrl(projectId, chatId),
+          });
+          await chatGptGenEvaluate(CHATGPT_RENAME_SCRIPT(chatId, chatTitle)).catch(() => '');
+        }
+      }
     }
     await closeExtraChatGptTabs(target.id);
     return images.slice(0, wanted);
   });
+}
+
+/* ---------------------- Arena.ai free image + video arena ---------------------
+ * Arena.ai ka web arena (image + video) free hai — login ke baad daily free
+ * credits milte hain, koi paid subscription nahi. Arena ka official API sirf
+ * text-chat deta hai, image/video nahi — isliye logged-in web app ko visible
+ * Chrome profile se chalate hain (bilkul ChatGPT provider jaisa).
+ */
+
+const ARENA_CDP_PORT = Number(process.env.ARENA_CDP_PORT || 9226);
+const ARENA_BROWSER_PROFILE = path.join(WORKSPACE, '.arena-profile');
+const ARENA_IMAGE_URL = 'https://arena.ai/image';
+const ARENA_VIDEO_URL = 'https://arena.ai/video';
+const ARENA_LOGIN_URL = 'https://arena.ai/image';
+let arenaActiveTarget = null;
+// Login state cache — server start par browser na khule, sirf user action pe check hota hai.
+let arenaState = { loggedIn: false, email: '', name: '', checkedAt: 0 };
+
+async function arenaCdpAvailable() {
+  try {
+    const response = await fetch(`http://127.0.0.1:${ARENA_CDP_PORT}/json/version`, {
+      signal: AbortSignal.timeout(1200),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Arena login ke liye apna alag visible Chrome profile — ChatGPT/Bing profile se alag.
+async function ensureArenaBrowser(openUrl = ARENA_IMAGE_URL) {
+  if (!(await arenaCdpAvailable())) {
+    const executable = await findBrowserExecutable();
+    if (!executable) throw new Error('Chrome or Edge was not found on this PC.');
+    await mkdir(ARENA_BROWSER_PROFILE, { recursive: true });
+    for (const lock of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+      await rm(path.join(ARENA_BROWSER_PROFILE, lock), { force: true }).catch(() => {});
+    }
+    const child = spawn(
+      executable,
+      [
+        `--remote-debugging-port=${ARENA_CDP_PORT}`,
+        `--user-data-dir=${ARENA_BROWSER_PROFILE}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-session-crashed-bubble',
+        '--hide-crash-restore-bubble',
+        '--window-size=1500,950',
+        '--window-position=0,0',
+        openUrl,
+      ],
+      { detached: true, stdio: 'ignore', windowsHide: false },
+    );
+    child.unref();
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await sleep(400);
+      if (await arenaCdpAvailable()) break;
+    }
+    if (!(await arenaCdpAvailable())) {
+      throw new Error('Arena browser start hua par debugging port nahi khula.');
+    }
+  }
+  // Profile lock hataye bina naya tab mat kholo — ek hi tab reuse hoga.
+  const response = await fetch(`http://127.0.0.1:${ARENA_CDP_PORT}/json/list`, {
+    signal: AbortSignal.timeout(8000),
+  });
+  const targets = await response.json();
+  const pages = targets.filter((item) => item.type === 'page');
+  const existing = pages.find((item) => item.url.includes('arena.ai'));
+  if (existing) {
+    arenaActiveTarget = existing;
+    if (openUrl && !String(existing.url || '').includes(String(openUrl).replace(/^https:\/\/arena\.ai/, ''))) {
+      // Same page par chalo — naya tab nahi.
+      await cdpCommand(existing.webSocketDebuggerUrl, 'Page.navigate', { url: openUrl }).catch(() => {});
+    }
+    return existing;
+  }
+  try {
+    const created = await fetch(`http://127.0.0.1:${ARENA_CDP_PORT}/json/new?${encodeURIComponent(openUrl)}`, {
+      method: 'PUT',
+      signal: AbortSignal.timeout(8000),
+    });
+    if (created.ok) {
+      arenaActiveTarget = await created.json();
+      return arenaActiveTarget;
+    }
+  } catch {
+    /* fall through */
+  }
+  if (pages[0]) {
+    arenaActiveTarget = pages[0];
+    await cdpCommand(pages[0].webSocketDebuggerUrl, 'Page.navigate', { url: openUrl }).catch(() => {});
+    return pages[0];
+  }
+  throw new Error('Arena browser me page nahi mila.');
+}
+
+async function arenaGenTarget(openUrl = '') {
+  return ensureArenaBrowser(openUrl || ARENA_IMAGE_URL);
+}
+
+async function arenaEvaluate(expression) {
+  let target = arenaActiveTarget;
+  if (!target) target = await arenaGenTarget();
+  try {
+    const list = await (await fetch(`http://127.0.0.1:${ARENA_CDP_PORT}/json/list`, {
+      signal: AbortSignal.timeout(5000),
+    })).json();
+    const alive = list.find((item) => item.id === target.id && item.type === 'page');
+    if (alive) target = alive;
+    else {
+      arenaActiveTarget = null;
+      target = await arenaGenTarget();
+    }
+  } catch {
+    /* list fail — current target hi use karo */
+  }
+  const result = await cdpCommand(target.webSocketDebuggerUrl, 'Runtime.evaluate', {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.exception?.description || 'Arena page script failed.');
+  }
+  const remote = result.result || {};
+  if (remote.type === 'function' || remote.type === 'symbol') {
+    throw new Error('Arena page script did not run (missing invocation).');
+  }
+  return remote.value;
+}
+
+// Arena login check — same-origin /api/me (cookies ke saath).
+async function arenaLoginStatus() {
+  await ensureArenaBrowser(ARENA_IMAGE_URL);
+  const raw = await arenaEvaluate(`(async () => {
+    try {
+      const res = await fetch('/api/me', { credentials: 'include', headers: { accept: 'application/json' } });
+      if (!res.ok) return JSON.stringify({ loggedIn: false, status: res.status });
+      const data = await res.json().catch(() => ({}));
+      const user = data?.user || data;
+      return JSON.stringify({
+        loggedIn: Boolean(user && (user.id || user.email)),
+        email: user?.email || '',
+        name: user?.name || user?.displayName || '',
+      });
+    } catch (e) {
+      return JSON.stringify({ loggedIn: false, error: String(e) });
+    }
+  })()`).catch(() => '');
+  if (!raw || typeof raw !== 'string') return { loggedIn: false, email: '', name: '' };
+  try {
+    const parsed = JSON.parse(raw);
+    const state = {
+      loggedIn: Boolean(parsed.loggedIn),
+      email: String(parsed.email || ''),
+      name: String(parsed.name || ''),
+      status: parsed.status || 0,
+      checkedAt: Date.now(),
+    };
+    arenaState = state;
+    return state;
+  } catch {
+    return { loggedIn: false, email: '', name: '' };
+  }
+}
+
+// Cached login state (browser launch nahi karta).
+function arenaCachedStatus() {
+  return {
+    loggedIn: Boolean(arenaState.loggedIn),
+    email: String(arenaState.email || ''),
+    name: String(arenaState.name || ''),
+    checkedAt: Number(arenaState.checkedAt || 0),
+  };
+}
+
+// Arena login — visible Chrome khul kar user login kare, phir session save.
+async function arenaLoginFlow(waitMs = 180_000) {
+  await ensureArenaBrowser(ARENA_LOGIN_URL);
+  await sleep(2500);
+  // "Log In" button daba do — sign-in popup khul jayega (Google/email).
+  await arenaEvaluate(`(() => {
+    const button = [...document.querySelectorAll('button, a')].find((el) => {
+      const text = (el.innerText || '').trim().toLowerCase();
+      return /^(log ?in|sign ?in)$/.test(text);
+    });
+    if (button) button.click();
+    return Boolean(button);
+  })()`).catch(() => false);
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await sleep(3000);
+    const status = await arenaLoginStatus().catch(() => ({ loggedIn: false }));
+    if (status.loggedIn) {
+      // Login ke baad image arena khol do — agli generation ready rahe.
+      await ensureArenaBrowser(ARENA_IMAGE_URL);
+      return status;
+    }
+  }
+  throw new Error('Arena.ai login complete nahi hua — Chrome me sign-in karke dobara try karein.');
+}
+
+// Arena page ready — composer ya login wall dikhna chahiye.
+async function arenaWaitReady(timeoutMs = 60_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const state = await arenaEvaluate(`(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 120 || r.height < 22) return false;
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const box = [...document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"], input[type="text"]')]
+        .find(visible);
+      const text = (document.body.textContent || '');
+      const needsLogin = /log ?in|sign ?in|sign up/i.test(text.slice(0, 4000));
+      return JSON.stringify({ hasBox: Boolean(box), needsLogin, url: location.href, title: document.title });
+    })()`).catch(() => '');
+    if (state) {
+      try {
+        const parsed = JSON.parse(state);
+        if (parsed.hasBox) return { ready: true, needsLogin: false, url: parsed.url };
+        if (parsed.needsLogin) return { ready: false, needsLogin: true, url: parsed.url };
+      } catch {
+        /* ignore */
+      }
+    }
+    await sleep(1000);
+  }
+  return { ready: false, needsLogin: false, url: '' };
+}
+
+// Composer (prompt box) dhoondho — arena ka UI change hota rehta hai, isliye
+// generic selectors try karte hain.
+const ARENA_COMPOSER_SCRIPT = `(() => {
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 120 || r.height < 22) return false;
+    if (el.disabled || el.readOnly) return false;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    return true;
+  };
+  const all = [
+    ...document.querySelectorAll('textarea'),
+    ...document.querySelectorAll('[contenteditable="true"]'),
+    ...document.querySelectorAll('[role="textbox"]'),
+    ...document.querySelectorAll('input[type="text"]'),
+  ].filter(visible);
+  if (!all.length) return JSON.stringify({ found: false });
+  // Sabse bada box = composer (suggestion list chhoti hoti hai).
+  all.sort((a, b) => {
+    const ra = a.getBoundingClientRect();
+    const rb = b.getBoundingClientRect();
+    return (rb.width * rb.height) - (ra.width * ra.height);
+  });
+  const el = all[0];
+  const r = el.getBoundingClientRect();
+  el.setAttribute('data-nova-arena-box', '1');
+  return JSON.stringify({
+    found: true,
+    tag: el.tagName.toLowerCase(),
+    editable: el.isContentEditable,
+    y: Math.round(r.y),
+    visible: true,
+  });
+})()`;
+
+// Prompt type karo (React-compatible) aur submit button dhoondho.
+const ARENA_TYPE_SCRIPT = (prompt) => `(() => {
+  const el = document.querySelector('[data-nova-arena-box]')
+    || document.querySelector('textarea, [contenteditable="true"], [role="textbox"], input[type="text"]');
+  if (!el) return JSON.stringify({ ok: false, error: 'Prompt box nahi mila' });
+  const text = ${JSON.stringify(prompt)};
+  el.focus();
+  try {
+    if (el.isContentEditable) {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.execCommand('insertText', false, text);
+    } else {
+      const proto = el.tagName === 'TEXTAREA'
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+      setter.call(el, text);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: String(e) });
+  }
+  const value = el.isContentEditable ? (el.innerText || '') : (el.value || '');
+  return JSON.stringify({ ok: String(value || '').includes(text.slice(0, 40)), length: String(value || '').length });
+})()`;
+
+const ARENA_SUBMIT_SCRIPT = `(() => {
+  const box = document.querySelector('[data-nova-arena-box]');
+  const send = [...document.querySelectorAll('button')].find((b) => {
+    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+    const title = (b.getAttribute('title') || '').toLowerCase();
+    const testid = (b.getAttribute('data-testid') || '').toLowerCase();
+    const text = (b.innerText || '').trim().toLowerCase();
+    if (/send|submit|generate|run/.test(aria + ' ' + title + ' ' + testid)) return true;
+    if (b.type === 'submit' && box && b.closest('form') === box.closest('form')) return true;
+    if (/^(send|generate|submit)$/.test(text)) return true;
+    return false;
+  });
+  // Pehle Enter key (chat UI me Enter se submit hota hai).
+  if (box) {
+    for (const type of ['keydown', 'keypress', 'keyup']) {
+      box.dispatchEvent(new KeyboardEvent(type, {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+        bubbles: true, cancelable: true,
+      }));
+    }
+  }
+  return JSON.stringify({ sendFound: Boolean(send), pressedEnter: Boolean(box) });
+})()`;
+
+// Result images dhoondho (battle mode me 2 image aati hain).
+const ARENA_IMAGES_SCRIPT = `(() => {
+  const skip = /avatar|logo|icon|placeholder|sprite|favicon|emoji/i;
+  const out = [];
+  const seen = new Set();
+  const push = (src, w, h, kind) => {
+    if (!src || seen.has(src)) return;
+    if (skip.test(src)) return;
+    seen.add(src);
+    out.push({ src, w, h, kind });
+  };
+  for (const img of document.querySelectorAll('img')) {
+    const src = img.currentSrc || img.src || '';
+    const w = img.naturalWidth || Math.round(img.getBoundingClientRect().width);
+    const h = img.naturalHeight || Math.round(img.getBoundingClientRect().height);
+    if (w < 240 && h < 240) continue;
+    push(src, w, h, 'img');
+  }
+  for (const node of document.querySelectorAll('[data-testid*="image" i], [class*="generated" i], [class*="result" i]')) {
+    const img = node.querySelector('img');
+    if (img) push(img.currentSrc || img.src || '', img.naturalWidth || 0, img.naturalHeight || 0, 'testid');
+  }
+  return JSON.stringify(out);
+})()`;
+
+const ARENA_VIDEOS_SCRIPT = `(() => {
+  const out = [];
+  const seen = new Set();
+  for (const video of document.querySelectorAll('video')) {
+    const src = video.currentSrc || video.src || '';
+    const poster = video.getAttribute('poster') || '';
+    const sources = [...video.querySelectorAll('source')].map((s) => s.src || '');
+    const candidate = src || sources[0] || '';
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    out.push({ src: candidate, poster, duration: Number(video.duration) || 0, w: video.videoWidth || 0, h: video.videoHeight || 0 });
+  }
+  return JSON.stringify(out);
+})()`;
+
+// Bytes page se chunk me lo (blob:/data:/same-origin http sab supported).
+const ARENA_CAPTURE_SCRIPT = (urls) => `(async () => {
+  try {
+    const store = [];
+    for (const u of ${JSON.stringify(urls)}) {
+      try {
+        const res = await fetch(u, { credentials: 'include' });
+        if (!res.ok) continue;
+        const buf = new Uint8Array(await res.arrayBuffer());
+        if (!buf.length) continue;
+        store.push({ url: u, bytes: buf });
+      } catch (e) { /* expired blob ya cross-origin */ }
+    }
+    window.__novaArenaStore = store;
+    return JSON.stringify(store.map((s) => ({ url: s.url, length: s.bytes.length })));
+  } catch (e) {
+    return 'ERROR:' + String(e);
+  }
+})()`;
+
+const ARENA_CHUNK_SCRIPT = (index, offset, size) => `(() => {
+  const store = window.__novaArenaStore || [];
+  const item = store[${index}];
+  if (!item) return '';
+  const end = Math.min(item.bytes.length, ${offset} + ${size});
+  let bin = '';
+  for (let i = ${offset}; i < end; i += 8192) {
+    bin += String.fromCharCode.apply(null, item.bytes.subarray(i, Math.min(i + 8192, end)));
+  }
+  return btoa(bin);
+})()`;
+
+async function arenaFetchBytes(urls) {
+  const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+  if (!list.length) return [];
+  const meta = await arenaEvaluate(ARENA_CAPTURE_SCRIPT(list)).catch(() => '');
+  if (!meta || typeof meta !== 'string' || meta.startsWith('ERROR:')) return [];
+  let parsed = [];
+  try {
+    parsed = JSON.parse(meta);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (let index = 0; index < parsed.length; index += 1) {
+    const parts = [];
+    for (let offset = 0; offset < parsed[index].length; offset += CHATGPT_CHUNK_BYTES) {
+      const chunk = await arenaEvaluate(
+        ARENA_CHUNK_SCRIPT(index, offset, CHATGPT_CHUNK_BYTES),
+      ).catch(() => '');
+      if (!chunk) break;
+      const part = Buffer.from(chunk, 'base64');
+      if (!part.length) break;
+      parts.push(part);
+    }
+    if (parts.length) out.push(Buffer.concat(parts));
+  }
+  return out;
+}
+
+// Arena image generation — ek prompt, ek image (battle me 2 milte hain, pehli chalti hai).
+async function generateArenaImages(prompt, count = 1, options = {}) {
+  const text = String(prompt || '').trim();
+  if (!text) throw new Error('Arena image prompt khaali hai.');
+  const wanted = Math.max(1, Math.min(12, Math.round(Number(count) || 1)));
+  const status = await arenaLoginStatus();
+  if (!status.loggedIn) {
+    throw new Error('Arena.ai login nahi hai — pehle “Login with Arena.ai” dabayein.');
+  }
+  await ensureArenaBrowser(ARENA_IMAGE_URL);
+  const ready = await arenaWaitReady(60_000);
+  if (!ready.ready) {
+    throw new Error('Arena.ai prompt box nahi mila — login dobara check karein.');
+  }
+  // Composer dhundho + type karo.
+  const found = await arenaEvaluate(ARENA_COMPOSER_SCRIPT).catch(() => '');
+  if (!found || !String(found).includes('"found":true')) {
+    throw new Error('Arena.ai prompt box nahi mila — page reload karke dobara try karein.');
+  }
+  const typed = await arenaEvaluate(ARENA_TYPE_SCRIPT(text)).catch(() => '');
+  if (!typed || !String(typed).includes('"ok":true')) {
+    throw new Error('Arena.ai ne prompt accept nahi kiya.');
+  }
+  // Purani images note kar lo — nayi hi count karni hain.
+  const before = JSON.parse(await arenaEvaluate(ARENA_IMAGES_SCRIPT).catch(() => '[]') || '[]');
+  const beforeSrcs = new Set(before.map((item) => item.src));
+  await arenaEvaluate(ARENA_SUBMIT_SCRIPT).catch(() => '');
+  const deadline = Date.now() + 180_000;
+  let fresh = [];
+  while (Date.now() < deadline) {
+    await sleep(2500);
+    const list = JSON.parse(await arenaEvaluate(ARENA_IMAGES_SCRIPT).catch(() => '[]') || '[]');
+    fresh = list.filter((item) => !beforeSrcs.has(item.src));
+    if (fresh.length) {
+      await sleep(1200);
+      const confirm = JSON.parse(await arenaEvaluate(ARENA_IMAGES_SCRIPT).catch(() => '[]') || '[]');
+      fresh = confirm.filter((item) => !beforeSrcs.has(item.src));
+      if (fresh.length) break;
+    }
+  }
+  if (!fresh.length) {
+    throw new Error('Arena.ai ne image nahi di — daily limit check karein ya prompt badlein.');
+  }
+  const bytes = await arenaFetchBytes(fresh.map((item) => item.src));
+  const valid = bytes.filter((item) => validImageBytes(item));
+  if (!valid.length) throw new Error('Arena.ai image bytes download nahi hue — dobara try karein.');
+  return valid.slice(0, wanted);
+}
+
+// Arena video generation — free video arena (2 clips/day, generation slow).
+async function generateArenaVideos(prompt, options = {}) {
+  const text = String(prompt || '').trim();
+  if (!text) throw new Error('Arena video prompt khaali hai.');
+  const status = await arenaLoginStatus();
+  if (!status.loggedIn) {
+    throw new Error('Arena.ai login nahi hai — pehle “Login with Arena.ai” dabayein.');
+  }
+  await ensureArenaBrowser(ARENA_VIDEO_URL);
+  const ready = await arenaWaitReady(60_000);
+  if (!ready.ready) throw new Error('Arena.ai video prompt box nahi mila — login dobara check karein.');
+  const found = await arenaEvaluate(ARENA_COMPOSER_SCRIPT).catch(() => '');
+  if (!found || !String(found).includes('"found":true')) {
+    throw new Error('Arena.ai video prompt box nahi mila — page reload karke dobara try karein.');
+  }
+  const typed = await arenaEvaluate(ARENA_TYPE_SCRIPT(text)).catch(() => '');
+  if (!typed || !String(typed).includes('"ok":true')) {
+    throw new Error('Arena.ai ne video prompt accept nahi kiya.');
+  }
+  const before = JSON.parse(await arenaEvaluate(ARENA_VIDEOS_SCRIPT).catch(() => '[]') || '[]');
+  const beforeSrcs = new Set(before.map((item) => item.src));
+  await arenaEvaluate(ARENA_SUBMIT_SCRIPT).catch(() => '');
+  // Arena video generation 10 minute tak le sakta hai.
+  const deadline = Date.now() + 12 * 60_000;
+  let fresh = [];
+  while (Date.now() < deadline) {
+    await sleep(6000);
+    const list = JSON.parse(await arenaEvaluate(ARENA_VIDEOS_SCRIPT).catch(() => '[]') || '[]');
+    fresh = list.filter((item) => !beforeSrcs.has(item.src) && item.src);
+    if (fresh.length) {
+      await sleep(3000);
+      const confirm = JSON.parse(await arenaEvaluate(ARENA_VIDEOS_SCRIPT).catch(() => '[]') || '[]');
+      fresh = confirm.filter((item) => !beforeSrcs.has(item.src) && item.src);
+      if (fresh.length) break;
+    }
+  }
+  if (!fresh.length) throw new Error('Arena.ai ne video nahi di — daily limit (2/day) check karein.');
+  const bytes = await arenaFetchBytes(fresh.map((item) => item.src));
+  const clips = bytes.filter((item) => item.length > 20_000);
+  if (!clips.length) throw new Error('Arena.ai video bytes download nahi hue — dobara try karein.');
+  return clips;
 }
 
 async function bingCookiesFromBrowser(openTab = false) {
@@ -5510,15 +6608,24 @@ function mediaProviderState() {
             ? Boolean(cloudflareAccount && cloudflareToken)
             : item.id === 'stock'
               ? true
-              : Boolean(hfToken),
+              : item.id === 'chatgpt'
+                ? Boolean(chatgptSessionState.configured)
+                : item.id === 'arena'
+                  ? Boolean(arenaState.loggedIn)
+                  : Boolean(hfToken),
     })),
-    video: VIDEO_PROVIDERS.map((item) => ({ ...item, configured: true })),
+    video: VIDEO_PROVIDERS.map((item) => ({
+      ...item,
+      configured: item.id === 'arena' ? Boolean(arenaState.loggedIn) : true,
+    })),
     credentials: {
       bing: Boolean(BING_SUPPORTED || bingCookie),
       cloudflare: Boolean(cloudflareAccount && cloudflareToken),
       huggingface: Boolean(hfToken),
       geminiTts: Boolean(geminiToken),
       stock: true,
+      chatgpt: Boolean(chatgptSessionState.configured),
+      arena: Boolean(arenaState.loggedIn),
       imageWorker: imageWorkerConnected(),
     },
     imageWorker: imageWorkerConnected(),
@@ -7954,6 +9061,21 @@ async function assembleVideoWithFfmpeg(job, directory, options = {}) {
   if (!bin) throw new Error('FFmpeg available nahi hai — installer reinstall karein.');
   const scenes = (job.scenes || []).filter((scene) => scene.image || scene.video);
   if (!scenes.length) throw new Error('Video ke liye koi scene media nahi mila.');
+  // Render se pehle har scene file disk par honi chahiye — warna FFmpeg half render
+  // karke error de deta tha (missing scene-XX.png).
+  const missingScenes = [];
+  for (const scene of scenes) {
+    const source = scene.video || scene.image;
+    if (!source) continue;
+    const absolute = path.resolve(WORKSPACE, String(source).replace(/\\/g, '/'));
+    if (!pathInAllowedFolders(absolute)) throw new Error('Scene media allowed folder ke bahar hai.');
+    if (!(await fileExists(absolute))) missingScenes.push(path.basename(absolute));
+  }
+  if (missingScenes.length) {
+    const err = new Error(`Scene image missing (${missingScenes.join(', ')}) — images pehle complete karo.`);
+    err.code = 'SCENE_MEDIA_MISSING';
+    throw err;
+  }
 
   const portrait = job.ratio === '9:16';
   const width = portrait ? 720 : 1280;
@@ -8562,6 +9684,75 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/arena-status') {
+      // Cached status by default — browser tab na khule. refresh=1 se live check.
+      const refresh = new URL(req.url, 'http://localhost').searchParams.get('refresh') === '1';
+      if (refresh) {
+        try {
+          await arenaLoginStatus();
+        } catch {
+          /* cached value hi rahega */
+        }
+      }
+      const state = arenaCachedStatus();
+      return sendJson(res, 200, {
+        configured: state.loggedIn,
+        loggedIn: state.loggedIn,
+        email: state.email || null,
+        name: state.name || null,
+        checkedAt: state.checkedAt || null,
+        imageUrl: ARENA_IMAGE_URL,
+        videoUrl: ARENA_VIDEO_URL,
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/arena-login') {
+      if (!BING_SUPPORTED) {
+        return sendJson(res, 400, { error: 'Arena.ai login sirf local Windows PC par chalega.' });
+      }
+      try {
+        // Browser visible khul kar user login kare — background me wait karte hain.
+        const status = await arenaLoginFlow(180_000);
+        return sendJson(res, 200, { ok: true, loggedIn: true, email: status.email || null, name: status.name || null });
+      } catch (err) {
+        return sendJson(res, 502, { error: err.message || 'Arena.ai login nahi hua.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/chatgpt-open-chat') {
+      if (!BING_SUPPORTED) {
+        return sendJson(res, 400, { error: 'ChatGPT sirf local Windows PC par khul sakta hai.' });
+      }
+      let payload = {};
+      try {
+        payload = JSON.parse((await readBody(req)) || '{}');
+      } catch {
+        payload = {};
+      }
+      const chatId = String(payload.chatId || '').trim();
+      if (!chatId) return sendJson(res, 400, { error: 'Chat id missing.' });
+      try {
+        const state = await loadChatGptState();
+        const url = chatGptJobChatUrl(state.projectId || null, chatId);
+        // SIRF EK TAB — wahi ChatGPT tab usi chat par le jao.
+        const target = await chatGptGenTarget(url);
+        await chatGptNavigateTo(target, url, chatId);
+        await cdpCommand(target.webSocketDebuggerUrl, 'Page.bringToFront', {}).catch(() => {});
+        await closeExtraChatGptTabs(target.id);
+        return sendJson(res, 200, { ok: true, url });
+      } catch (err) {
+        return sendJson(res, 502, { error: err.message || 'ChatGPT chat nahi khul paaya.' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/app-exit') {
+      // App band ho raha hai — Nova ke apne Chrome browsers band kar do.
+      const result = await shutdownNovaBrowsers('app-exit');
+      sendJson(res, 200, { ok: true, ...result });
+      setTimeout(() => process.exit(0), 300);
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/sync-bing-login') {
       if (!BING_SUPPORTED) {
         return sendJson(res, 400, { error: 'Bing login sync sirf local Windows PC se chalega.' });
@@ -8945,7 +10136,7 @@ const server = http.createServer(async (req, res) => {
         let payload = {};
         try { payload = JSON.parse((await readBody(req)) || '{}'); } catch { payload = {}; }
         const provider = String(payload.imageProvider || '').trim();
-        const allowedProviders = ['bing', 'stock', 'cloudflare', 'huggingface', 'worker', 'auto'];
+        const allowedProviders = ['bing', 'stock', 'cloudflare', 'huggingface', 'worker', 'auto', 'chatgpt'];
         cancelledJobs.delete(job.id);
         await updateMediaJob(job, {
           status: 'assets',
@@ -8956,7 +10147,8 @@ const server = http.createServer(async (req, res) => {
           progress: Math.max(0, Math.min(90, Number(job.progress) || 0)),
           ...(allowedProviders.includes(provider) ? { imageProvider: provider } : {}),
         });
-        runMediaJob(job).catch(() => {});
+        if (job.assetsOnly) runStudioImageJob(job).catch(() => {});
+        else runMediaJob(job).catch(() => {});
         return sendJson(res, 200, job);
       }
 

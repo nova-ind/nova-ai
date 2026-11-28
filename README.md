@@ -63,6 +63,29 @@ https://nova-ai-9gbh.onrender.com/api/health
 
 > Render par Chrome/CDP browser profile nahi hota. Isliye `browser_open`, Bing Image Creator UI, Gmail/YouTube login jaise tools wahan kaam nahi karenge. Chat, web search, browser-side Hugging Face Flux images aur LTX video chalenge; Cloudflare Flux tab token ho to chalega. Pollinations intentionally disabled hai. In sab tools ke saath poori app chahiye to PC par `npm start` + Cloudflare Tunnel/ngrok use karein.
 
+### Apna domain: `nova-ai.infinityfree.io`
+
+Live app Render par hai: `https://nova-ai-9gbh.onrender.com`. Apne domain ko uspar lane ke do tarike:
+
+| Tarika | Kya hota hai | Kab use karein |
+| --- | --- | --- |
+| **A — InfinityFree 301 redirect** | `nova-ai.infinityfree.io` → Render app (browser ka address bar badal jayega) | InfinityFree free subdomain (recommended) |
+| **B — Render custom domain** | App Render par hi rehti hai, domain Render se attach (address bar same) | Apna khud ka domain (jaise `myapp.com`) |
+
+InfinityFree ke free hosting par sirf PHP + MySQL chalega (Node.js/npm nahi, API hosting ToS me
+banned) — isliye Nova app wahan host nahi ho sakti, sirf redirect ho sakti hai.
+
+**Option A (2 min):** InfinityFree control panel → File Manager → `htdocs` → ye 2 files upload karo:
+[`deploy/infinityfree/.htaccess`](deploy/infinityfree/.htaccess) aur
+[`deploy/infinityfree/index.php`](deploy/infinityfree/index.php).
+Ya control panel → **Redirects → Create Redirect** (`nova-ai.infinityfree.io/*` →
+`https://nova-ai-9gbh.onrender.com/*`, type **Permanent 301**).
+
+**Option B:** DNS me `CNAME nova → nova-ai-9gbh.onrender.com` (DNS-only, AAAA nahi), phir Render →
+Settings → Custom Domains → domain add karo. TLS certificate Render auto issue karta hai.
+
+Poori step-by-step: [`deploy/infinityfree/README.md`](deploy/infinityfree/README.md).
+
 ### GitHub Pages (sirf static landing page, optional)
 
 Agar browsing ke liye ek simple project page chahiye: **Settings → Pages → Deploy from a branch → main → /docs**.
@@ -122,7 +145,9 @@ OpenRouter / Groq / Ollama bhi chalega — bas `UPSTREAM_BASE_URL` badal do
 | **True video resume** | Har scene image banate hi disk par save ho jati hai. Video fail ya app restart ho to **"Resume from saved images"** same job ko wahin se aage chalata hai (10 images ban gayi hon to scene 11 se shuru) — naya job nahi banta, purani images dobara nahi banti. Visual beats aur line timing bhi save rehte hain. |
 | **Think** | Extended reasoning toggle; reasoning models par live "Thinking" panel |
 | **Search (DeepSearch)** | Real web search + neeche numbered sources |
-| **Imagine** | In-chat image generation — Bing Image Creator (best free), Cloudflare Flux, Hugging Face Flux. Pollinations disabled |
+| **Imagine** | In-chat image generation — ChatGPT Go (Nova-AI project chat), Arena.ai, Bing Image Creator (best free), Cloudflare Flux, Hugging Face Flux. Pollinations disabled |
+| **ChatGPT images — har story ka apna chat** | Studio → *Text to image* → provider `ChatGPT`. Har story ke liye Nova-AI project me **alag chat** banta hai (title `Nova Story · <id> · <summary>`), aur har prompt me `[NOVA-BEAT x/y]` marker jata hai. App restart ke baad wahi chat khol kar pata chalta hai kitni images bani aur kaun si lines baki hain — sirf missing beats banaye jate hain, bani hui images reuse hoti hain, aur kaam wahin se resume hota hai. Studio me “Open story chat” button se seedha us chat par jaa sakte ho. |
+| **Arena.ai (free, bina GPT ke)** | Studio → *Text to image* ya *Text to video* → provider `Arena.ai`, aur “Login with Arena.ai” dabayein (visible Chrome me Google/email sign-in, session Nova ke apne profile me save). Arena ka image + video arena free hai — roz daily credits milte hain, koi paid subscription nahi (Arena ka official API sirf text-chat deta hai, image/video nahi — isliye logged-in web app browser se chalate hain). Image arena me ek prompt par 2 alag models ki images aati hain; pehli image scene me lagti hai. Video arena me roz ~2 clips milte hain aur generation 10 minute tak le sakti hai. |
 | **Video Studio (next level)** | 15 minute tak long-form video, 20/30/50/60 scenes, movie-style zoom/pan + xfade transitions, song BPM/energy-zone analysis, lyrics-aligned captions aur FFmpeg final assembly. Storyboard (table + per-scene image prompts) diya ho to usi ke time/scenes follow hote hain. Agar sirf story/idea diya ho to app pehle poori story likhta hai, phir usi ko dhyan se padh kar har line ke liye 1 se 3 exact English image prompts banata hai — ek line me alag-alag cheezein/actions hon to har cheez ki alag image, warna ek hi image. Jitne visual beats, utni hi unique images; koi duplicate/collage nahi. Har image apni narration line ke andar ke exact time par dikhti hai. Movie/song look me images `cinematic film still, 35mm, dramatic lighting, depth of field` ke saath banti hain aur har image par slow zoom-in/zoom-out ya drone-jaisa lateral pan lagta hai, scene change par smooth xfade. Line natural length ki likhi jati hai; atempo sirf 0.9–1.1 ki chhoti correction tak limited hai, baaki samay `apad` se bharata hai — audio na fast na slow. `CHARACTER LOCK` diya ho to wahi pehchaan har image prompt me dohrati hai, isliye mukhy patr poore video me same rehte hain. Background music + scene-change FX mix hote hain. Optional: Gemini key ho to Google TTS, warna free Microsoft Edge neural Hindi voice (male/female/child). Chhote videos me optional LTX AI motion clips. |
 | **Free video model** | LTX-Video (open-source, GitHub/Hugging Face Space) — bina card/key ke short clips |
 | **Fun** | Grok jaisa witty/sarcastic personality |

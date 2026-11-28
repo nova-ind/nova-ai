@@ -126,7 +126,7 @@ $launcherExe = Join-Path $stagingDir 'Nova.exe'
 $launcherIcon = Join-Path $assetsDir 'nova.ico'
 $launcherLogo = (Join-Path $assetsDir 'nova-64.png') + ',NovaLogo.png'
 $launcherSource = Join-Path $srcDir 'NovaLauncher.cs'
-& $csc /nologo /target:winexe "/out:$launcherExe" "/win32icon:$launcherIcon" "/resource:$launcherLogo" $launcherSource /r:System.Windows.Forms.dll /r:System.Drawing.dll "/r:$wv2Core" "/r:$wv2WinForms"
+& $csc /nologo /target:winexe "/out:$launcherExe" "/win32icon:$launcherIcon" "/resource:$launcherLogo" $launcherSource /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Management.dll "/r:$wv2Core" "/r:$wv2WinForms"
 if ($LASTEXITCODE -ne 0) { throw 'Launcher compilation failed.' }
 
 Write-Host '[5/6] Building professional Windows installer...'

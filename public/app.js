@@ -112,9 +112,16 @@ const els = {
   studioThumbImage: $('studioThumbImage'),
   studioChatGptBtn: $('studioChatGptBtn'),
   studioChatGptLoginBtn: $('studioChatGptLoginBtn'),
+  studioArenaLoginBtn: $('studioArenaLoginBtn'),
+  studioArenaLabel: $('studioArenaLabel'),
+  studioArenaNote: $('studioArenaNote'),
+  studioImageProvider: $('studioImageProvider'),
+  studioVideoProvider: $('studioVideoProvider'),
   studioChatGptLabel: $('studioChatGptLabel'),
   studioChatGptNote: $('studioChatGptNote'),
   studioChatGptBadge: $('studioChatGptBadge'),
+  studioChatGptInfo: $('studioChatGptInfo'),
+  studioChatGptOpenBtn: $('studioChatGptOpenBtn'),
   studioVideoText: $('studioVideoText'),
   studioVideoDuration: $('studioVideoDuration'),
   studioVideoBtn: $('studioVideoBtn'),
@@ -3265,6 +3272,7 @@ function openStudio() {
   setupStudioPanelTabs();
   setupStudioTimeline();
   loadChatGptStatus();
+  loadArenaStatus();
   studioState.jobId = studioState.jobId || (mediaJobs.find((job) => job.studio)?.id || null);
   loadStudioCatalog();
   renderStudioAssets();
@@ -3775,6 +3783,15 @@ async function generateStudioVideoClip() {
     return;
   }
   const duration = Number(els.studioVideoDuration?.value) || 5;
+  const videoProvider = studioVideoProvider();
+  if (videoProvider === 'arena') {
+    const arena = await loadArenaStatus();
+    if (!arena?.loggedIn) {
+      toast('Pehle Arena.ai login karein — button dabao, Chrome me sign-in karo');
+      els.studioArenaLoginBtn?.focus();
+      return;
+    }
+  }
   if (els.studioVideoBtn) {
     els.studioVideoBtn.disabled = true;
     els.studioVideoBtn.textContent = 'Creating…';
@@ -3794,6 +3811,7 @@ async function generateStudioVideoClip() {
         style: /cartoon|anime|comic/.test(els.studioCategory?.value || '') ? 'cartoon' : 'cinematic',
         videoModel: settings.mediaModels.video,
         imageProvider: settings.imageProvider || DEFAULT_SETTINGS.imageProvider,
+        videoProvider,
         chatId: activeChat()?.id,
       }),
     });
@@ -3901,16 +3919,17 @@ async function loadChatGptStatus() {
     }
     if (els.studioChatGptNote) {
       els.studioChatGptNote.textContent = connected
-        ? `Connected${data.chatId ? ' · Nova-AI chat ready' : ''} — images isi account se bante hain.`
-        : 'ChatGPT account se images — Nova-AI chat me har image, character same.';
+        ? `Connected${data.chatId ? ' · Nova-AI project ready' : ''} — har story ka apna ChatGPT chat banta hai.`
+        : 'ChatGPT account se images — har story ka apna alag chat, character same.';
     }
     if (els.chatGptStatusText) {
       els.chatGptStatusText.textContent = connected
-        ? `Connected${data.user?.email ? ` · ${data.user.email}` : ''}${data.chatId ? ' · Nova-AI chat ready' : ''}. Ab images isi ChatGPT account se bante hain.`
-        : 'ChatGPT Go account se images — Nova ke apne Chrome profile me ek baar sign-in karein. Uske baad har image usi persistent “Nova-AI” chat me banti hai, character same rehta hai.';
+        ? `Connected${data.user?.email ? ` · ${data.user.email}` : ''}${data.chatId ? ' · Nova-AI project ready' : ''}. Har story ka apna ChatGPT chat banta hai — restart ke baad wahin se resume.`
+        : 'ChatGPT Go account se images — Nova ke apne Chrome profile me ek baar sign-in karein. Uske baad har story apne alag ChatGPT chat me images banati hai.';
     }
     // ChatGPT connected hai to images usi account se banein — default provider bhi wahi.
-    if (connected && settings.imageProvider !== 'chatgpt') {
+    // Arena.ai user ne khud chuna hai to usse force mat karo.
+    if (connected && settings.imageProvider !== 'chatgpt' && settings.imageProvider !== 'arena') {
       settings.imageProvider = 'chatgpt';
       saveSettings();
       if (els.imageProviderSelect) els.imageProviderSelect.value = 'chatgpt';
@@ -3932,7 +3951,7 @@ async function chatGptLogin() {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || 'ChatGPT sync nahi hua');
       await loadChatGptStatus();
-      toast('ChatGPT connected — images Nova-AI chat se aayengi');
+      toast('ChatGPT connected — har story apne chat me images banayegi');
       return;
     }
     const response = await fetch('/api/chatgpt-login', { method: 'POST' });
@@ -3961,6 +3980,60 @@ async function chatGptLogin() {
   }
 }
 
+// Arena.ai — free image + video arena. Login ek baar, phir daily free credits.
+async function loadArenaStatus(refresh = false) {
+  try {
+    const response = await fetch(`/api/arena-status${refresh ? '?refresh=1' : ''}`);
+    const data = await response.json().catch(() => ({}));
+    const connected = Boolean(data.loggedIn || data.configured);
+    if (els.studioArenaLoginBtn) {
+      els.studioArenaLoginBtn.classList.toggle('on', connected);
+      if (els.studioArenaLabel) {
+        els.studioArenaLabel.textContent = connected
+          ? `Arena.ai: ${data.email || data.name || 'connected'}`
+          : 'Login with Arena.ai';
+      }
+    }
+    if (els.studioArenaNote) {
+      els.studioArenaNote.textContent = connected
+        ? 'Arena.ai connected — image + video arena free daily credits se chalega (GPT ki zarurat nahi).'
+        : 'Arena.ai free hai — login ke baad image + video arena bina GPT ke chalega (daily free credits).';
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+async function arenaLogin() {
+  const button = els.studioArenaLoginBtn;
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch('/api/arena-login', { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Arena.ai login nahi hua');
+    await loadArenaStatus(true);
+    toast('Arena.ai connected — ab images + clips bina GPT ke ban sakte hain');
+  } catch (error) {
+    toast(error?.message || 'Arena.ai login nahi hua');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+// Studio pane me provider select — blank = global setting use karo.
+function studioImageProvider() {
+  const picked = String(els.studioImageProvider?.value || '').trim();
+  if (picked) return picked;
+  return settings.imageProvider || DEFAULT_SETTINGS.imageProvider;
+}
+
+function studioVideoProvider() {
+  const picked = String(els.studioVideoProvider?.value || '').trim();
+  if (picked) return picked;
+  return settings.videoProvider || 'ltx';
+}
+
 // Text to image: scene text se images banao — har image banate hi timeline me aa jayegi.
 async function generateStudioImages() {
   const text = String(els.studioImageText?.value || '').trim()
@@ -3973,6 +4046,15 @@ async function generateStudioImages() {
   }
   const countValue = String(els.studioImageCount?.value || 'auto');
   const count = countValue === 'auto' ? 0 : Number(countValue) || 0;
+  const provider = studioImageProvider();
+  if (provider === 'arena') {
+    const arena = await loadArenaStatus();
+    if (!arena?.loggedIn) {
+      toast('Pehle Arena.ai login karein — button dabao, Chrome me sign-in karo');
+      els.studioArenaLoginBtn?.focus();
+      return;
+    }
+  }
   if (els.studioImageBtn) {
     els.studioImageBtn.disabled = true;
     els.studioImageBtn.textContent = 'Creating…';
@@ -3995,7 +4077,7 @@ async function generateStudioImages() {
         storyAudioPath: studioState.storyAudio?.path || null,
         ratio: els.studioRatio?.value || '16:9',
         style: /cartoon|anime|comic/.test(els.studioCategory?.value || '') ? 'cartoon' : 'cinematic',
-        imageProvider: settings.imageProvider || DEFAULT_SETTINGS.imageProvider,
+        imageProvider: provider,
         imageModel: settings.mediaModels.image,
         voice: els.studioVoice?.value || 'auto',
         chatId: activeChat()?.id,
@@ -4058,7 +4140,7 @@ function studioPayload() {
     narration: els.studioNarration.checked,
     voice: voiceText,
     useAiVideo: false,
-    imageProvider: settings.imageProvider || DEFAULT_SETTINGS.imageProvider,
+    imageProvider: studioImageProvider(),
     imageModel: settings.mediaModels.image,
   };
 }
@@ -4112,6 +4194,54 @@ function studioStageLabel(stage, status) {
   if (status === 'error') return 'Paused · error';
   if (status === 'awaiting-render') return 'Waiting for render';
   return labels[stage] || 'Queued';
+}
+
+// ChatGPT chat info — har story ka apna chat, kitni images bani, kaun si lines baki.
+function renderStudioChatGptInfo(job) {
+  const row = els.studioChatGptInfo;
+  const text = els.studioChatGptInfoText || row?.querySelector('span');
+  const button = els.studioChatGptOpenBtn;
+  if (!row) return;
+  const chatId = job?.chatGptChatId || '';
+  const total = Number(job?.chatGptImagesTotal) || 0;
+  const done = Number(job?.chatGptImagesDone) || 0;
+  const pending = Array.isArray(job?.chatGptPendingBeats) ? job.chatGptPendingBeats : [];
+  if (!chatId && !total) {
+    row.hidden = true;
+    if (button) button.hidden = true;
+    return;
+  }
+  row.hidden = false;
+  if (button) button.hidden = !chatId;
+  if (text) {
+    const title = job?.chatGptChatTitle || 'Story chat';
+    const parts = [title];
+    if (total) parts.push(`${done}/${total} images`);
+    if (pending.length) parts.push(`baki: ${pending.join(', ')}`);
+    text.textContent = parts.join(' · ');
+  }
+}
+
+async function openStudioChatGptChat() {
+  const job = mediaJobs.find((item) => item.id === studioState.jobId)
+    || mediaJobs.find((item) => item.studio);
+  const chatId = job?.chatGptChatId || '';
+  if (!chatId) {
+    toast('Is story ka ChatGPT chat abhi bana nahi — pehle images banayein');
+    return;
+  }
+  try {
+    const response = await fetch('/api/chatgpt-open-chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'ChatGPT chat nahi khul paaya');
+    toast('ChatGPT chat khol diya — images wahi se check karo');
+  } catch (error) {
+    toast(error?.message || 'ChatGPT chat nahi khul paaya');
+  }
 }
 
 function renderStudioDashboard() {
@@ -4223,6 +4353,7 @@ function renderStudioDashboard() {
       }
     }
   }
+  renderStudioChatGptInfo(job);
 
   const stageOrder = ['story', 'assets', 'voice', 'render'];
   const stageIndex = Math.max(0, stageOrder.indexOf(job.stage || 'story'));
@@ -6642,6 +6773,8 @@ els.studioChatGptBtn?.addEventListener('click', chatGptLogin);
 els.studioChatGptLoginBtn?.addEventListener('click', chatGptLogin);
 els.studioRailChatGpt?.addEventListener('click', chatGptLogin);
 els.chatGptLoginBtn?.addEventListener('click', chatGptLogin);
+els.studioChatGptOpenBtn?.addEventListener('click', openStudioChatGptChat);
+els.studioArenaLoginBtn?.addEventListener('click', arenaLogin);
 els.studioMusicImport?.addEventListener('click', () => els.studioMusicFiles?.click());
 els.studioMusicFiles?.addEventListener('change', () => {
   importStudioMusic(els.studioMusicFiles.files);
