@@ -337,7 +337,16 @@
           <section class="panel-section studio-pane" data-pane="images">
             <div class="section-head"><span class="eyebrow">Text to image</span><span class="studio-pill" id="studioImageState">Ready</span></div>
             <textarea id="studioImageText" class="studio-textarea" rows="3" placeholder="Scene description — har line ka apna image banega…"></textarea>
-            <div class="tts-controls studio-3col">
+            <label class="mini-field studio-provider-field"><span>Image provider</span><select id="studioImageProvider">
+                <option value="" selected>Studio default</option>
+                <option value="chatgpt">ChatGPT · Nova-AI chat</option>
+                <option value="arena">Arena.ai · free</option>
+                <option value="bing">Bing Image Creator</option>
+                <option value="cloudflare">Cloudflare Flux</option>
+                <option value="huggingface">Hugging Face Flux</option>
+                <option value="stock">Free stock images</option>
+              </select></label>
+            <div class="tts-controls">
               <label class="mini-field"><span>Scenes</span><select id="studioImageCount">
                 <option value="auto" selected>Auto</option>
                 <option value="1">1</option>
@@ -352,15 +361,6 @@
                 <option value="10">10</option>
                 <option value="11">11</option>
                 <option value="12">12</option>
-              </select></label>
-              <label class="mini-field"><span>Provider</span><select id="studioImageProvider">
-                <option value="" selected>Studio default</option>
-                <option value="chatgpt">ChatGPT · Nova-AI chat</option>
-                <option value="arena">Arena.ai · free</option>
-                <option value="bing">Bing Image Creator</option>
-                <option value="cloudflare">Cloudflare Flux</option>
-                <option value="huggingface">Hugging Face Flux</option>
-                <option value="stock">Free stock images</option>
               </select></label>
               <button class="tts-btn" id="studioImageBtn" type="button">Generate images</button>
             </div>
@@ -439,21 +439,23 @@
           <section class="panel-section studio-pane" data-pane="motion">
             <div class="section-head"><span class="eyebrow">Text to video · Image Motion</span><span class="studio-pill" id="studioVideoState">Ready</span></div>
             <textarea id="studioVideoText" class="studio-textarea" rows="3" placeholder="Clip ka description — jaise 'car slow motion road pe drive karti hai'…"></textarea>
-            <div class="tts-controls studio-3col">
+            <label class="mini-field studio-provider-field"><span>Video provider</span><select id="studioVideoProvider">
+                <option value="" selected>Studio default</option>
+                <option value="arena">Arena.ai · free video</option>
+                <option value="ltx">LTX-Video · free</option>
+              </select></label>
+            <div class="tts-controls">
               <label class="mini-field"><span>Clip</span><select id="studioVideoDuration">
                 <option value="4">4 sec</option>
                 <option value="5" selected>5 sec</option>
                 <option value="8">8 sec</option>
               </select></label>
-              <label class="mini-field"><span>Provider</span><select id="studioVideoProvider">
-                <option value="" selected>Studio default</option>
-                <option value="arena">Arena.ai · free video</option>
-                <option value="ltx">LTX-Video · free</option>
-              </select></label>
               <button class="tts-btn" id="studioVideoBtn" type="button">Generate clip</button>
             </div>
             <div class="studio-media-list" id="studioVideoList"></div>
             <p class="help" id="studioVideoNote">Banayi clip turant timeline me clip ke roop me jud jaati hai.</p>
+            <button class="studio-login" id="studioArenaLoginBtnVideo" type="button"><span class="dot"></span><span id="studioArenaLabelVideo">Login with Arena.ai</span></button>
+            <p class="help" id="studioArenaNoteVideo">Arena.ai video arena free hai — roz ~2 clips, generation slow (10 min tak).</p>
           </section>
 
           <div class="render-dock">

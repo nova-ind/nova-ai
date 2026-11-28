@@ -2277,8 +2277,8 @@ video:-webkit-full-screen {
 .studio-agent span { margin-right: 6px; color: #fff; }
 .studio-agent:hover { border-color: #555a62; background: #16191d; }
 .tts-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; margin-top: 9px; }
-.tts-controls.studio-3col { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
-@media (max-width: 560px) { .tts-controls.studio-3col { grid-template-columns: minmax(0, 1fr) auto; } }
+.studio-provider-field { display: flex; flex-direction: column; gap: 6px; margin: 9px 0 0; color: #777a80; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.studio-provider-field select { width: 100%; padding: 8px 10px; border: 1px solid #26292e; border-radius: 9px; background: #101215; color: #e8e9eb; font-size: 12px; outline: none; }
 .tts-controls .mini-field { min-width: 0; }
 .tts-btn { height: 33px; padding: 0 12px; border: 1px solid #3a3e45; border-radius: 8px; background: #171a1e; color: #f0f1f3; font-size: 10.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: .18s ease; }
 .tts-btn:hover { border-color: #6a6f78; background: #20242a; }

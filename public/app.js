@@ -113,8 +113,11 @@ const els = {
   studioChatGptBtn: $('studioChatGptBtn'),
   studioChatGptLoginBtn: $('studioChatGptLoginBtn'),
   studioArenaLoginBtn: $('studioArenaLoginBtn'),
+  studioArenaLoginBtnVideo: $('studioArenaLoginBtnVideo'),
   studioArenaLabel: $('studioArenaLabel'),
+  studioArenaLabelVideo: $('studioArenaLabelVideo'),
   studioArenaNote: $('studioArenaNote'),
+  studioArenaNoteVideo: $('studioArenaNoteVideo'),
   studioImageProvider: $('studioImageProvider'),
   studioVideoProvider: $('studioVideoProvider'),
   studioChatGptLabel: $('studioChatGptLabel'),
@@ -3788,7 +3791,7 @@ async function generateStudioVideoClip() {
     const arena = await loadArenaStatus();
     if (!arena?.loggedIn) {
       toast('Pehle Arena.ai login karein — button dabao, Chrome me sign-in karo');
-      els.studioArenaLoginBtn?.focus();
+      els.studioArenaLoginBtnVideo?.focus();
       return;
     }
   }
@@ -3986,18 +3989,23 @@ async function loadArenaStatus(refresh = false) {
     const response = await fetch(`/api/arena-status${refresh ? '?refresh=1' : ''}`);
     const data = await response.json().catch(() => ({}));
     const connected = Boolean(data.loggedIn || data.configured);
-    if (els.studioArenaLoginBtn) {
-      els.studioArenaLoginBtn.classList.toggle('on', connected);
-      if (els.studioArenaLabel) {
-        els.studioArenaLabel.textContent = connected
-          ? `Arena.ai: ${data.email || data.name || 'connected'}`
-          : 'Login with Arena.ai';
-      }
+    const labelText = connected
+      ? `Arena.ai: ${data.email || data.name || 'connected'}`
+      : 'Login with Arena.ai';
+    for (const button of [els.studioArenaLoginBtn, els.studioArenaLoginBtnVideo]) {
+      button?.classList.toggle('on', connected);
     }
+    if (els.studioArenaLabel) els.studioArenaLabel.textContent = labelText;
+    if (els.studioArenaLabelVideo) els.studioArenaLabelVideo.textContent = labelText;
     if (els.studioArenaNote) {
       els.studioArenaNote.textContent = connected
         ? 'Arena.ai connected — image + video arena free daily credits se chalega (GPT ki zarurat nahi).'
         : 'Arena.ai free hai — login ke baad image + video arena bina GPT ke chalega (daily free credits).';
+    }
+    if (els.studioArenaNoteVideo) {
+      els.studioArenaNoteVideo.textContent = connected
+        ? 'Arena.ai connected — video arena se free clip banegi (roz ~2 clips, generation slow).'
+        : 'Arena.ai video arena free hai — roz ~2 clips, generation slow (10 min tak).';
     }
     return data;
   } catch {
@@ -4006,7 +4014,7 @@ async function loadArenaStatus(refresh = false) {
 }
 
 async function arenaLogin() {
-  const button = els.studioArenaLoginBtn;
+  const button = els.studioArenaLoginBtnVideo?.offsetParent ? els.studioArenaLoginBtnVideo : els.studioArenaLoginBtn;
   if (button) button.disabled = true;
   try {
     const response = await fetch('/api/arena-login', { method: 'POST' });
@@ -6775,6 +6783,7 @@ els.studioRailChatGpt?.addEventListener('click', chatGptLogin);
 els.chatGptLoginBtn?.addEventListener('click', chatGptLogin);
 els.studioChatGptOpenBtn?.addEventListener('click', openStudioChatGptChat);
 els.studioArenaLoginBtn?.addEventListener('click', arenaLogin);
+els.studioArenaLoginBtnVideo?.addEventListener('click', arenaLogin);
 els.studioMusicImport?.addEventListener('click', () => els.studioMusicFiles?.click());
 els.studioMusicFiles?.addEventListener('change', () => {
   importStudioMusic(els.studioMusicFiles.files);
