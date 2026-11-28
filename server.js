@@ -5734,8 +5734,13 @@ async function arenaWaitReady(timeoutMs = 60_000) {
       };
       const box = [...document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"], input[type="text"]')]
         .find(visible);
-      const text = (document.body.textContent || '');
-      const needsLogin = /log ?in|sign ?in|sign up/i.test(text.slice(0, 4000));
+      // Login wall — visible button/heading text se pakdo (script text se nahi).
+      const labels = [...document.querySelectorAll('button, a, h1, h2, h3, [role="dialog"]')]
+        .filter(visible)
+        .map((el) => (el.innerText || '').trim().split('\\n')[0])
+        .slice(0, 80)
+        .join(' | ');
+      const needsLogin = /\\b(log ?in|sign ?in|sign up|create account)\\b/i.test(labels);
       return JSON.stringify({ hasBox: Boolean(box), needsLogin, url: location.href, title: document.title });
     })()`).catch(() => '');
     if (state) {
@@ -5845,7 +5850,7 @@ const ARENA_SUBMIT_SCRIPT = `(() => {
 
 // Result images dhoondho (battle mode me 2 image aati hain).
 const ARENA_IMAGES_SCRIPT = `(() => {
-  const skip = /avatar|logo|icon|placeholder|sprite|favicon|emoji/i;
+  const skip = /avatar|logo|icon|placeholder|sprite|favicon|emoji|spinner|loading/i;
   const out = [];
   const seen = new Set();
   const push = (src, w, h, kind) => {
@@ -5860,10 +5865,30 @@ const ARENA_IMAGES_SCRIPT = `(() => {
     const h = img.naturalHeight || Math.round(img.getBoundingClientRect().height);
     if (w < 240 && h < 240) continue;
     push(src, w, h, 'img');
+    // Next.js image optimization srcset me bhi asli bytes hote hain.
+    const set = img.getAttribute('srcset') || '';
+    if (set) {
+      for (const part of set.split(',')) {
+        const url = (part.trim().split(/\s+/)[0] || '');
+        if (url) push(url, w, h, 'srcset');
+      }
+    }
   }
-  for (const node of document.querySelectorAll('[data-testid*="image" i], [class*="generated" i], [class*="result" i]')) {
+  for (const node of document.querySelectorAll('[data-testid*="image" i], [class*="generated" i], [class*="result" i], [class*="output" i]')) {
     const img = node.querySelector('img');
     if (img) push(img.currentSrc || img.src || '', img.naturalWidth || 0, img.naturalHeight || 0, 'testid');
+  }
+  // Kabhi-kabhi result CSS background-image me aata hai.
+  for (const node of document.querySelectorAll('div, section, figure, span')) {
+    const bg = getComputedStyle(node).backgroundImage;
+    if (!bg || bg === 'none') continue;
+    const match = /url\\(["']?([^"')]+)["']?\\)/.exec(bg);
+    if (!match) continue;
+    const url = match[1];
+    if (/^data:/.test(url)) continue;
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 200 || rect.height < 200) continue;
+    push(url, rect.width, rect.height, 'background');
   }
   return JSON.stringify(out);
 })()`;
